@@ -32,6 +32,7 @@ from _support import (
     dir_id,
     forced,
     is_socket,
+    listener_at,
     listing,
     mark_untouched,
     nest,
@@ -56,9 +57,10 @@ needs_thread_cwd = pytest.mark.skipif(
     not thread_cwd_usable(), reason="the system does not give a thread a cwd of its own here"
 )
 
-THREAD_NAME_MAX = WIDE_PATH_MAX if IS_APPLE else DIRECT_MAX
-"""The longest file name the thread-cwd route binds: what a sockaddr
-carries (the widened one on Apple, where the kernel takes it)."""
+THREAD_CONNECT_NAME_MAX = WIDE_PATH_MAX if IS_APPLE else DIRECT_MAX
+"""The longest file name the thread-cwd route connects to: what a sockaddr
+carries (the widened one on Apple, where the kernel takes it). A bind takes
+names up to DIRECT_MAX everywhere: it never uses the widened form."""
 
 
 # ----- the relative spelling -----
@@ -69,10 +71,17 @@ carries (the widened one on Apple, where the kernel takes it)."""
 # to the socket module), before anything else (on Apple, before the widened
 # form). Every check of a route (the socket at the given absolute path, data
 # both ways, blocking and nonblocking connects, close-on-exec, the peer is this
-# process, the cwd unchanged; a nonblocking connect fails at once on a full
-# backlog) is run on it, in a child whose cwd is the socket's ancestor. On
-# Apple the widened form with the relative spelling (a path over 253 bytes
-# whose relative spelling is at most 253) gets the same checks.
+# process, the cwd unchanged, every address fitting sun_path, asyncio serving
+# and cleaning up; a nonblocking connect fails at once on a full backlog) is
+# run on it, in a child whose cwd is the socket's ancestor.
+#
+# On Apple the connects also take the widened form with the relative spelling
+# (a path over 253 bytes whose relative spelling is over DIRECT_MAX and at
+# most 253) and get the same checks. The bind of that path does not: a bind
+# never takes the widened form (the spelling it leaves on the listener would
+# not fit sun_path). With the thread-cwd route off it is ENAMETOOLONG with
+# nothing created; with it on, the bind goes by the file name from the
+# thread-cwd route, which is how the listener for the connects is made.
 def test_a_path_short_relative_to_the_cwd_takes_the_relative_route(tmp: TmpDirs) -> None:
     t = tmp.new()
     args = {"PATH": nest_tail(t, DIRECT_MAX, b"rel.sock")}
@@ -261,23 +270,45 @@ def test_the_thread_cwd_route_binds_and_connects_from_this_process(tmp: TmpDirs)
 
 
 # The file name goes into a sockaddr of its own, so the thread-cwd route
-# reaches names up to what a sockaddr carries (DIRECT_MAX; on Apple 253 in the
-# widened form) whatever the directory, and one byte more is ENAMETOOLONG with
-# nothing created (no route left). On Apple with the widened form refused
-# (wide=False) the limit is DIRECT_MAX.
+# reaches names up to what a sockaddr carries, whatever the directory, and one
+# byte more is ENAMETOOLONG with nothing created (no route left):
+#
+# * a bind takes names up to DIRECT_MAX, on every system (Apple included: a
+#   bind never takes the widened form, whose address would not fit sun_path);
+# * a connect takes names up to DIRECT_MAX too, except on Apple, where it takes
+#   names up to 253 bytes in the widened form; with the widened form refused
+#   (wide=False) the limit there is DIRECT_MAX.
+#
+# Names of 6, 100 and DIRECT_MAX bytes are bound and connected to through the
+# route. On Apple names of DIRECT_MAX + 1, 200 and 253 bytes are ENAMETOOLONG
+# for the bind with nothing created, and a connect reaches a listener at such a
+# path (bound under a short name and renamed, the socket file being the same
+# inode) through the route.
 @needs_thread_cwd
 def test_the_thread_cwd_route_takes_names_up_to_what_a_sockaddr_carries(tmp: TmpDirs) -> None:
     t = tmp.new()
-    cases = [(posix_cfg(thread_cwd=True), THREAD_NAME_MAX)]
+    cases = [(posix_cfg(thread_cwd=True), THREAD_CONNECT_NAME_MAX)]
     if IS_APPLE:
         cases.append((posix_cfg(thread_cwd=True, wide=False), DIRECT_MAX))
     for i, (c, longest) in enumerate(cases):
-        for n in (6, 100, longest):
+        for n in (6, 100, DIRECT_MAX):
             p = nest(t, 600, (f"{i}" + "n" * (n - 1)).encode())
             listener, r = _route.run_long(BIND, p, c)
             with listener:
                 assert r is Route.THREAD_CWD, n
                 assert is_socket(p)
+                for req in (CONNECT, CONNECT_NONBLOCKING):
+                    client, r = _route.run_long(req, p, c)
+                    with client:
+                        assert r is Route.THREAD_CWD, (n, req)
+                        accept_ping(listener, client)
+        for n in [m for m in (DIRECT_MAX + 1, 200, WIDE_PATH_MAX) if m <= longest]:
+            p = nest(t, 600, (f"{i}" + "m" * (n - 1)).encode())
+            before = listing(parent(p))
+            with raises_errno(errno.ENAMETOOLONG):
+                _route.run_long(BIND, p, c)
+            assert listing(parent(p)) == before
+            with listener_at(p) as listener:
                 for req in (CONNECT, CONNECT_NONBLOCKING):
                     client, r = _route.run_long(req, p, c)
                     with client:

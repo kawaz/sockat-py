@@ -170,22 +170,30 @@ def test_paths_are_str_bytes_or_path_like(tmp: TmpDirs, total: int) -> None:
                 accept_ping(listener, client)
 
 
-# A file name of 254 bytes (NAME_MAX is 255) directly under a short directory.
+# A file name longer than the plain sockaddr carries (DIRECT_MAX + 1 bytes)
+# and one of 254 bytes (NAME_MAX is 255), directly under a short directory.
 #
 # * bind: every route that does not hand the whole path to the kernel ends with
 #   the file name in a sockaddr (Linux: behind "/proc/self/fd/N/", through the
-#   link to the directory, or as is from the thread-cwd route; macOS: at most
-#   253 bytes in the widened sockaddr; FreeBSD: bindat), so no bind route
-#   reaches it: ENAMETOOLONG, and nothing is created.
+#   link to the directory, or as is from the thread-cwd route; FreeBSD:
+#   bindat), and the bind never takes the widened sockaddr (macOS included:
+#   the address it would leave on the listener does not fit sun_path, and the
+#   socket module reads such an address past its end), so no bind route
+#   reaches a file name over DIRECT_MAX bytes: ENAMETOOLONG, and nothing is
+#   created. On macOS this is where the bind stops (a file name of 104
+#   bytes), well before the 253 bytes a connect reaches.
 # * connect: the link to the socket file is spelled without the file name, so
-#   the name's length does not matter. A socket bound under a short name and
-#   renamed to the long one is reached and talks; with nothing there the error
-#   is the kernel's ENOENT, not ENAMETOOLONG. FreeBSD takes bindat /
-#   connectat only, which carry the file name in a sockaddr: ENAMETOOLONG for
-#   the connect too.
-def test_a_file_name_of_254_bytes_cannot_be_bound_but_can_be_connected_to(tmp: TmpDirs) -> None:
+#   the name's length does not matter (on macOS the widened sockaddr carries
+#   the whole path too). A socket bound under a short name and renamed to the
+#   long one is reached and talks; with nothing there the error is the
+#   kernel's ENOENT, not ENAMETOOLONG. FreeBSD takes bindat / connectat only,
+#   which carry the file name in a sockaddr: ENAMETOOLONG for the connect too.
+@pytest.mark.parametrize("n", [DIRECT_MAX + 1, 254])
+def test_a_file_name_longer_than_a_sockaddr_carries_cannot_be_bound_but_can_be_connected_to(
+    tmp: TmpDirs, n: int
+) -> None:
     t = tmp.new()
-    p = t + b"/" + b"n" * 254
+    p = t + b"/" + b"n" * n
     with raises_errno(errno.ENAMETOOLONG):
         sockat.bind(p)
     assert listing(t) == []

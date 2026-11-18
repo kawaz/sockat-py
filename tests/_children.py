@@ -12,6 +12,7 @@ assertion exits non-zero, which fails the test.
 from __future__ import annotations
 
 import contextlib
+import errno
 import json
 import os
 import resource
@@ -31,13 +32,15 @@ from _support import (
     is_socket,
     nest,
     posix_cfg,
+    raises_errno,
+    routes,
     with_name,
 )
 
 import sockat
 from sockat import _route
 from sockat._route import BIND, CONNECT, Config, Route
-from sockat._sys import DIRECT_MAX
+from sockat._sys import DIRECT_MAX, WIDE_PATH_MAX
 
 
 def arg(key: str) -> bytes:
@@ -108,12 +111,23 @@ def relative_routes() -> None:
     """Every check of a forced route (:func:`_support.check_route`, and
     :func:`_support.check_full_backlog`) on the relative route, with PATH
     below the cwd so that its relative spelling fits the plain sockaddr; on
-    Apple also on the widened sockaddr with the relative spelling (WPATH,
-    whose relative spelling fits only the widened one)."""
+    Apple also, for the connects, on the widened sockaddr with the relative
+    spelling (WPATH, whose relative spelling fits only the widened one). A
+    bind never takes the widened form: WPATH is ENAMETOOLONG for the bind
+    with the thread-cwd route off, nothing created, and with it on the bind
+    goes by the file name from the thread-cwd route."""
     ways: list[Forced] = [forced("relative", arg("PATH"), posix_cfg(), Route.RELATIVE)]
     wpath = opt_arg("WPATH")
     if wpath is not None:
-        ways.append(forced("wide-relative", wpath, posix_cfg(), Route.WIDE_RELATIVE))
+        rel = _route.Relative.new(wpath, os.path.dirname(wpath))
+        assert rel is not None
+        assert DIRECT_MAX < len(rel.path) <= WIDE_PATH_MAX, rel
+        before = sorted(os.listdir(os.path.dirname(wpath)))
+        with raises_errno(errno.ENAMETOOLONG):
+            _route.run_long(BIND, wpath, posix_cfg())[0].close()
+        assert sorted(os.listdir(os.path.dirname(wpath))) == before
+        want = routes(Route.THREAD_CWD, Route.WIDE_RELATIVE)
+        ways.append(forced("wide-relative", wpath, posix_cfg(thread_cwd=True), want))
     for f in ways:
         check_route(f)
         if CHECKS_FULL_BACKLOG:

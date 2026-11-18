@@ -333,9 +333,12 @@ def test_a_path_far_from_the_cwd_goes_through_a_temporary_symlink(tmp: TmpDirs) 
 
 # The link to the socket file is spelled `<place>/sockat.XXXXXXXXXX` whatever
 # the file name, so a connect reaches a name too long for the link to the
-# directory (`<place>/sockat.XXXXXXXXXX/<name>` over DIRECT_MAX bytes; on Apple
-# also over 253 in the widened form), which no bind route reaches without the
-# thread-cwd route. The socket is made under a short name and renamed.
+# directory (`<place>/sockat.XXXXXXXXXX/<name>` over DIRECT_MAX bytes; a bind
+# never takes the widened form, Apple included), which no bind route reaches.
+# On Apple it is also run with the widened form on (a name of 240 bytes): the
+# bind is still ENAMETOOLONG, and the connect still takes the link to the file
+# in the plain sockaddr (the path, 600 bytes, is too long for the widened form
+# itself). The socket is made under a short name and renamed.
 def test_a_connect_reaches_a_file_name_too_long_for_the_link_to_the_directory(tmp: TmpDirs) -> None:
     t = tmp.new()
     base = tmp.new()

@@ -17,6 +17,7 @@ What every route test leans on:
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import errno
 import fcntl
@@ -356,9 +357,16 @@ def symlink_route(req: Request) -> Route:
     return Route.SYMLINK_TO_DIR if req.op is _sys.Op.BIND else Route.SYMLINK_TO_FILE
 
 
-def symlink_wide_route(req: Request) -> Route:
-    """:func:`symlink_route` in the widened sockaddr (Apple)."""
-    return Route.SYMLINK_TO_DIR_WIDE if req.op is _sys.Op.BIND else Route.SYMLINK_TO_FILE_WIDE
+def routes(bind: Route, connect: Route) -> Callable[[Request], Route]:
+    """The route a request takes where a bind and a connect go different
+    ways: ``bind`` for the bind, ``connect`` for both connects. On Apple a
+    connect may take the widened sockaddr and a bind never does, so a path
+    a connect reaches in the widened form is bound some other way."""
+
+    def want(req: Request) -> Route:
+        return bind if req.op is _sys.Op.BIND else connect
+
+    return want
 
 
 def assert_far_from_cwd(path: bytes) -> None:
@@ -421,9 +429,12 @@ def check_route(f: Forced, places: Sequence[bytes] = ()) -> None:
       connects from another process), on Linux and Apple;
     * the addresses the kernel reports (``getsockname`` / ``getpeername`` of
       the listener, the client and the accepted stream) can be read without
-      an error, whatever spelling the route bound;
+      an error, whatever spelling the route bound, and each fits ``sun_path``
+      with its NUL (:func:`assert_address_fits`);
     * the process cwd is the same afterwards, and nothing is left in
-      ``places`` (the places for the symlink).
+      ``places`` (the places for the symlink);
+    * the listener and both connects, handed to asyncio, serve and are
+      cleaned up (:func:`check_asyncio`).
 
     The socket file is removed at the end, so the path can be used again.
     """
@@ -436,19 +447,19 @@ def check_route(f: Forced, places: Sequence[bytes] = ()) -> None:
         assert isinstance(listener, socket.socket)
         assert listener.getblocking(), f"{f.what}: the listener is blocking, as the standard's"
         assert is_cloexec(listener), f"{f.what}: listener"
-        listener.getsockname()
+        assert_address_fits(f"{f.what}: the listener", listener.getsockname())
         for req, blocking in ((CONNECT, True), (CONNECT_NONBLOCKING, False)):
             client, r = f.way(req)
             with client:
                 assert r is f.want(req), f"{f.what}: {req} took {r}"
                 assert client.getblocking() is blocking, f"{f.what}: {req}"
                 assert is_cloexec(client), f"{f.what}: {req}"
-                client.getsockname()
-                client.getpeername()
+                assert_address_fits(f"{f.what}: {req} client", client.getsockname())
+                assert_address_fits(f"{f.what}: {req} client's peer", client.getpeername())
                 server, _ = listener.accept()
                 with server:
-                    server.getsockname()
-                    server.getpeername()
+                    assert_address_fits(f"{f.what}: {req} server", server.getsockname())
+                    assert_address_fits(f"{f.what}: {req} server's peer", server.getpeername())
                     assert peer_pid(server) in (me, None), f"{f.what}: {req}"
                     if not blocking:
                         try:
@@ -463,6 +474,75 @@ def check_route(f: Forced, places: Sequence[bytes] = ()) -> None:
     for p in places:
         assert_empty(p)
     os.unlink(f.path)
+    check_asyncio(f)
+    for p in places:
+        assert_empty(p)
+
+
+def assert_address_fits(what: str, addr: str | bytes) -> None:
+    """The address a socket reports (``getsockname`` / ``getpeername``) is at
+    most :data:`DIRECT_MAX` bytes: what the route bound fits ``sun_path``
+    with its NUL.
+
+    Why it must: the ``socket`` module of CPython reads a pathname address
+    on the systems other than Linux up to the first NUL in ``sun_path``, not
+    by the length the kernel returns. An address that fills ``sun_path`` with
+    no NUL (a bind in the widened sockaddr on Apple) is read past the end of
+    ``sun_path`` into memory it never cleared, so it comes back as its first
+    104 bytes followed by whatever bytes lie there, different from run to
+    run; asyncio's ``start_unix_server(sock=)`` then hands that to
+    ``os.stat`` and fails at random (``NotADirectoryError`` and the like). So
+    no bind route may leave an address longer than this, and a bind in the
+    widened form always does (its path is over :data:`DIRECT_MAX` bytes, and
+    the module reports at least the 104 bytes of ``sun_path``), which makes
+    the check deterministic rather than a matter of luck. An unbound socket
+    (a client) reports the empty address."""
+    shown = os.fsencode(addr)
+    assert len(shown) <= DIRECT_MAX, f"{what}: an address of {len(shown)} bytes: {shown!r}"
+
+
+def check_asyncio(f: Forced) -> None:
+    """Hand a listener bound through ``f`` to asyncio
+    (``asyncio.start_unix_server(sock=)``, the documented recipe) and adopt a
+    nonblocking and a blocking connect through ``f``
+    (``asyncio.open_unix_connection(sock=)``), exchange data both ways, and
+    close the server, which runs asyncio's cleanup of the listener's socket
+    file (Python 3.13 and later: ``getsockname`` then ``os.stat`` of what it
+    returned, at the start and at the close). Every step must go through
+    without an error, on every bind route.
+
+    What asyncio's cleanup does with the file depends on the route's spelling
+    (the address it reads is the spelling, not the caller's path), so whether
+    the file is still there afterwards is not checked; it is removed here if
+    it is."""
+
+    async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        data = await reader.readexactly(4)
+        writer.write(b"pong" if data == b"ping" else b"????")
+        await writer.drain()
+        writer.close()
+        await writer.wait_closed()
+
+    async def main() -> list[bytes]:
+        got: list[bytes] = []
+        listener, r = f.way(BIND)
+        assert r is f.want(BIND), f"{f.what}: bind took {r}"
+        server = await asyncio.start_unix_server(handle, sock=listener)
+        async with server:
+            for req in (CONNECT_NONBLOCKING, CONNECT):
+                sock, r = f.way(req)
+                assert r is f.want(req), f"{f.what}: {req} took {r}"
+                reader, writer = await asyncio.open_unix_connection(sock=sock)
+                writer.write(b"ping")
+                await writer.drain()
+                got.append(await reader.readexactly(4))
+                writer.close()
+                await writer.wait_closed()
+        return got
+
+    assert asyncio.run(main()) == [b"pong", b"pong"], f.what
+    with contextlib.suppress(FileNotFoundError):
+        os.unlink(f.path)
 
 
 def check_full_backlog(f: Forced) -> None:
