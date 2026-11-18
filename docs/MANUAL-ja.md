@@ -23,6 +23,8 @@ assert server.recv(4) == b"ping"
 | `sockat.connect(path)` | `socket()` → `connect(path)` | `socket.socket` (ブロッキング) |
 | `sockat.connect_nonblocking(path)` | `socket()` → `setblocking(False)` → `connect(path)` | 非ブロッキングの `socket.socket` |
 
+- 標準が受け付ける長さのパスでは、戻り値は素の `socket.socket`。長いパスでは、アドレスを元のパスで返す `socket.socket` の subclass ([後述](#アドレスは元のパスを返す))
+
 - `path` は `str` / `bytes` / `os.PathLike` (標準の `bind` / `connect` は `os.PathLike` を受けないが、sockat は受ける)
 - 標準が受け付ける長さ ([OS ごとの値](#長いパスへの届き方)) のパスは標準をそのまま呼ぶ
 - どの経路のソケットも `socket.socket(AF_UNIX, SOCK_STREAM)` で作るので、標準と同じ設定になる (close-on-exec、`socket.setdefaulttimeout` の値、listen の既定の backlog)
@@ -80,7 +82,7 @@ cwd からの相対パスが標準にそのまま渡せる長さなら、それ�
 
 macOS / iOS。XNU は `sun_path` が 104 バイトを超えるアドレスも、パスが 253 バイトまでなら受け付ける。ctypes で libc の `bind(2)` / `connect(2)` に手で組んだ sockaddr を渡す。元のパスが 253 バイト以内ならそれを、無理なら相対パスを渡す。
 
-- connect だけが使う。bind に使うと listener に 104 バイトを超えるアドレスが残り、標準の `getsockname` がそれを読み過ぎて (後ろに無関係なバイトが付く)、asyncio の `start_unix_server(sock=)` の後始末が落ちる。なので bind は symlink とスレッド cwd でも広げた綴りを使わない
+- connect だけが使う。bind に使うと listener に 104 バイトを超えるアドレスが残り、標準の `getsockname` (カーネルの綴りを読む実装) がそれを読み過ぎる (後ろに無関係なバイトが付く)。なので bind は symlink とスレッド cwd でも広げた綴りを使わない (ハブの DR-0009)
 
 #### symlink
 
@@ -134,9 +136,21 @@ Linux / Android と macOS / iOS。使い捨ての `threading.Thread` の cwd だ
 
 ## 長いパスで標準と違う点
 
-### カーネルが返すアドレスは元のパスではない
+### アドレスは元のパスを返す
 
-`getsockname()` (listener と accept したソケット) と `getpeername()` (connect したソケット) は、listener を bind した時にカーネルに渡した綴りを返す。
+長いパスでは、カーネルが返すアドレス (`getsockname(2)` / `getpeername(2)`) は元のパスでなく、bind の時にカーネルに渡した綴りになる。sockat が返すソケットは、それを元のパスに差し替える。
+
+| ソケット | 元のパスを返すもの | それ以外 |
+|---|---|---|
+| `bind` の listener | `getsockname()` | 標準のまま |
+| listener の `accept()` が返すソケット | `getsockname()` | `getpeername()` は標準のまま (相手の綴り。たいてい空) |
+| `connect` / `connect_nonblocking` のソケット | `getpeername()` | `getsockname()` は標準のまま (たいてい空) |
+
+- 元のパスは `os.fsdecode` した `str` (標準がパスのアドレスを返すのと同じ型)。相対パスで渡したら相対パスのまま
+- `dup()` したソケットも同じに返す。`socket.fromfd` 等で fd から作り直したソケットは標準の型なので、カーネルの綴りを返す
+- これで、アドレスを読み返す上位 (asyncio の後始末、`repr`、ログ) が元のパスで動く ([DR-0003](./decisions/DR-0003-report-the-given-path.md))
+
+カーネルが返す綴りは次の通り (`socket.socket.getsockname(s)` のように標準の実装を呼ぶと見える)。
 
 | bind の経路 | 返るもの |
 |---|---|
@@ -144,8 +158,6 @@ Linux / Android と macOS / iOS。使い捨ての `threading.Thread` の cwd だ
 | 相対パス | 相対パス |
 | symlink | もう無い symlink を通したパス |
 | スレッド cwd、bindat | ファイル名だけ |
-
-元のパスは自分で持っておき、それを使う。
 
 他のプログラムが広げた sockaddr で bind した listener (macOS の Node.js 等) に connect した時の `getpeername()` は途中で切れたパスで、macOS の CPython では切れた後ろに無関係なバイトが付くことがある (標準の `getpeername` の振る舞い。取得で例外にはならない。[原因](./findings/2026-11-18-cpython-getsockname-widened-sockaddr.md))。
 
@@ -189,14 +201,13 @@ macOS では、相手の backlog が満杯の時も connect は `ECONNREFUSED` �
 戻り値は標準の `socket.socket` なので、`sock=` を受け取る API にそのまま渡せる。
 
 ```python
-listener = sockat.bind(path)
-server = await asyncio.start_unix_server(handle, sock=listener, cleanup_socket=False)  # 3.13 以降
+server = await asyncio.start_unix_server(handle, sock=sockat.bind(path))
 
 reader, writer = await asyncio.open_unix_connection(sock=sockat.connect_nonblocking(path))
 ```
 
-- Python 3.13 以降は `cleanup_socket=False` を渡す。asyncio の後始末は listener の `getsockname()` の綴りを `os.stat` して消すが、長いパスではそれが元のパスでない (`/proc/self/fd/<fd>/...` の fd は閉じていて別の fd に使い回され `NotADirectoryError` になる。スレッド cwd の綴りはファイル名だけで、cwd の同じ名前のファイルを消しうる)。3.11 / 3.12 の asyncio は後始末をせず、この引数も無い
-- ソケットファイルは自分で `os.unlink(path)` する
+- 短いパスと同じに動く。Python 3.13 以降の asyncio は、server を閉じる時に元のパスのソケットファイルを消す (`cleanup_socket`。listener の `getsockname()` が元のパスを返すので、それで消す)。3.11 / 3.12 の asyncio は消さない (標準と同じ)
+- transport の `get_extra_info('sockname')` (server 側) / `get_extra_info('peername')` (client 側) も元のパス
 
 `connect_nonblocking` は相手を待たないので、イベントループから直接呼べる。`bind` も相手を待たない (スレッド cwd の経路ではスレッドの終わりを待つが、bind してすぐ終わる)。
 

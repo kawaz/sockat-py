@@ -27,7 +27,7 @@ Use `sockat.bind` / `sockat.connect` instead of creating a `socket.socket(AF_UNI
 | `sockat.connect(path)` | `socket()` → `connect(path)` | a `socket.socket` |
 | `sockat.connect_nonblocking(path)` | `socket()` → `setblocking(False)` → `connect(path)` | a nonblocking `socket.socket` |
 
-- The results are the standard library's own `socket.socket`
+- The result is the standard library's own `socket.socket` (for a long path, a subclass of `socket.socket` that reports the address as the original path)
 - A path that the standard library accepts is handed to it unchanged, so it behaves exactly as with the standard library
 - Even for a long path, the socket file is created at the path given
 - `path` is a `str` / `bytes` / `os.PathLike`
@@ -74,7 +74,7 @@ A longer path is tried on the routes below, in this order per OS, and bound / co
 
 ## What differs from the standard library for a long path
 
-- `getsockname()` / `getpeername()` do not return the original path: they return the spelling handed to the kernel at bind time (a relative path, `/proc/self/fd/...`, a path through a symlink that no longer exists, the file name alone, ...). Keep the original path yourself
+- `getsockname()` of a listener (and of an accepted socket) and `getpeername()` of a connected socket return the original path. What the kernel returns is the other spelling used for the bind, but the sockets sockat returns replace it with the original path
 - A path too long for the standard library that does not end with a name (ending in `dir/`, `dir/.`, `..`) is a `ValueError`
 - A path containing a NUL anywhere but at its start is a `ValueError` at any length (the standard library silently truncates at the NUL). On Linux a path starting with a NUL (abstract namespace) is handed to the standard library unchanged
 - The rest (the directory being looked up first, a symlink that may be left behind) is in [docs/MANUAL.md](./docs/MANUAL.md#what-differs-from-the-standard-library-for-a-long-path)
@@ -83,12 +83,10 @@ A longer path is tried on the routes below, in this order per OS, and bound / co
 
 ```python
 listener = sockat.bind(path)
-server = await asyncio.start_unix_server(handle, sock=listener, cleanup_socket=False)  # Python 3.13 and later
+server = await asyncio.start_unix_server(handle, sock=listener)
 
 reader, writer = await asyncio.open_unix_connection(sock=sockat.connect_nonblocking(path))
 ```
-
-On Python 3.13 and later, asyncio tries to remove the socket file through the listener's `getsockname()` when it closes. For a long path that spelling is not the path, so pass `cleanup_socket=False` and remove the socket file yourself ([details](./docs/MANUAL.md#asyncio)).
 
 ## Documentation
 

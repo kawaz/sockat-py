@@ -39,6 +39,7 @@
 | `sockat.connect_nonblocking(path)` | `connect_nonblocking` | 非ブロッキングの `socket.socket` |
 
 - `connect_any` 系は出さない (fork の経路が無いため)
+- 長いパスでは、戻り値は `socket.socket` の subclass で、アドレスを元のパスで返す ([DR-0003](DR-0003-report-the-given-path.md))
 - `path` は `str` / `bytes` / `os.PathLike`。標準の `socket.bind` は `os.PathLike` を受けない (3.11〜3.15 で確認) が、Python のファイル API の慣習に合わせて受け、`os.fspath` した値を標準に渡す
 - 経路 (`_route.Route`) は公開しない。試験はパッケージの中から各経路の関数を呼ぶ。環境を読む部分 (symlink の置き場の候補、macOS で広げた sockaddr を試すか、`/proc/self/fd` の場所、スレッド cwd の経路を試すか) は `_route.Config` にして試験から差し替える
 

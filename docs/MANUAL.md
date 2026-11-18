@@ -23,6 +23,8 @@ assert server.recv(4) == b"ping"
 | `sockat.connect(path)` | `socket()` → `connect(path)` | a `socket.socket` (blocking) |
 | `sockat.connect_nonblocking(path)` | `socket()` → `setblocking(False)` → `connect(path)` | a nonblocking `socket.socket` |
 
+- For a path the standard library accepts, the result is a plain `socket.socket`. For a long path, it is a subclass of `socket.socket` that reports the address as the original path ([below](#the-address-is-reported-as-the-original-path))
+
 - `path` is a `str` / `bytes` / `os.PathLike` (the standard library's `bind` / `connect` do not take an `os.PathLike`, but sockat does)
 - A path that the standard library accepts ([the length per OS](#how-a-long-path-is-reached)) goes to the standard library unchanged
 - Whatever the route, the socket is created as `socket.socket(AF_UNIX, SOCK_STREAM)`, so it is set up like the standard library's (close-on-exec, the value of `socket.setdefaulttimeout`, the default listen backlog)
@@ -80,7 +82,7 @@ When the path spelled relative to the cwd is a length the standard library accep
 
 macOS / iOS. XNU takes an address whose `sun_path` runs past 104 bytes, as long as the path is at most 253 bytes. A hand-built sockaddr is passed to libc's `connect(2)` through ctypes. The original path is passed when it is at most 253 bytes, failing that the relative path.
 
-- Only connects use it. On a bind it would leave an address over 104 bytes on the listener, which the standard library's `getsockname` reads past (unrelated bytes follow), and the cleanup of asyncio's `start_unix_server(sock=)` fails on it. So a bind does not use widened spellings on the symlink and thread cwd routes either
+- Only connects use it. On a bind it would leave an address over 104 bytes on the listener, which the standard library's `getsockname` (the implementation that reads the kernel's spelling) reads past (unrelated bytes follow). So a bind does not use widened spellings on the symlink and thread cwd routes either (the hub's DR-0009)
 
 #### symlink
 
@@ -134,9 +136,21 @@ When a path longer than the standard library accepts is `ENAMETOOLONG` (bytes).
 
 ## What differs from the standard library for a long path
 
-### The address the kernel reports is not the path
+### The address is reported as the original path
 
-`getsockname()` (of the listener and of accepted sockets) and `getpeername()` (of a connected socket) report the spelling handed to the kernel when the listener was bound.
+For a long path, the address the kernel reports (`getsockname(2)` / `getpeername(2)`) is not the original path but the spelling handed to the kernel at bind time. The sockets sockat returns replace it with the original path.
+
+| Socket | Returns the original path | Otherwise |
+|---|---|---|
+| a listener from `bind` | `getsockname()` | as the standard library |
+| a socket returned by the listener's `accept()` | `getsockname()` | `getpeername()` as the standard library (the peer's spelling, usually empty) |
+| a socket from `connect` / `connect_nonblocking` | `getpeername()` | `getsockname()` as the standard library (usually empty) |
+
+- The original path is a `str` that went through `os.fsdecode` (the same type the standard library returns for a path address). A path given as a relative path stays relative
+- A `dup()`ed socket reports it the same way. A socket rebuilt from an fd with `socket.fromfd` or the like is of the standard type, so it reports the kernel's spelling
+- So what reads the address back (asyncio's cleanup, `repr`, logs) works with the original path ([DR-0003](./decisions/DR-0003-report-the-given-path.md), in Japanese)
+
+The spellings the kernel reports are as follows (visible by calling the standard implementation, as in `socket.socket.getsockname(s)`).
 
 | Route of the bind | Reported |
 |---|---|
@@ -144,8 +158,6 @@ When a path longer than the standard library accepts is `ENAMETOOLONG` (bytes).
 | relative path | the relative path |
 | symlink | a path through a symlink that no longer exists |
 | thread cwd, bindat | the file name alone |
-
-Keep the original path yourself and use that.
 
 The `getpeername()` of a connect to a listener that another program bound with a widened sockaddr (Node.js on macOS, for example) is a truncated path, and on CPython for macOS unrelated bytes may follow the cut (the behaviour of the standard library's `getpeername`; getting it never raises; [cause, in Japanese](./findings/2026-11-18-cpython-getsockname-widened-sockaddr.md)).
 
@@ -189,14 +201,13 @@ On macOS a connect also returns `ECONNREFUSED` when the peer's backlog is full. 
 The results are the standard library's `socket.socket`, so they can be passed straight to an API that takes `sock=`.
 
 ```python
-listener = sockat.bind(path)
-server = await asyncio.start_unix_server(handle, sock=listener, cleanup_socket=False)  # Python 3.13 and later
+server = await asyncio.start_unix_server(handle, sock=sockat.bind(path))
 
 reader, writer = await asyncio.open_unix_connection(sock=sockat.connect_nonblocking(path))
 ```
 
-- On Python 3.13 and later, pass `cleanup_socket=False`. asyncio's cleanup `os.stat`s and removes what the listener's `getsockname()` spells, and for a long path that is not the path (the fd in `/proc/self/fd/<fd>/...` is closed and gets reused by another fd, which gives `NotADirectoryError`; the thread cwd spelling is the file name alone and may remove a file of that name in the cwd). The asyncio of 3.11 / 3.12 does no such cleanup and has no such argument
-- Remove the socket file yourself with `os.unlink(path)`
+- It works as with a short path. The asyncio of Python 3.13 and later removes the socket file at the original path when the server is closed (`cleanup_socket`; the listener's `getsockname()` returns the original path, and that is what it removes). The asyncio of 3.11 / 3.12 does not remove it (as with the standard library)
+- The transport's `get_extra_info('sockname')` (server side) / `get_extra_info('peername')` (client side) are also the original path
 
 `connect_nonblocking` does not wait for the peer, so it can be called directly from the event loop. `bind` does not wait for a peer either (on the thread cwd route it waits for the thread to end, but the bind returns at once).
 

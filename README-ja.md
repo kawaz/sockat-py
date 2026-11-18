@@ -27,7 +27,7 @@ pip install sockat
 | `sockat.connect(path)` | `socket()` → `connect(path)` | `socket.socket` |
 | `sockat.connect_nonblocking(path)` | `socket()` → `setblocking(False)` → `connect(path)` | 非ブロッキングの `socket.socket` |
 
-- 戻り値は標準の `socket.socket` そのもの
+- 戻り値は標準の `socket.socket` (長いパスでは、アドレスを元のパスで返す `socket.socket` の subclass)
 - 標準が受け付ける長さのパスは標準にそのまま渡すので、標準と同じに振る舞う
 - 長いパスでも、ソケットファイルは渡したパスにできる
 - `path` は `str` / `bytes` / `os.PathLike`
@@ -74,7 +74,7 @@ pip install sockat
 
 ## 長いパスで標準と違う点
 
-- `getsockname()` / `getpeername()` は元のパスを返さず、bind の時にカーネルに渡した綴り (相対パス、`/proc/self/fd/...`、もう無い symlink を通したパス、ファイル名だけ等) を返す。元のパスは自分で持っておく
+- listener (と accept したソケット) の `getsockname()` と、connect したソケットの `getpeername()` は元のパスを返す。カーネルが返すのは bind に使った別の綴りだが、sockat が返すソケットはそれを元のパスに差し替える
 - 標準にそのまま渡せない長さのパスで、名前で終わらないもの (`dir/`、`dir/.`、`..` で終わるもの) は `ValueError` になる
 - 先頭以外に NUL を含むパスは、長さによらず `ValueError` になる (標準は NUL で黙って切り詰める)。Linux で先頭が NUL のパス (abstract namespace) は標準にそのまま渡す
 - その他 (ディレクトリを先に引くこと、symlink が残りうること) は [docs/MANUAL-ja.md](./docs/MANUAL-ja.md#長いパスで標準と違う点)
@@ -83,12 +83,10 @@ pip install sockat
 
 ```python
 listener = sockat.bind(path)
-server = await asyncio.start_unix_server(handle, sock=listener, cleanup_socket=False)  # 3.13 以降
+server = await asyncio.start_unix_server(handle, sock=listener)
 
 reader, writer = await asyncio.open_unix_connection(sock=sockat.connect_nonblocking(path))
 ```
-
-Python 3.13 以降の asyncio は、閉じる時に listener の `getsockname()` の綴りでソケットファイルを消そうとする。長いパスではその綴りが元のパスでないので、`cleanup_socket=False` を渡し、ソケットファイルは自分で消す ([詳しく](./docs/MANUAL-ja.md#asyncio))。
 
 ## ドキュメント
 
