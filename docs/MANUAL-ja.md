@@ -76,7 +76,7 @@ finally:
 | NetBSD / OpenBSD / illumos / その他の Unix | なし (`ENAMETOOLONG`) | [相対パス](#予備の経路) → [symlink](#予備の経路) |
 
 - スレッド cwd・/proc 版・bindat / connectat は[中心の経路](#中心の経路)の手段。D をどこにも作れない時、bind は同じ手段を [D 無しの形](#d-無しの形)で試す
-- 仕様の fork の経路は作っていない。Python から fork した子は Python を実行するので、仕様が求める「子の区間は async-signal-safe」を満たせないため ([DR-0001](./decisions/DR-0001-python-port-design.md))。仕様で bind が fork に進む所は `ENAMETOOLONG` になる (ハブの D12-Q3 で裁定待ち)
+- 仕様の fork の経路は作っていない。Python から fork した子は Python を実行するので、仕様が求める「子の区間は async-signal-safe」を満たせないため ([DR-0001](./decisions/DR-0001-python-port-design.md))。仕様で bind が fork に進む所は `ENAMETOOLONG` になる (ハブの D12-Q3 で kawaz 裁定)
 - 順番の最後まで届かなかったパスは `ENAMETOOLONG` になる
 
 ### 中心の経路

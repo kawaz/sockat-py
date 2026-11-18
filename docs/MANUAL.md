@@ -76,7 +76,7 @@ For a longer path, the socket's directory is looked up first (`ENOENT` if it doe
 | NetBSD / OpenBSD / illumos / other Unix | none (`ENAMETOOLONG`) | [relative path](#fallback-routes) → [symlink](#fallback-routes) |
 
 - Thread cwd, the /proc variant and bindat / connectat are the means of [the central route](#the-central-route). When D can be created nowhere, a bind tries the same means in [the form without D](#the-form-without-d)
-- The specification's fork route is not built. A child forked from Python runs Python, so it cannot satisfy the specification's requirement that the child's span be async-signal-safe ([DR-0001](./decisions/DR-0001-python-port-design.md)). Where the specification has a bind go on to fork, the bind gets `ENAMETOOLONG` (awaiting a ruling in the hub's D12-Q3)
+- The specification's fork route is not built. A child forked from Python runs Python, so it cannot satisfy the specification's requirement that the child's span be async-signal-safe ([DR-0001](./decisions/DR-0001-python-port-design.md)). Where the specification has a bind go on to fork, the bind gets `ENAMETOOLONG` (ruled by kawaz in the hub's D12-Q3)
 - A path that no route in the order reaches gets `ENAMETOOLONG`
 
 ### The central route

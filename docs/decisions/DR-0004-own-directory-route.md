@@ -1,6 +1,6 @@
 # DR-0004: 中心の経路 (自分専用のディレクトリ D と R) の Python での作り方、bind_ex
 
-- Status: Accepted (ハブの DR-0012 の Python での作り方。統括の判断 2026-11-19。D をどこにも作れない時の bind の D 無しの形はハブの D12-Q1 の kawaz 裁定 (a)。中心の経路が使えない時の bind はハブの D12-Q3、`bind_ex` の形はハブの D12-Q4 で kawaz 裁定待ち)
+- Status: Accepted (ハブの DR-0012 の Python での作り方。統括の判断 2026-11-19。D をどこにも作れない時の bind の D 無しの形はハブの D12-Q1 の kawaz 裁定 (a)。中心の経路が使えない時の bind が `ENAMETOOLONG` なのはハブの D12-Q3 の kawaz 裁定 (a)。`bind_ex` の形はハブの D12-Q4 で kawaz 裁定待ち)
 - Date: 2026-11-19
 
 ## Context
@@ -77,7 +77,7 @@
 `_route.bind_without_central` の 1 か所にまとめる。
 
 - D をどこにも作れない時 (`central_route` が `Skip.NO_OWN_DIR` を返す) は、D 無しの形 (`_route.bind_without_own_dir`) を試す
-- D 無しの形も使えない時と、D を作れて手段が全部使えなかった時は `ENAMETOOLONG` (標準で長すぎるパスと同じ)。SPEC の fork の経路の場所で、ハブの D12-Q3 の裁定で変える
+- D 無しの形も使えない時と、D を作れて手段が全部使えなかった時は `ENAMETOOLONG` (標準で長すぎるパスと同じ)。SPEC の fork の経路の場所 (ハブの D12-Q3 の kawaz 裁定 (a))
 - 手段が無くて D を試さなかった時は、D 無しの形も試さない (綴りが D の形より長く、手段の確かめも同じなので、必ず使えない)
 
 D 無しの形:
@@ -146,7 +146,7 @@ D 無しの形:
 ## Alternatives Considered
 
 - 案 A: 中心の経路が使えない bind に、置き場の symlink か相対パスを残す
-  - 不採用理由: ハブの DR-0012 が bind から外した (綴りが後で無関係なファイルに当たりうる)。戻すかはハブの D12-Q3 で決める
+  - 不採用理由: ハブの DR-0012 が bind から外した (綴りが後で無関係なファイルに当たりうる)。既定の bind には戻さない (ハブの D12-Q3 の kawaz 裁定 (a))
 - 案 B: 呼び出し元のスレッドで `pthread_fchdir_np` し、`-1` で戻す
   - 不採用理由: 呼び出し元がスレッドに付けた cwd を消しうる (SPEC)。使い捨てのスレッドなら触らずに済む
 - 案 C: Linux で D を `O_RDONLY` で開いて `fchmod` する
@@ -159,7 +159,7 @@ D 無しの形:
 ## Consequences
 
 - bind のファイル名の上限は `R/` の 11 バイト分短い (Linux 96、Apple の OS / BSD 92。/proc 版はおよそ 79)。D をどこにも作れない時は D 無しの形の 19 バイト分 (Linux 88、Apple の OS / BSD 84。/proc 版はおよそ 72)
-- NetBSD / OpenBSD / illumos では長いパスの bind が届かない (ハブの D12-Q3 で kawaz 裁定待ち)
+- NetBSD / OpenBSD / illumos では長いパスの bind が届かない (ハブの D12-Q3 の kawaz 裁定 (a))
 - 長いパスの bind / connect のたびに D と R を作って消す
 - 途中でプロセスが死ぬと、置き場に `sockat.XXXXXXXXXX`、ソケットのディレクトリに `.sockat.XXXXXXXXXX` (D か、D 無しの形の R) が残る
 - Apple の OS で umask が持ち主の検索権限を削ると (非 root で 0777 / 0177 等)、D を開けず置き場に残る。`O_RDONLY` で開く OS では読み取り権限で同じ (ハブの D12-Q5)

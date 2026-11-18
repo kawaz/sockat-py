@@ -75,7 +75,7 @@ pip install sockat
 
 - どの経路も呼び出し元のプロセスとスレッドの cwd を変えないので、マルチスレッドのプログラムから使える
 - bind はディレクトリの深さによらず、ファイル名が 96 バイト (macOS / FreeBSD は 92、/proc 版はおよそ 79) まで届く (`R/` の分、標準より短い)。D をどこにも作れない時は D 無しの形で 88 バイト (macOS / FreeBSD は 84、/proc 版はおよそ 72) まで
-- NetBSD / OpenBSD / illumos と、中心の経路の手段を使えない環境 (seccomp の filter の下で `/proc` の無い Linux 等) では、長いパスの bind は `ENAMETOOLONG` になる (仕様では fork の経路で届く所。ハブの D12-Q3 で裁定待ち)
+- NetBSD / OpenBSD / illumos と、中心の経路の手段を使えない環境 (seccomp の filter の下で `/proc` の無い Linux 等) では、長いパスの bind は `ENAMETOOLONG` になる (仕様では fork の経路で届く所。Python には fork の経路が無い。ハブの D12-Q3 で kawaz 裁定)
 - どの経路にも収まらないパスは、標準で長すぎるパスと同じく `ENAMETOOLONG` (errno 付きの `OSError`) になる
 - 各経路の条件と、どこから届かなくなるかは [docs/MANUAL-ja.md](./docs/MANUAL-ja.md#長いパスへの届き方) にある
 

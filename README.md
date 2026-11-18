@@ -75,7 +75,7 @@ A longer path is tried on the routes below, in this order per OS, and bound / co
 
 - None of the routes changes the cwd of the calling process or thread, so they can be used from multi-threaded programs
 - A bind reaches a path at any directory depth as long as the file name is within 96 bytes (92 on macOS / FreeBSD, about 79 with the /proc variant), shorter than the standard library's limit by `R/`. When D can be created nowhere, the form without D reaches up to 88 bytes (84 on macOS / FreeBSD, about 72 with the /proc variant)
-- On NetBSD / OpenBSD / illumos, and where no means of the central route can be used (Linux without `/proc` under a seccomp filter, and the like), a bind of a long path gets `ENAMETOOLONG` (where the specification reaches it through the fork route; awaiting a ruling in the hub's D12-Q3)
+- On NetBSD / OpenBSD / illumos, and where no means of the central route can be used (Linux without `/proc` under a seccomp filter, and the like), a bind of a long path gets `ENAMETOOLONG` (where the specification reaches it through the fork route, which Python does not have; ruled by kawaz in the hub's D12-Q3)
 - A path that fits no route gets `ENAMETOOLONG` (an `OSError` with errno), as a path too long for the standard library does
 - The conditions of each route, and where a path stops being reached, are in [docs/MANUAL.md](./docs/MANUAL.md#how-a-long-path-is-reached)
 

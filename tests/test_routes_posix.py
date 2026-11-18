@@ -238,7 +238,10 @@ def test_a_bind_never_takes_the_relative_spelling(tmp: TmpDirs) -> None:
 # to the socket; so do the connects that no fallback carries (no usable place
 # for a symlink: none, one that does not exist, one too long for a spelling
 # through it). Nothing is created in the place either. With a place for D the
-# same path is bound where the central route can be used.
+# same path is bound where the central route can be used. FreeBSD is left
+# out: bindat / connectat cannot be turned off there, so the bind (the form
+# without D) and the connect (connectat) reach the socket.
+@pytest.mark.skipif(sys.platform.startswith("freebsd"), reason="bindat / connectat reach the socket on FreeBSD")
 def test_where_only_the_fork_route_reaches_everything_is_enametoolong(tmp: TmpDirs) -> None:
     t = tmp.new()
     p = nest(t, 600)
