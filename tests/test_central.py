@@ -53,6 +53,7 @@ from _support import (
     ping,
     place,
     raises_errno,
+    routes,
     run_child,
     stale_socket,
     thread_cwd_usable,
@@ -111,6 +112,14 @@ def means_here() -> list[Means]:
 
 MEANS = means_here()
 MEANS_IDS = [m.what for m in MEANS]
+
+WITHOUT_D = {
+    Route.THREAD_CWD: Route.THREAD_CWD_WITHOUT_D,
+    Route.AT: Route.AT_WITHOUT_D,
+    Route.PROC_OWN_DIR: Route.PROC_WITHOUT_D,
+}
+"""The route a bind takes by the same means where D can be made nowhere (the
+form without D: R in the socket's directory)."""
 
 
 def far(tmp: TmpDirs, name: bytes = b"s.sock") -> bytes:
@@ -327,37 +336,45 @@ def test_the_process_cwd_never_changes(tmp: TmpDirs, means: Means) -> None:
 
 
 # The spelling the kernel keeps for the listener (socket.socket.getsockname:
-# `R/<name>`, or `/proc/self/fd/<n>/R/<name>`) names nothing once the call has
-# returned, whatever it is resolved against: stat and unlink of it fail with
-# FileNotFoundError, and a file of the socket's name in the process cwd is
-# left as it was (the spelling of a bind by the file name alone would have hit
-# it). Runs in a child process whose cwd holds that file; see the scenario.
-def test_the_kernels_spelling_names_nothing_from_the_cwd(tmp: TmpDirs) -> None:
+# `R/<name>`, or `/proc/self/fd/<n>/R/<name>`; where D can be made nowhere,
+# R is `.sockat.XXXXXXXXXX` in the socket's directory) names nothing once the
+# call has returned, whatever it is resolved against: stat and unlink of it
+# fail with FileNotFoundError, and a file of the socket's name in the process
+# cwd is left as it was (the spelling of a bind by the file name alone would
+# have hit it). Runs in a child process whose cwd holds that file; see the
+# scenario.
+@pytest.mark.parametrize("without_d", [False, True], ids=["d", "without-d"])
+def test_the_kernels_spelling_names_nothing_from_the_cwd(tmp: TmpDirs, without_d: bool) -> None:
     t = tmp.new()
     p = far(tmp)
-    out = run_child("spelling_namesakes", t, {"PATH": p, "MEANS": ",".join(MEANS_IDS).encode()})
+    args = {"PATH": p, "MEANS": ",".join(MEANS_IDS).encode(), "WITHOUT_D": b"1" if without_d else b"0"}
+    out = run_child("spelling_namesakes", t, args)
     assert out == {"checked": ",".join(MEANS_IDS)}
+    assert listing(parent(p)) == []
 
 
 # The /proc spelling `/proc/self/fd/<n>/R/<name>` names nothing even once the
-# number <n> (D's fd, closed when the bind returns) is taken by another
-# directory: files are opened until one gets the number, here a directory
-# holding a file of the socket's name. stat of the spelling is then
-# FileNotFoundError (R is not in that directory) and the file there is left
-# alone. The spelling without R, `/proc/self/fd/<n>/<name>` (what a bind
-# through /proc on the socket's directory would leave), names that file: the
-# premise of the test.
+# number <n> (D's fd, closed when the bind returns; without D, the socket
+# directory's, closed too) is taken by another directory: files are opened
+# until one gets the number, here a directory holding a file of the socket's
+# name. stat of the spelling is then FileNotFoundError (R is not in that
+# directory) and the file there is left alone. The spelling without R,
+# `/proc/self/fd/<n>/<name>` (what a bind through /proc on the socket's
+# directory would leave), names that file: the premise of the test.
 @pytest.mark.skipif(not HAS_PROC, reason="the /proc means is Linux's")
-def test_the_proc_spelling_names_nothing_when_its_fd_number_is_reused(tmp: TmpDirs) -> None:
+@pytest.mark.parametrize("without_d", [False, True], ids=["d", "without-d"])
+def test_the_proc_spelling_names_nothing_when_its_fd_number_is_reused(tmp: TmpDirs, without_d: bool) -> None:
     p = far(tmp)
     other = tmp.new()
     with open(other + b"/s.sock", "wb") as f:
         f.write(b"unrelated")
-    listener, r = _route.run_long(BIND, p, central_cfg(thread_cwd=False))
+    own: tuple[OwnDirPlace, ...] = (NO_PLACE,) if without_d else (SOCKET_DIR,)
+    listener, r = _route.run_long(BIND, p, central_cfg(own, thread_cwd=False))
     with listener:
-        assert r is Route.PROC_OWN_DIR
+        assert r is (Route.PROC_WITHOUT_D if without_d else Route.PROC_OWN_DIR)
         kernel = os.fsencode(kernel_sockname(listener))
-        m = re.fullmatch(rb"/proc/self/fd/(\d+)/(" + RANDOM + rb")/s\.sock", kernel)
+        link = re.escape(OWN_DIR_PREFIX_IN_SOCKET_DIR) + RANDOM if without_d else RANDOM
+        m = re.fullmatch(rb"/proc/self/fd/(\d+)/(" + link + rb")/s\.sock", kernel)
         assert m is not None, kernel
         n = int(m.group(1))
         opened: list[int] = []
@@ -395,9 +412,11 @@ def fallback_route_here(req: _route.Request) -> Route:
 # made in (missing, a file, a directory the user may not write to) are passed
 # over with nothing made there. The socket's directory is the last place, and
 # D is named `.sockat.` and 10 letters or digits there. Where D can be made
-# nowhere, nothing is made, the bind is ENAMETOOLONG (the fork route's place)
-# and a connect takes its fallback. Root writes anywhere, so the unwritable
-# place is checked only for other users (the docker nobody run, macOS).
+# nowhere, no D is made: the bind takes the form without D by the same means
+# (R in the socket's directory, removed again, so only the socket file is
+# left next to it), and a connect takes its fallback. Root writes anywhere, so
+# the unwritable place is checked only for other users (the docker nobody
+# run, macOS).
 @pytest.mark.parametrize("means", MEANS, ids=MEANS_IDS)
 def test_d_goes_in_the_first_place_where_it_can_be_made(
     tmp: TmpDirs, monkeypatch: pytest.MonkeyPatch, means: Means
@@ -438,10 +457,10 @@ def test_d_goes_in_the_first_place_where_it_can_be_made(
     z = with_name(p, b"z.sock")
     c = central_cfg(tuple(bad), [links], thread_cwd=means.route is Route.THREAD_CWD)
     before = listing(parent(p))
-    with raises_errno(errno.ENAMETOOLONG):
-        _route.run_long(BIND, z, c)
-    assert listing(parent(p)) == before
-    with listener_at(z) as listener:
+    listener, r = _route.run_long(BIND, z, c)
+    with listener:
+        assert r is WITHOUT_D[means.route]
+        assert listing(parent(p)) == sorted([*before, b"z.sock"])
         for req in (CONNECT, CONNECT_NONBLOCKING):
             client, r = _route.run_long(req, z, c)
             with client:
@@ -505,6 +524,291 @@ def test_d_goes_in_tmpdir_then_tmp(tmp: TmpDirs, kind: str) -> None:
     assert out["places"] == f"{st.st_dev}:{st.st_ino}", out
     if kind != "missing":
         assert_empty(where)
+
+
+# ----- D made nowhere: the bind's form without D -----
+
+
+def refusing_mkdir(monkeypatch: pytest.MonkeyPatch, *dirs: bytes) -> None:
+    """Make ``mkdir_at`` refuse (``EACCES``) to make D in any of ``dirs``, as
+    a place where D cannot be made does, and make it as usual elsewhere."""
+    real = _route.mkdir_at
+    refused = {dir_id(d) for d in dirs}
+
+    def mkdir_at(base_fd: int, name: bytes) -> None:
+        st = os.fstat(base_fd)
+        if (st.st_dev, st.st_ino) in refused:
+            raise PermissionError(errno.EACCES, os.strerror(errno.EACCES))
+        real(base_fd, name)
+
+    monkeypatch.setattr(_route, "mkdir_at", mkdir_at)
+
+
+# Where D can be made nowhere, a bind takes the form without D by each means
+# (the same means, in the same order): R, `.sockat.` and 10 letters or digits,
+# a symlink to the realpath of the socket's directory, is made in the
+# socket's directory itself, and the bind goes to `R/<name>` from the fd of
+# the socket's directory (thread cwd, bindat) or as
+# `/proc/self/fd/<that fd>/R/<name>` (/proc). D can be made nowhere because:
+#
+# * no-place: the only place for D does not exist (the socket's directory is
+#   not among the places);
+# * refused: every place, the socket's directory included, refuses to have D
+#   made in it (stood in for by a mkdir_at that fails there).
+#
+# The bind gets every check of a route (check_route: the socket at the given
+# path, data both ways, the process cwd unchanged, nothing but the socket file
+# next to it, so no R is left, the path reported as the address while the
+# kernel's address fits sun_path, asyncio serving and cleaning up as for the
+# standard's), with the connects by the same means through D in a place of
+# their own. The spelling the kernel keeps is `.sockat.XXXXXXXXXX/<name>`
+# (behind `/proc/self/fd/<n>/` for /proc), the places for D stay untouched.
+@pytest.mark.parametrize("how", ["no-place", "refused"])
+@pytest.mark.parametrize("means", MEANS, ids=MEANS_IDS)
+def test_where_d_can_be_made_nowhere_a_bind_takes_the_form_without_d(
+    tmp: TmpDirs, monkeypatch: pytest.MonkeyPatch, means: Means, how: str
+) -> None:
+    p = far(tmp)
+    d_place = tmp.new()
+    for_connects = tmp.new()
+    want = WITHOUT_D[means.route]
+    if how == "no-place":
+        own: tuple[OwnDirPlace, ...] = (NO_PLACE,)
+    else:
+        own = (d_place, SOCKET_DIR)
+        refusing_mkdir(monkeypatch, d_place, parent(p))
+    mark_untouched(d_place)
+    bind_cfg = means.cfg(own)
+
+    listener, r = _route.run_long(BIND, p, bind_cfg)
+    with listener:
+        assert r is want
+        kernel = os.fsencode(kernel_sockname(listener))
+        link = re.escape(OWN_DIR_PREFIX_IN_SOCKET_DIR) + RANDOM
+        proc = rb"/proc/self/fd/\d+/" if want is Route.PROC_WITHOUT_D else b""
+        assert re.fullmatch(proc + link + rb"/s\.sock", kernel), kernel
+        assert listing(parent(p)) == [b"s.sock"]
+    os.unlink(p)
+
+    f = forced(means.what, p, means.cfg((for_connects,)), routes(want, means.route), bind_cfg=bind_cfg)
+    check_route(f, [for_connects])
+    assert_untouched(d_place)
+
+
+# The calling thread's own cwd and the process cwd are left alone by the
+# form without D too: the throwaway thread enters the socket's directory, not
+# the calling thread (see test_the_calling_threads_own_cwd_is_left_alone).
+@pytest.mark.skipif(not thread_cwd_usable(), reason="the system does not give a thread a cwd of its own here")
+def test_the_form_without_d_leaves_the_calling_threads_cwd_alone(tmp: TmpDirs) -> None:
+    p = far(tmp)
+    mine = tmp.new()
+    process = dir_id(".")
+    seen: dict[str, object] = {}
+
+    def caller() -> None:
+        fd = os.open(mine, os.O_RDONLY)
+        try:
+            assert _sys.enter_dir_in_this_thread(fd)
+        finally:
+            os.close(fd)
+        seen["before"] = dir_id(".")
+        listener, r = _route.run_long(BIND, p, central_cfg((NO_PLACE,), proc=NO_PROC))
+        with listener:
+            client, _ = _route.run_long(CONNECT, p, central_cfg(proc=NO_PROC))
+            with client:
+                accept_ping(listener, client)
+        seen["route"] = r
+        seen["after"] = dir_id(".")
+
+    th = threading.Thread(target=caller)
+    th.start()
+    th.join()
+    assert seen["route"] is Route.THREAD_CWD_WITHOUT_D
+    assert seen["before"] == seen["after"] == dir_id(mine)
+    assert dir_id(".") == process
+    assert listing(parent(p)) == [b"s.sock"]
+
+
+# Without D the means are tried in the central route's order, on the same R:
+# where the thread's own cwd turns out unusable once tried (stood in for at
+# the boundary, as for a seccomp filter or a refused unshare, and by a thread
+# that cannot be started), /proc on Linux; with /proc absent too, or on Apple,
+# nothing is left: the bind is ENAMETOOLONG and R, made before the refusal
+# could be seen, is removed again (the socket's directory was written to and
+# holds what it held). Where both are known to be unusable before anything is
+# made (the thread's own cwd turned off, /proc absent), the socket's directory
+# is not even touched.
+@pytest.mark.skipif(not thread_cwd_usable(), reason="the system does not give a thread a cwd of its own here")
+@pytest.mark.parametrize("how", ["refused", "no-thread"])
+def test_without_d_the_means_are_tried_in_order(tmp: TmpDirs, monkeypatch: pytest.MonkeyPatch, how: str) -> None:
+    if how == "refused":
+        monkeypatch.setattr(_route, "enter_dir_in_this_thread", lambda _fd: False)
+    else:
+
+        class NoThread:
+            def __init__(self, **_: object) -> None:
+                pass
+
+            def start(self) -> None:
+                raise RuntimeError("can't start new thread")
+
+        monkeypatch.setattr("sockat._route.threading", types.SimpleNamespace(Thread=NoThread, Lock=threading.Lock))
+    if HAS_PROC:
+        p = far(tmp)
+        listener, r = _route.run_long(BIND, p, central_cfg((NO_PLACE,)))
+        with listener:
+            assert r is Route.PROC_WITHOUT_D
+            assert is_socket(p)
+            assert listing(parent(p)) == [b"s.sock"]
+    q = far(tmp)
+    mark_untouched(parent(q))
+    with raises_errno(errno.ENAMETOOLONG):
+        _route.run_long(BIND, q, central_cfg((NO_PLACE,), proc=NO_PROC))
+    assert listing(parent(q)) == []
+    assert os.stat(parent(q)).st_mtime != UNTOUCHED, "R was not made"
+    z = far(tmp)
+    mark_untouched(parent(z))
+    with raises_errno(errno.ENAMETOOLONG):
+        _route.run_long(BIND, z, central_cfg((NO_PLACE,), thread_cwd=False, proc=NO_PROC))
+    assert_untouched(parent(z))
+
+
+# The spelling without D is 19 bytes and the file name (`.sockat.` and 10
+# letters or digits, `/`): a file name of 88 bytes (Linux) / 84 (Apple, the
+# BSDs) goes through the thread's own cwd or bindat, one byte more is
+# ENAMETOOLONG with nothing made in the socket's directory (the length is
+# checked before R is made). Through /proc the limit is shorter
+# (`/proc/self/fd/<n>/` in front): a name of 60 bytes goes, one of 80 does
+# not.
+@pytest.mark.parametrize("means", MEANS, ids=MEANS_IDS)
+def test_the_length_limit_of_the_form_without_d(tmp: TmpDirs, means: Means) -> None:
+    limit = DIRECT_MAX - _route.WITHOUT_OWN_DIR_LEN
+    assert (_route.WITHOUT_OWN_DIR_LEN, limit) == (19, 88 if DIRECT_MAX == 107 else 84)
+    fits, too_long = (60, 80) if means.route is Route.PROC_OWN_DIR else (limit, limit + 1)
+    c = means.cfg((NO_PLACE,))
+    p = nest(tmp.new(), 600, b"f" * fits)
+    listener, r = _route.run_long(BIND, p, c)
+    with listener:
+        assert r is WITHOUT_D[means.route]
+        assert listing(parent(p)) == [b"f" * fits]
+    q = nest(tmp.new(), 600, b"g" * too_long)
+    mark_untouched(parent(q))
+    with raises_errno(errno.ENAMETOOLONG):
+        _route.run_long(BIND, q, c)
+    assert_untouched(parent(q))
+
+
+# R's name without D is drawn afresh when taken (by anything; here a
+# symlink, left as it was), and after 16 taken names the form cannot be used:
+# the bind is ENAMETOOLONG and nothing else is made in the socket's
+# directory. The names come from a stand-in generator so the collision is
+# certain; it is asked for names with the `.sockat.` prefix.
+@pytest.mark.parametrize("means", MEANS, ids=MEANS_IDS)
+def test_a_taken_name_for_r_without_d_is_drawn_again_and_16_end_the_form(
+    tmp: TmpDirs, monkeypatch: pytest.MonkeyPatch, means: Means
+) -> None:
+    p = far(tmp)
+    directory = parent(p)
+    taken = OWN_DIR_PREFIX_IN_SOCKET_DIR + b"A" * RANDOM_LEN
+    free = OWN_DIR_PREFIX_IN_SOCKET_DIR + b"B" * RANDOM_LEN
+    os.symlink(b"/nonexistent", directory + b"/" + taken)
+    drawn: list[bytes] = []
+    prefixes: list[bytes] = []
+    picks = iter([taken, free])
+
+    def two(prefix: bytes = OWN_DIR_PREFIX) -> bytes:
+        prefixes.append(prefix)
+        n = next(picks)
+        drawn.append(n)
+        return n
+
+    monkeypatch.setattr(_route, "random_name", two)
+    c = means.cfg((NO_PLACE,))
+    listener, r = _route.run_long(BIND, p, c)
+    listener.close()
+    assert r is WITHOUT_D[means.route]
+    assert drawn == [taken, free]
+    assert prefixes == [OWN_DIR_PREFIX_IN_SOCKET_DIR] * 2
+    assert listing(directory) == sorted([taken, b"s.sock"])
+    assert os.readlink(directory + b"/" + taken) == b"/nonexistent"
+
+    drawn.clear()
+
+    def always_taken(prefix: bytes = OWN_DIR_PREFIX) -> bytes:
+        drawn.append(taken)
+        return taken
+
+    monkeypatch.setattr(_route, "random_name", always_taken)
+    q = with_name(p, b"q.sock")
+    with raises_errno(errno.ENAMETOOLONG):
+        _route.run_long(BIND, q, c)
+    assert drawn == [taken] * 16
+    assert listing(directory) == sorted([taken, b"s.sock"])
+    assert os.readlink(directory + b"/" + taken) == b"/nonexistent"
+
+
+# Without D, R goes in the socket's directory through its fd: where that
+# directory cannot be opened (stood in for by an open that fails, as for a
+# directory without read permission where it is opened O_RDONLY), the form
+# cannot be used, and with D made nowhere the bind is ENAMETOOLONG with
+# nothing made in the directory.
+@pytest.mark.parametrize("means", MEANS, ids=MEANS_IDS)
+def test_without_d_a_socket_directory_that_cannot_be_opened_is_enametoolong(
+    tmp: TmpDirs, monkeypatch: pytest.MonkeyPatch, means: Means
+) -> None:
+    p = far(tmp)
+    directory = parent(p)
+    real_open_dir = _route.open_dir
+
+    def open_dir(d: bytes) -> int:
+        if d == directory:
+            raise PermissionError(errno.EACCES, os.strerror(errno.EACCES))
+        return real_open_dir(d)
+
+    monkeypatch.setattr(_route, "open_dir", open_dir)
+    mark_untouched(directory)
+    with raises_errno(errno.ENAMETOOLONG):
+        _route.run_long(BIND, p, means.cfg((NO_PLACE,)))
+    assert_untouched(directory)
+
+
+# A bind that actually ran through the form without D is the result:
+# EADDRINUSE for a path taken by a socket or by a plain file comes back as it
+# is, and no later means is tried: with every means on, only the first one
+# here runs (the thread's own cwd, not /proc after it; /proc where the thread's
+# own cwd cannot be used; bindat, which neither stands for). R is removed in
+# the failure too: the socket's directory holds what it held.
+def test_a_failure_through_the_form_without_d_is_not_retried(tmp: TmpDirs, monkeypatch: pytest.MonkeyPatch) -> None:
+    here = central_route_here()
+    assert here is not None
+    first = {Route.THREAD_CWD: ["thread-cwd"], Route.PROC_OWN_DIR: ["proc"], Route.AT: []}[here]
+    p = far(tmp)
+    directory = parent(p)
+    c = central_cfg((NO_PLACE,))
+    listener, r = _route.run_long(BIND, p, c)
+    with listener:
+        assert r is WITHOUT_D[here]
+        with open(with_name(p, b"file"), "wb"):
+            pass
+        tried: list[str] = []
+        real_thread, real_proc = _route.thread_cwd_op, _route.proc_spelling
+
+        def thread_cwd_op(req: _route.Request, dirfd: int, spelling: bytes) -> socket.socket | _route.Skip:
+            tried.append("thread-cwd")
+            return real_thread(req, dirfd, spelling)
+
+        def proc_spelling(dirfd: int, rest: bytes, proc_self_fd: bytes) -> bytes | None:
+            tried.append("proc")
+            return real_proc(dirfd, rest, proc_self_fd)
+
+        monkeypatch.setattr(_route, "thread_cwd_op", thread_cwd_op)
+        monkeypatch.setattr(_route, "proc_spelling", proc_spelling)
+        for taken in (p, with_name(p, b"file")):
+            tried.clear()
+            with raises_errno(errno.EADDRINUSE):
+                _route.run_long(BIND, taken, c)
+            assert tried == first, tried
+            assert listing(directory) == [b"file", b"s.sock"]
 
 
 # ----- a D that is not ours -----
@@ -712,9 +1016,11 @@ def test_a_taken_name_for_d_is_drawn_again_and_16_end_the_place(
 # by its name O_RDONLY: that needs the owner's read bit, so for a user other
 # than root a umask taking it off (0477, 0777) leaves D that cannot be set to
 # 0700; D is then removed again and the place counts as one where D cannot be
-# made (with no other place, the bind is ENAMETOOLONG). Either way nothing is
-# left in the place (no D piling up, one per call). Runs in a child process
-# because the umask is process-wide.
+# made (with no other place, the bind takes the form without D: R in the
+# socket's directory, which the umask does not stop). Either way nothing is
+# left in the place (no D piling up, one per call), and only the socket file
+# is left next to the socket (no R). Runs in a child process because the
+# umask is process-wide.
 #
 # Not checked: where D is opened O_SEARCH (Apple), a umask taking the owner's
 # search bit off (0777, 0177) stops the open itself for a user other than
@@ -734,8 +1040,9 @@ def test_a_umask_taking_owner_bits_off_leaves_nothing_in_the_place(tmp: TmpDirs,
     d_place = tmp.new()
     args = {"PATH": p, "PLACE": d_place, "UMASK": umask.encode(), "MEANS": means.what.encode()}
     out = run_child("bind_with_umask", b"/", args)
-    assert out == ({"errno": str(errno.ENAMETOOLONG)} if fails else {"route": means.route.value}), out
+    assert out == {"route": (WITHOUT_D[means.route] if fails else means.route).value}, out
     assert_empty(d_place)
+    assert listing(parent(p)) == [b"s.sock"]
 
 
 # A D that passed the check but cannot be set to 0700 (stood in for by a

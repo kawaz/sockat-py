@@ -364,12 +364,14 @@ def listener_at(path: bytes) -> socket.socket:
 def fallback_cfg(
     links: Sequence[bytes] = (), *, wide: bool = IS_APPLE, proc: bytes = NO_PROC, thread_cwd: bool = False
 ) -> Config:
-    """The route order's inputs with no place for D (so the central route
-    cannot be used, and a bind ends at the fork route's place, where this
-    implementation answers ``ENAMETOOLONG``), ``links`` as the places for a
-    connect's symlink, and on Linux /proc made to look absent unless ``proc``
-    says where to look. ``wide`` off stands in for an Apple kernel that
-    refuses the widened sockaddr."""
+    """The route order's inputs with no place for D and, unless turned on,
+    neither the thread's own cwd nor /proc (so neither the central route nor
+    the form without D can be used, bindat on FreeBSD aside, and a bind ends
+    at the fork route's place, where this implementation answers
+    ``ENAMETOOLONG``), ``links`` as the places for a connect's symlink, and
+    on Linux /proc made to look absent unless ``proc`` says where to look.
+    ``wide`` off stands in for an Apple kernel that refuses the widened
+    sockaddr."""
     return Config(own_dir_places=(), link_places=tuple(links), wide=wide, proc_self_fd=proc, thread_cwd=thread_cwd)
 
 

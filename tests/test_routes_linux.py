@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import errno
 import os
+import re
 import socket
 import sys
 
@@ -30,6 +31,7 @@ from _support import (
     fallback_cfg,
     forced,
     is_socket,
+    kernel_sockname,
     listener_at,
     listing,
     mark_untouched,
@@ -54,8 +56,8 @@ pytestmark = pytest.mark.skipif(not sys.platform.startswith("linux"), reason="th
 def proc_fallback_cfg(links: list[bytes] | None = None, *, own: tuple[bytes, ...] = ()) -> Config:
     """The real /proc, no means of the central route but /proc (the thread's
     own cwd off), ``own`` as the places for D (none: the central route and
-    the fd-held form cannot be used), ``links`` as the places for the
-    symlink."""
+    the fd-held form cannot be used, and a bind takes the form without D),
+    ``links`` as the places for the symlink."""
     return Config(own_dir_places=own, link_places=tuple(links or ()), proc_self_fd=PROC, thread_cwd=False)
 
 
@@ -99,9 +101,11 @@ def test_long_paths_take_the_central_route(tmp: TmpDirs, total: int, thread: boo
 # Where the central route is not used (no place for D), a connect takes
 # /proc/self/fd/<dirfd>/<name> with the socket's directory opened O_PATH, for
 # any length of the directory part; nothing after it is tried (the place for
-# the symlink stays untouched). No bind takes it: the bind of the same path
-# is ENAMETOOLONG with nothing created (its spelling would name whatever
-# reuses the fd number afterwards).
+# the symlink stays untouched). No bind takes it (its spelling would name
+# whatever reuses the fd number afterwards): the bind of the same path takes
+# the form without D, /proc/self/fd/<dirfd>/.sockat.XXXXXXXXXX/<name> through
+# R in the socket's directory, removed again, so only the socket file is left
+# next to it.
 @pytest.mark.parametrize("total", [DIRECT_MAX + 1, 300, 1000])
 def test_a_connect_falls_back_to_proc(tmp: TmpDirs, total: int) -> None:
     p = nest(tmp.new(), total)
@@ -109,10 +113,12 @@ def test_a_connect_falls_back_to_proc(tmp: TmpDirs, total: int) -> None:
     mark_untouched(place)
     c = proc_fallback_cfg([place])
     before = listing(parent(p))
-    with raises_errno(errno.ENAMETOOLONG):
-        _route.run_long(BIND, p, c)
-    assert listing(parent(p)) == before
-    with listener_at(p) as listener:
+    listener, r = _route.run_long(BIND, p, c)
+    with listener:
+        assert r is Route.PROC_WITHOUT_D
+        kernel = os.fsencode(kernel_sockname(listener))
+        assert re.fullmatch(rb"/proc/self/fd/\d+/\.sockat\.[A-Za-z0-9]{10}/s\.sock", kernel), kernel
+        assert listing(parent(p)) == sorted([*before, b"s.sock"])
         for req in (CONNECT, CONNECT_NONBLOCKING):
             client, r = _route.run_long(req, p, c)
             with client:

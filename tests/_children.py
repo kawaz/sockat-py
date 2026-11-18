@@ -24,6 +24,7 @@ from collections.abc import Callable
 
 from _support import (
     CHECKS_FULL_BACKLOG,
+    NO_PLACE,
     NO_PROC,
     PROC,
     RESULT_MARK,
@@ -105,8 +106,8 @@ def relative_spelling() -> None:
 
 
 def bind_without_own_dir() -> None:
-    """Bind PATH with no place for D (the fallbacks' configuration) and
-    report the errno it fails with."""
+    """Bind PATH with no place for D and no means (the fallbacks'
+    configuration) and report the errno it fails with."""
     try:
         _route.run_long(BIND, arg("PATH"), fallback_cfg())[0].close()
     except OSError as e:
@@ -203,11 +204,22 @@ def assert_unrelated(path: bytes, what: str) -> None:
         assert f.read() == UNRELATED, what
 
 
+WITHOUT_D = {
+    Route.THREAD_CWD: Route.THREAD_CWD_WITHOUT_D,
+    Route.AT: Route.AT_WITHOUT_D,
+    Route.PROC_OWN_DIR: Route.PROC_WITHOUT_D,
+}
+"""The route a bind takes by the same means where D can be made nowhere."""
+
+
 def spelling_namesakes() -> None:
     """For each means of MEANS (comma-separated): bind PATH (far from the
     cwd, file name ``s.sock``) through it while a file ``s.sock`` unrelated to
-    the socket sits in the cwd. The spelling the kernel keeps (``R/s.sock``,
-    or behind ``/proc/self/fd/<n>/``) names nothing: ``os.stat`` and
+    the socket sits in the cwd; when WITHOUT_D is ``1``, with no place for D,
+    so the bind takes the form without D (the connects still have the
+    socket's directory). The spelling the kernel keeps (``R/s.sock``, or
+    ``.sockat.XXXXXXXXXX/s.sock`` without D, either behind
+    ``/proc/self/fd/<n>/`` through /proc) names nothing: ``os.stat`` and
     ``os.unlink`` of it are ``FileNotFoundError``, and the unrelated file is
     left alone. Then the same listener path is served by asyncio as the
     standard's is (:func:`_support.serve_asyncio`, bound before the loop):
@@ -216,15 +228,20 @@ def spelling_namesakes() -> None:
     the cwd. Reports which means ran."""
     p = arg("PATH")
     name = os.path.basename(p)
+    without_d = opt_arg("WITHOUT_D") == b"1"
+    link = rb"\.sockat\.[A-Za-z0-9]{10}" if without_d else rb"[A-Za-z0-9]{10}"
     put_unrelated(name)
     checked: list[str] = []
     for means in os.fsdecode(arg("MEANS")).split(","):
         cfg, want = means_cfg(means, (SOCKET_DIR,))
-        listener, r = _route.run_long(BIND, p, cfg)
+        bind_cfg = cfg
+        if without_d:
+            bind_cfg, want = dataclasses.replace(cfg, own_dir_places=(NO_PLACE,)), WITHOUT_D[want]
+        listener, r = _route.run_long(BIND, p, bind_cfg)
         with listener:
             assert r is want, r
             kernel = os.fsencode(socket.socket.getsockname(listener))
-            assert re.fullmatch(rb"(/proc/self/fd/\d+/)?[A-Za-z0-9]{10}/" + re.escape(name), kernel), kernel
+            assert re.fullmatch(rb"(/proc/self/fd/\d+/)?" + link + b"/" + re.escape(name), kernel), kernel
             for f in (os.stat, os.unlink):
                 try:
                     f(kernel)
@@ -238,7 +255,8 @@ def spelling_namesakes() -> None:
         def connect(req: Request, cfg: Config = cfg) -> socket.socket:
             return _route.run_long(req, p, cfg)[0]
 
-        listener, _ = _route.run_long(BIND, p, cfg)
+        listener, r = _route.run_long(BIND, p, bind_cfg)
+        assert r is want, r
         try:
             asyncio.run(serve_asyncio(means, listener, connect, os.fsdecode(p), served=True))
         finally:
@@ -295,14 +313,13 @@ def bind_with_umask() -> None:
     made: a umask without the owner's write bit makes the socket file itself
     one nobody may connect to, as with the standard.)"""
     os.umask(int(arg("UMASK"), 8))
-    cfg, want = means_cfg(os.fsdecode(arg("MEANS")), (arg("PLACE"),))
+    cfg, _ = means_cfg(os.fsdecode(arg("MEANS")), (arg("PLACE"),))
     try:
         listener, route = _route.run_long(BIND, arg("PATH"), cfg)
     except OSError as e:
         report(errno=str(e.errno))
         return
     listener.close()
-    assert route is want, route
     assert is_socket(arg("PATH"))
     report(route=route.value)
 

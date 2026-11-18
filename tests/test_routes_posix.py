@@ -212,8 +212,8 @@ def test_a_failure_on_the_relative_fallback_is_not_retried(tmp: TmpDirs) -> None
 
 # A bind never takes the relative spelling: the spelling would stay with the
 # listener and name another file once the cwd changes. A path whose relative
-# spelling fits, with the central route unusable (no place for D), is
-# ENAMETOOLONG for the bind with nothing created, while a connect to a
+# spelling fits, with the central route and the form without D unusable (no
+# place for D, no means), is ENAMETOOLONG for the bind with nothing created, while a connect to a
 # listener there takes the relative fallback. Runs in a child whose cwd is
 # the socket's directory's ancestor.
 @no_relative
@@ -231,8 +231,9 @@ def test_a_bind_never_takes_the_relative_spelling(tmp: TmpDirs) -> None:
 
 
 # This implementation has no fork route (a child forked from Python runs
-# Python, which is not async-signal-safe). A bind the central route does not
-# carry (here: no place for D at all) ends there with ENAMETOOLONG, the error
+# Python, which is not async-signal-safe). A bind neither the central route
+# nor the form without D carries (here: no means, no place for D at all) ends
+# there with ENAMETOOLONG, the error
 # of a plain bind of a path too long for sun_path, with nothing created next
 # to the socket; so do the connects that no fallback carries (no usable place
 # for a symlink: none, one that does not exist, one too long for a spelling
