@@ -936,6 +936,44 @@ def test_a_missing_directory_is_enoent_before_anything_is_made(tmp: TmpDirs) -> 
     assert_untouched(d_place)
 
 
+# The socket's directory is looked up by stat, not by opening it (SPEC): one
+# that cannot be opened (as a directory without read permission cannot be
+# where it is opened O_RDONLY, stood in for here by an open that fails) still
+# takes the routes that need no fd of it. The bind and both connects reach
+# the socket through D in the first place, and nothing is made in the socket's
+# directory. A path whose directory part is a file is ENOTDIR before anything
+# is made.
+def test_a_socket_directory_that_cannot_be_opened_leaves_the_routes_without_its_fd(
+    tmp: TmpDirs, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    p = nest(tmp.new(), 600)
+    directory = parent(p)
+    d_place = tmp.new()
+    real_open_dir = _route.open_dir
+
+    def open_dir(d: bytes) -> int:
+        if d == directory:
+            raise PermissionError(errno.EACCES, os.strerror(errno.EACCES))
+        return real_open_dir(d)
+
+    monkeypatch.setattr(_route, "open_dir", open_dir)
+    cfg = central_cfg((d_place,))
+    listener, _ = _route.run_long(BIND, p, cfg)
+    with listener:
+        for req in (CONNECT, CONNECT_NONBLOCKING):
+            client, _ = _route.run_long(req, p, cfg)
+            with client:
+                accept_ping(listener, client)
+    assert listing(directory) == [os.path.basename(p)]
+    assert listing(d_place) == []
+    a_file = tmp.new() + b"/file"
+    with open(a_file, "wb"):
+        pass
+    for req in (BIND, CONNECT):
+        with pytest.raises(NotADirectoryError):
+            _route.run_long(req, a_file + b"/" + b"n" * 200, cfg)
+
+
 # The socket's directory needs only search and write permission, as for a
 # plain bind by path: it is opened O_PATH (Linux) / O_SEARCH (Apple), and D
 # lives elsewhere. A directory of mode 0300 cannot be opened O_RDONLY, yet the

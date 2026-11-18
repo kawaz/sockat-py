@@ -218,9 +218,12 @@ def routes(req: Request, path: bytes, cfg: Config) -> tuple[socket.socket, Route
     """The routes for a path longer than :data:`DIRECT_MAX`, with what they
     read from the environment given as ``cfg`` (the tests pass their own):
 
-    1. the socket's directory is opened first, so a missing or unopenable
-       directory is the real error it is, before any length is judged or
-       anything is made;
+    1. the socket's directory is looked up first (``stat``), so a missing
+       directory is ``ENOENT`` before any length is judged or anything is
+       made. It is then opened for the routes that need its fd (/proc,
+       ``connectat``, D in the socket's directory); when it cannot be opened
+       (no read permission where it is opened ``O_RDONLY``), those routes
+       cannot be used and the others are tried;
     2. the central route (:func:`central_route`): a private directory D,
        reached by its fd through a thread's own cwd (Linux, Apple) or
        ``bindat`` / ``connectat`` (FreeBSD), then through /proc (Linux);
@@ -229,9 +232,16 @@ def routes(req: Request, path: bytes, cfg: Config) -> tuple[socket.socket, Route
     """
     check_no_nul(path)
     directory, name = _path.split(path)
-    dirfd = open_dir(directory)
+    st = os.stat(directory)
+    if not stat.S_ISDIR(st.st_mode):
+        raise NotADirectoryError(errno.ENOTDIR, os.strerror(errno.ENOTDIR), os.fsdecode(directory))
+    dirfd: int | None
     try:
-        proc_ok = IS_LINUX and proc_fd_dir(dirfd, cfg.proc_self_fd) is not None
+        dirfd = open_dir(directory)
+    except OSError:
+        dirfd = None
+    try:
+        proc_ok = IS_LINUX and proc_usable(dirfd, cfg.proc_self_fd)
         done = central_route(req, directory, name, dirfd, cfg, proc_ok=proc_ok)
         if done is not None:
             return done
@@ -239,7 +249,24 @@ def routes(req: Request, path: bytes, cfg: Config) -> tuple[socket.socket, Route
             return bind_without_central(req, path, directory, name, cfg)
         return connect_fallbacks(req, path, directory, name, dirfd, cfg, proc_ok=proc_ok)
     finally:
-        os.close(dirfd)
+        if dirfd is not None:
+            os.close(dirfd)
+
+
+def proc_usable(dirfd: int | None, proc_self_fd: bytes) -> bool:
+    """Whether /proc lists this process's fds at ``proc_self_fd``: looked up
+    for ``dirfd`` (the socket's directory), or, when that could not be
+    opened, for an fd of ``/`` opened for the purpose (Linux)."""
+    if dirfd is not None:
+        return proc_fd_dir(dirfd, proc_self_fd) is not None
+    try:
+        probe = open_dir(b"/")
+    except OSError:
+        return False
+    try:
+        return proc_fd_dir(probe, proc_self_fd) is not None
+    finally:
+        os.close(probe)
 
 
 def bind_without_central(
@@ -468,7 +495,7 @@ class OwnDir:
     def make(
         cls,
         places: tuple[OwnDirPlace, ...],
-        socket_dirfd: int,
+        socket_dirfd: int | None,
         target: bytes,
         *,
         proc_self_fd: bytes,
@@ -489,7 +516,7 @@ class OwnDir:
     def _make_in(
         cls,
         place: OwnDirPlace,
-        socket_dirfd: int,
+        socket_dirfd: int | None,
         target: bytes,
         proc_self_fd: bytes,
         link_name: bytes | None,
@@ -510,6 +537,9 @@ class OwnDir:
         it is left alone, contents and all; one that passed the check but
         could not be set to 0700 or given the symlink is removed again."""
         if place is SOCKET_DIR:
+            if socket_dirfd is None:
+                # The socket's directory could not be opened: no place.
+                return None
             base_fd, owns_base, prefix = socket_dirfd, False, OWN_DIR_PREFIX_IN_SOCKET_DIR
         else:
             try:
@@ -682,7 +712,7 @@ class Means(Enum):
     PROC = "proc"
 
 
-def central_means(name: bytes, dirfd: int, cfg: Config, *, proc_ok: bool) -> list[Means]:
+def central_means(name: bytes, dirfd: int | None, cfg: Config, *, proc_ok: bool) -> list[Means]:
     """The means of the central route that can be tried for ``name``, in
     order, judged as far as they can be before D is made (SPEC: nothing is
     made for means that cannot be used):
@@ -704,14 +734,18 @@ def central_means(name: bytes, dirfd: int, cfg: Config, *, proc_ok: bool) -> lis
     if fits and cfg.thread_cwd and HAS_THREAD_CWD and thread_cwd_possible():
         means.append(Means.THREAD_CWD)
     if proc_ok:
-        estimate = _join(_join(cfg.proc_self_fd, str(dirfd).encode()), b"R" * RANDOM_LEN + b"/" + name)
+        # D's fd is not known before D is opened; the socket directory's (or a
+        # two-digit one when that is not open) stands in, and the exact length
+        # is checked again with D's own fd.
+        digits = str(dirfd if dirfd is not None else 10).encode()
+        estimate = _join(_join(cfg.proc_self_fd, digits), b"R" * RANDOM_LEN + b"/" + name)
         if len(estimate) <= DIRECT_MAX:
             means.append(Means.PROC)
     return means
 
 
 def central_route(
-    req: Request, directory: bytes, name: bytes, dirfd: int, cfg: Config, *, proc_ok: bool
+    req: Request, directory: bytes, name: bytes, dirfd: int | None, cfg: Config, *, proc_ok: bool
 ) -> tuple[socket.socket, Route] | None:
     """The central route (SPEC): D in the first of
     :attr:`Config.own_dir_places` where it can be made (:class:`OwnDir`),
@@ -835,7 +869,7 @@ def connect_fallbacks(
     path: bytes,
     directory: bytes,
     name: bytes,
-    dirfd: int,
+    dirfd: int | None,
     cfg: Config,
     *,
     proc_ok: bool,
@@ -859,10 +893,12 @@ def connect_fallbacks(
     route would reach).
     """
     if IS_FREEBSD:
+        if dirfd is None:
+            raise _enametoolong()
         return at_op(req, dirfd, name), Route.AT_DIR
     wide = IS_APPLE and cfg.wide
     if proc_ok:
-        via = proc_spelling(dirfd, name, cfg.proc_self_fd)
+        via = proc_spelling(dirfd, name, cfg.proc_self_fd) if dirfd is not None else None
         if via is not None:
             return plain_op(req, via), Route.PROC_FD
         held = fd_held_route(req, path, dirfd, cfg)
@@ -902,7 +938,7 @@ def _absolute(path: bytes) -> bytes | None:
         return None
 
 
-def fd_held_route(req: Request, path: bytes, dirfd: int, cfg: Config) -> tuple[socket.socket, Route] | Skip:
+def fd_held_route(req: Request, path: bytes, dirfd: int | None, cfg: Config) -> tuple[socket.socket, Route] | Skip:
     """Connect to ``path`` through D (made as the central route makes it, in
     the first of :attr:`Config.own_dir_places` where it can be, steps 1, 2
     and 5) holding ``s``, a symlink to the socket file (``path`` made
