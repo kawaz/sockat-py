@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Literal, TypeAlias
 
-from . import _path
+from . import _path, _socket_file
 from ._sockets import PathSocket
 from ._sys import (
     DIRECT_MAX,
@@ -302,6 +302,7 @@ def _finish(req: Request, sock: socket.socket, call: Callable[[socket.socket], N
     try:
         call(sock)
         if req.op is Op.BIND:
+            _socket_file.bound()
             sock.listen()
     except BaseException:
         sock.close()

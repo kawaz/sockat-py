@@ -6,7 +6,45 @@ from __future__ import annotations
 import contextlib
 import os
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextvars import ContextVar
+
+
+class _Recorder:
+    """What ``bind_ex`` asks the bind to remember: the path given, and, once
+    the bind has gone through, ``discard`` for the file it made."""
+
+    def __init__(self, path: str | bytes) -> None:
+        self.path = path
+        self.discard: Callable[[], None] | None = None
+
+
+_recording: ContextVar[_Recorder | None] = ContextVar("sockat_bind_ex_recording", default=None)
+
+
+@contextlib.contextmanager
+def recording(path: str | bytes) -> Iterator[_Recorder]:
+    """Have the bind made inside the ``with`` block remember the socket file
+    at ``path`` right after the bind goes through (:func:`bound`), before
+    the listener is returned."""
+    recorder = _Recorder(path)
+    token = _recording.set(recorder)
+    try:
+        yield recorder
+    finally:
+        _recording.reset(token)
+
+
+def bound() -> None:
+    """Called by every route right after its bind went through (before the
+    listen): when a ``bind_ex`` is recording, remember the socket file now,
+    so a file put at the path after the bind returned cannot be remembered
+    in its place. A failure to remember is raised, and the route closes the
+    socket (a ``discard`` that could not remove the file must not look like
+    one that can)."""
+    recorder = _recording.get()
+    if recorder is not None and recorder.discard is None:
+        recorder.discard = remember(recorder.path)
 
 
 def remember(path: str | bytes) -> Callable[[], None]:
@@ -22,8 +60,9 @@ def remember(path: str | bytes) -> Callable[[], None]:
     nothing.
 
     Between the check and the removal another process could still replace
-    the file (there is no unlink-if-same-inode call); the guarantee is
-    against a file replaced before ``discard`` is called."""
+    the file: POSIX has no call that removes a name only if it still refers
+    to a given inode. The guarantee is against a file replaced before
+    ``discard`` is called."""
     raw = os.fsencode(path)
     if (sys.platform.startswith("linux") or sys.platform == "android") and raw.startswith(b"\0"):
         return lambda: None

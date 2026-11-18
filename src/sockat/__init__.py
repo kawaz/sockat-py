@@ -69,8 +69,9 @@ def bind_ex(path: StrOrBytesPath) -> tuple[socket.socket, Callable[[], None]]:
     """:func:`bind`, and a function ``discard`` that removes the socket file
     the bind made: ``listener, discard = sockat.bind_ex(path)``.
 
-    Right after the bind, the realpath of the socket file and its
-    ``(st_dev, st_ino)`` are remembered. ``discard()`` removes the file at
+    Right after the bind goes through, before the listener is returned, the
+    realpath of the socket file and its ``(st_dev, st_ino)`` are remembered
+    (when that fails, the listener is closed and the error raised). ``discard()`` removes the file at
     that realpath only while it is still that file: when it is gone, or has
     been replaced by another file, it does nothing. It may be called any
     number of times. It does not close the listener (close it yourself, or
@@ -82,12 +83,12 @@ def bind_ex(path: StrOrBytesPath) -> tuple[socket.socket, Callable[[], None]]:
     since the listener reports the path given; ``discard`` is the way that
     does not depend on the reader.
     """
-    listener = bind(path)
-    try:
-        discard = _socket_file.remember(os.fspath(path))
-    except BaseException:
+    with _socket_file.recording(os.fspath(path)) as recorder:
+        listener = bind(path)
+    discard = recorder.discard
+    if discard is None:  # every route records right after its bind
         listener.close()
-        raise
+        raise RuntimeError("the bind did not record the socket file it made")
     return listener, discard
 
 

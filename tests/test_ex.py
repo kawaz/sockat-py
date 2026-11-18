@@ -7,7 +7,9 @@ from __future__ import annotations
 import asyncio
 import os
 import socket
+import stat
 import sys
+from collections.abc import Callable
 
 import pytest
 from _support import (
@@ -21,6 +23,7 @@ from _support import (
 )
 
 import sockat
+from sockat import _route, _socket_file
 from sockat._sockets import PathSocket
 from sockat._sys import DIRECT_MAX
 
@@ -158,3 +161,63 @@ def test_discard_of_an_abstract_address_does_nothing() -> None:
         discard()
         with sockat.connect(addr) as client:
             accept_ping(listener, client)
+
+
+# The socket file is remembered right after the bind goes through, inside the
+# route and before the listen and the return (SPEC: remembering it after
+# bind_ex got the listener back could take in a file put at the path in
+# between). Checked by the order of the calls: remembering comes before the
+# listen, and what it finds at the path then is the socket the bind made.
+@pytest.mark.parametrize("total", LENGTHS)
+def test_the_file_is_remembered_before_the_listener_is_returned(
+    tmp: TmpDirs, monkeypatch: pytest.MonkeyPatch, total: int
+) -> None:
+    p = nest(tmp.new(), total)
+    events: list[str] = []
+    real_remember = _socket_file.remember
+    real_listen = socket.socket.listen
+
+    def remember(path: str | bytes) -> Callable[[], None]:
+        events.append("remember" if stat.S_ISSOCK(os.lstat(p).st_mode) else "remember-no-socket")
+        return real_remember(path)
+
+    def listen(self: socket.socket, *args: int) -> None:
+        events.append("listen")
+        real_listen(self, *args)
+
+    monkeypatch.setattr(_socket_file, "remember", remember)
+    monkeypatch.setattr(socket.socket, "listen", listen)
+    listener, discard = sockat.bind_ex(p)
+    monkeypatch.setattr(socket.socket, "listen", real_listen)
+    with listener:
+        assert events == ["remember", "listen"], events
+        discard()
+    assert not os.path.exists(p)
+
+
+# When the socket file cannot be remembered, bind_ex closes the listener and
+# raises, leaving the file where it is: a discard that could not remove the
+# file must not be handed back as if it could.
+@pytest.mark.parametrize("total", LENGTHS)
+def test_a_file_that_cannot_be_remembered_fails_the_bind_and_closes_the_listener(
+    tmp: TmpDirs, monkeypatch: pytest.MonkeyPatch, total: int
+) -> None:
+    p = nest(tmp.new(), total)
+    made: list[socket.socket] = []
+    real_new_socket = _route.new_socket
+
+    def new_socket(req: _route.Request, *, standard: bool = False) -> socket.socket:
+        sock = real_new_socket(req, standard=standard)
+        made.append(sock)
+        return sock
+
+    def remember(path: str | bytes) -> Callable[[], None]:
+        raise PermissionError(13, "stand-in")
+
+    monkeypatch.setattr(_route, "new_socket", new_socket)
+    monkeypatch.setattr(_socket_file, "remember", remember)
+    with pytest.raises(PermissionError):
+        sockat.bind_ex(p)
+    assert made
+    assert all(s.fileno() == -1 for s in made)
+    assert stat.S_ISSOCK(os.lstat(p).st_mode)
