@@ -359,8 +359,8 @@ def test_the_thread_cwd_route_never_changes_the_process_cwd(tmp: TmpDirs) -> Non
 # Where the thread-cwd route cannot be used, the order goes on to the next
 # place (the fork route's, ENAMETOOLONG here) with nothing created:
 #
-# * the system refuses a cwd of the thread's own (Linux: unshare(CLONE_FS)
-#   refused, as docker's default seccomp does with EPERM; Apple:
+# * the system refuses a cwd of the thread's own (Linux: a seccomp filter is
+#   on, as under docker's default, or unshare(CLONE_FS) is refused; Apple:
 #   pthread_fchdir_np missing or failing) — on such a system the real
 #   refusal is what is checked, elsewhere it is stood in for at the boundary
 #   (enter_dir_in_this_thread answering False);

@@ -107,11 +107,10 @@ def test_the_widened_sockaddr_is_not_there_elsewhere() -> None:
 
 # A thread entered into a directory has that directory as its own cwd (what
 # the thread-cwd route binds / connects the file name against), while the
-# process cwd, which every other thread keeps using, does not change. On
-# Apple the thread can leave it again (pthread_fchdir_np(-1)) and is back at
-# the process cwd. Where the system refuses a cwd of the thread's own (Linux
-# under docker's default seccomp, which refuses unshare(CLONE_FS)), entering
-# answers False and nothing changes.
+# process cwd, which every other thread keeps using, does not change. Where
+# the system will not give the thread a cwd of its own (Linux under a seccomp
+# filter such as docker's default, where unshare(CLONE_FS) is not even tried),
+# entering answers False and nothing changes.
 @pytest.mark.skipif(not _sys.HAS_THREAD_CWD, reason="no thread cwd on this system")
 def test_a_thread_gets_a_cwd_of_its_own(tmp: TmpDirs) -> None:
     target = os.path.dirname(nest(tmp.new(), 100, b"x"))
@@ -123,9 +122,6 @@ def test_a_thread_gets_a_cwd_of_its_own(tmp: TmpDirs) -> None:
         entered = _sys.enter_dir_in_this_thread(fd)
         seen["entered"] = entered
         seen["inside"] = dir_id(".")
-        if entered:
-            _sys.leave_dir_in_this_thread()
-            seen["after"] = dir_id(".")
 
     try:
         th = threading.Thread(target=in_thread)
@@ -137,7 +133,5 @@ def test_a_thread_gets_a_cwd_of_its_own(tmp: TmpDirs) -> None:
     assert seen["entered"] is thread_cwd_usable()
     if thread_cwd_usable():
         assert seen["inside"] == dir_id(target)
-        if sys.platform == "darwin":
-            assert seen["after"] == process_cwd
     else:
         assert seen["inside"] == process_cwd

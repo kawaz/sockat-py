@@ -100,7 +100,7 @@ Linux / Android and macOS / iOS. Only the cwd of a throwaway `threading.Thread` 
 
 | OS | How | When it cannot be used |
 |---|---|---|
-| Linux / Android | ctypes `unshare(CLONE_FS)` → `os.fchdir` | `unshare` is refused (docker's default seccomp gives `EPERM`) |
+| Linux / Android | ctypes `unshare(CLONE_FS)` → `os.fchdir` | a seccomp filter is on (docker's default, systemd's `SystemCallFilter=`; `unshare` is then not called, since a filter may kill the process for it), or `unshare` is refused |
 | macOS / iOS | ctypes `pthread_fchdir_np` (a private libSystem API) | the function is missing or fails |
 
 - Neither the process's cwd nor any other thread's cwd changes. The peer pid seen by the party connected to is still the caller's
@@ -137,7 +137,7 @@ When a path longer than the standard library accepts is `ENAMETOOLONG` (bytes).
 |---|---|
 | /proc | `/proc/self/fd/<fd>/<file name>` (the fd is closed by then) |
 | relative path | the relative path |
-| widened sockaddr | a truncated path. On CPython 3.15 for macOS, unrelated bytes may follow the cut (the behaviour of the standard library's `getsockname`; 3.13 cuts it exactly) |
+| widened sockaddr | a truncated path. On CPython for macOS, unrelated bytes may follow the cut (the behaviour of the standard library's `getsockname` / `getpeername`; seen on every version from 3.11 to 3.15, varying from run to run). Getting it never raises |
 | symlink | a path through a symlink that no longer exists |
 | thread cwd, bindat | the file name alone |
 

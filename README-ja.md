@@ -69,7 +69,7 @@ pip install sockat
 
 - どの経路も呼び出し元のプロセスの cwd を変えないので、マルチスレッドのプログラムから使える
 - どの経路にも収まらないパスは、標準で長すぎるパスと同じく `ENAMETOOLONG` (errno 付きの `OSError`) になる
-- スレッド cwd の経路を使える macOS / Linux では、ファイル名が 253 バイト (Linux は 107) 以内ならどの深さでも届く。docker の既定の seccomp の下の Linux ではスレッド cwd の経路を使えない
+- スレッド cwd の経路を使える macOS / Linux では、ファイル名が 253 バイト (Linux は 107) 以内ならどの深さでも届く。seccomp の filter の下 (docker の既定等) の Linux ではスレッド cwd の経路を使えない
 - 各経路の長さの上限と、どこから届かなくなるかは [docs/MANUAL-ja.md](./docs/MANUAL-ja.md#長いパスへの届き方) にある
 
 ## 長いパスで標準と違う点

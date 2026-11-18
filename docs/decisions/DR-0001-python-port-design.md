@@ -20,7 +20,7 @@
 | 相対パス | 文字列を書き直して標準に渡す | FreeBSD 以外 |
 | 広げた sockaddr | ctypes で libc の `bind(2)` / `connect(2)` に手で組んだ sockaddr を渡す | macOS / iOS |
 | symlink | `os.symlink` で作り、標準に渡し、消す | FreeBSD 以外 |
-| スレッド cwd | 使い捨ての `threading.Thread` で、ctypes の `unshare(CLONE_FS)` → `os.fchdir` (Linux) / `pthread_fchdir_np` (Apple) をしてから、そのスレッドでファイル名で bind / connect | Linux / Android、Apple の OS |
+| スレッド cwd | sockat が作る使い捨ての `threading.Thread` で、ctypes の `unshare(CLONE_FS)` → `os.fchdir` (Linux。seccomp の filter が掛かっていれば `unshare` を呼ばずに使えないとみなす) / `pthread_fchdir_np` (Apple) をしてから、そのスレッドでファイル名で bind / connect し、スレッドを捨てる | Linux / Android、Apple の OS |
 | fork | 作らない (PY-Q1 の推奨 a) | — |
 
 - 経路の順番、使える条件、失敗をやり直さない扱い、symlink の置き場と名前は SPEC のとおり
@@ -90,7 +90,7 @@
 
 ## Consequences
 
-- fork の経路でしか届かない所は、bind も connect も `ENAMETOOLONG` になる。そうなるのは、スレッド cwd の経路が使えず (NetBSD / OpenBSD / illumos、`unshare` を断る seccomp の下の /proc の無い Linux)、bind でファイル名が symlink の綴りに収まらないか、symlink を置ける場所が無い時。README の OS × 経路の表に「fork の経路なし」と書く
+- fork の経路でしか届かない所は、bind も connect も `ENAMETOOLONG` になる。そうなるのは、スレッド cwd の経路が使えず (NetBSD / OpenBSD / illumos、seccomp の filter の下の /proc の無い Linux)、bind でファイル名が symlink の綴りに収まらないか、symlink を置ける場所が無い時。README の OS × 経路の表に「fork の経路なし」と書く
 - PY-Q1 で C 拡張を入れることになったら、決定 1 の fork の行と決定 2 の `connect_any` 系、決定 6 の配布を書き換える。経路の本体は Python のまま。`connect_any` 系は既定で import されない別のモジュール (例: `sockat.any`) に置く (ハブの DR-0007: `connect_any` 系は使う人が選んで有効にする仕組みの後ろに置く)
 - SPEC が変わったら、この実装と README / MANUAL を追従させる
 

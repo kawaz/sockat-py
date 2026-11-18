@@ -310,8 +310,8 @@ def posix_cfg(
 @functools.cache
 def thread_cwd_usable() -> bool:
     """Whether the thread-cwd route can be used here: a throwaway thread gets
-    a cwd of its own (Linux: ``unshare(CLONE_FS)``, which docker's default
-    seccomp refuses with ``EPERM``; Apple: ``pthread_fchdir_np``).
+    a cwd of its own (Linux: ``unshare(CLONE_FS)``, not tried under a seccomp
+    filter such as docker's default; Apple: ``pthread_fchdir_np``).
 
     Probed on the running system. Where the answer is known in advance it is
     asserted, so a broken probe cannot quietly move the tests to the "not
@@ -324,10 +324,7 @@ def thread_cwd_usable() -> bool:
     got: list[bool] = []
 
     def probe() -> None:
-        entered = _sys.enter_dir_in_this_thread(fd)
-        if entered:
-            _sys.leave_dir_in_this_thread()
-        got.append(entered)
+        got.append(_sys.enter_dir_in_this_thread(fd))
 
     try:
         th = threading.Thread(target=probe)

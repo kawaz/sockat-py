@@ -27,7 +27,6 @@ from ._sys import (
     WIDE_PATH_MAX,
     Op,
     enter_dir_in_this_thread,
-    leave_dir_in_this_thread,
     op,
     op_at,
     sockaddr,
@@ -401,7 +400,7 @@ def thread_cwd_op(req: Request, dirfd: int, name: bytes, wide: bool) -> socket.s
     :attr:`Skip.UNUSABLE` when the route cannot be used: the file name does
     not fit a sockaddr (the widened one on Apple when ``wide``), the thread
     cannot be started, or the system refuses a cwd of the thread's own
-    (``unshare`` refused, as docker's default seccomp does; no
+    (a seccomp filter on, as under docker's default, or ``unshare`` refused; no
     ``pthread_fchdir_np``, or it failed), or the kernel refuses the widened
     sockaddr a file name over :data:`DIRECT_MAX` bytes needs (Apple:
     :func:`refuses_wide`). Any other failure is the outcome.
@@ -434,15 +433,12 @@ def thread_cwd_op(req: Request, dirfd: int, name: bytes, wide: bool) -> socket.s
             if not enter_dir_in_this_thread(dirfd):
                 outcome.append(Skip.UNUSABLE)
                 return
-            try:
-                if addr is not None:
-                    op(req.op, sock, addr)
-                elif req.op is Op.BIND:
-                    sock.bind(name)
-                else:
-                    sock.connect(name)
-            finally:
-                leave_dir_in_this_thread()
+            if addr is not None:
+                op(req.op, sock, addr)
+            elif req.op is Op.BIND:
+                sock.bind(name)
+            else:
+                sock.connect(name)
             outcome.append(None)
         except BaseException as e:
             outcome.append(e)

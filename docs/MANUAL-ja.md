@@ -100,7 +100,7 @@ Linux / Android と macOS / iOS。使い捨ての `threading.Thread` の cwd だ
 
 | OS | やり方 | 使えない時 |
 |---|---|---|
-| Linux / Android | ctypes の `unshare(CLONE_FS)` → `os.fchdir` | `unshare` を断られた時 (docker の既定の seccomp は `EPERM`) |
+| Linux / Android | ctypes の `unshare(CLONE_FS)` → `os.fchdir` | seccomp の filter が掛かっている時 (docker の既定、systemd の `SystemCallFilter=` 等。filter が `unshare` でプロセスを kill しうるので呼ばない)、または `unshare` を断られた時 |
 | macOS / iOS | ctypes の `pthread_fchdir_np` (libSystem の非公開 API) | 関数が無い、または失敗した時 |
 
 - プロセスの cwd も、他のスレッドの cwd も変わらない。connect した相手から見える peer の pid も呼び出し元のまま
@@ -137,7 +137,7 @@ Linux / Android と macOS / iOS。使い捨ての `threading.Thread` の cwd だ
 |---|---|
 | /proc | `/proc/self/fd/<fd>/<ファイル名>` (fd はもう閉じている) |
 | 相対パス | 相対パス |
-| 広げた sockaddr | 途中で切れたパス。CPython 3.15 の macOS 版では、切れた後ろに無関係なバイトが付くことがある (標準の `getsockname` の振る舞い。3.13 はちょうど切れる) |
+| 広げた sockaddr | 途中で切れたパス。macOS の CPython では、切れた後ろに無関係なバイトが付くことがある (標準の `getsockname` / `getpeername` の振る舞い。3.11〜3.15 のどれでも起き、実行ごとに変わる)。取得で例外にはならない |
 | symlink | もう無い symlink を通したパス |
 | スレッド cwd、bindat | ファイル名だけ |
 

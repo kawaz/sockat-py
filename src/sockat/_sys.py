@@ -12,9 +12,8 @@ Contents:
 * :func:`op` — ``bind(2)`` / ``connect(2)`` of a ``socket.socket`` with such an
   address.
 * :func:`op_at` — ``bindat(2)`` / ``connectat(2)`` (FreeBSD).
-* :func:`enter_dir_in_this_thread` / :func:`leave_dir_in_this_thread` — a cwd
-  of the calling thread's own (Linux: ``unshare(CLONE_FS)``, Apple:
-  ``pthread_fchdir_np``).
+* :func:`enter_dir_in_this_thread` — a cwd of the calling thread's own
+  (Linux: ``unshare(CLONE_FS)``, Apple: ``pthread_fchdir_np``).
 
 :mod:`ctypes` is imported on first use, so a system that never needs these
 calls (Linux, whose long paths go through /proc) never loads it.
@@ -208,23 +207,32 @@ HAS_THREAD_CWD = IS_LINUX or IS_APPLE
 _CLONE_FS = 0x200
 """``CLONE_FS`` of ``<sched.h>`` (Linux)."""
 
+_PR_GET_SECCOMP = 21
+"""``PR_GET_SECCOMP`` of ``<linux/prctl.h>``."""
+
 
 def enter_dir_in_this_thread(dirfd: int) -> bool:
     """Make the directory ``dirfd`` the cwd of the calling thread only, and
     ``True``; ``False`` when the system will not give the thread a cwd of its
     own. The process cwd, which every other thread keeps using, is not
-    changed.
+    changed. Call it only from a thread made for the purpose and thrown away
+    afterwards: the thread keeps that cwd until it ends.
 
     * Linux: ``unshare(CLONE_FS)`` (the thread stops sharing the cwd with the
-      rest of the process; ``False`` when refused, as docker's default seccomp
-      does with ``EPERM``), then ``fchdir(dirfd)`` (its failure is raised).
-      This cannot be undone: the thread must be thrown away afterwards.
+      rest of the process), then ``fchdir(dirfd)`` (its failure is raised).
+      ``False`` without calling ``unshare`` when a seccomp filter is on
+      (``prctl(PR_GET_SECCOMP)`` is not 0): a filter may answer ``unshare``
+      by killing the process (``SIGSYS``, as systemd's ``SystemCallFilter=``
+      does) rather than with an error. ``False`` also when ``unshare`` is
+      refused.
     * Apple: ``pthread_fchdir_np(dirfd)``, a private libSystem function looked
       up at run time (``False`` when it is missing or fails).
     """
     import ctypes as c
 
     if IS_LINUX:
+        if _c().prctl(c.c_int(_PR_GET_SECCOMP), c.c_ulong(0), c.c_ulong(0), c.c_ulong(0), c.c_ulong(0)) != 0:
+            return False
         if _c().unshare(c.c_int(_CLONE_FS)) != 0:
             return False
         os.fchdir(dirfd)
@@ -237,13 +245,3 @@ def enter_dir_in_this_thread(dirfd: int) -> bool:
         rc: int = fchdir_np(c.c_int(dirfd))
         return rc == 0
     return False
-
-
-def leave_dir_in_this_thread() -> None:
-    """Undo :func:`enter_dir_in_this_thread` where that can be done (Apple:
-    ``pthread_fchdir_np(-1)`` returns the thread to the process cwd). On Linux
-    the thread keeps its own cwd until it ends."""
-    if IS_APPLE:
-        import ctypes as c
-
-        _c().pthread_fchdir_np(c.c_int(-1))

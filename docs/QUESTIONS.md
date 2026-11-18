@@ -23,7 +23,7 @@
 - [ ] a (推奨): 入れない。純 Python + ctypes、fork の経路なし、`connect_any` 系を出さない。wheel は `py3-none-any` 1 つ
 - [ ] b: 小さな C 拡張で fork の経路を作り、`connect_any` 系も既定で import されない別のモジュール (例: `sockat.any`) に出す。OS × arch ごとの wheel (cibuildwheel)、他の Unix と PyPy は sdist からコンパイル
 
-fork の経路まで進むのは、スレッド cwd の経路 (Linux / macOS) が使えない環境 (NetBSD / OpenBSD / illumos、`unshare` を断る seccomp の下の /proc の無い Linux) で、symlink も使えない時だけ。a から b への移行は機能の追加で済む (経路の本体は Python のまま)。
+fork の経路まで進むのは、スレッド cwd の経路 (Linux / macOS) が使えない環境 (NetBSD / OpenBSD / illumos、seccomp の filter の下の /proc の無い Linux) で、symlink も使えない時だけ。a から b への移行は機能の追加で済む (経路の本体は Python のまま)。
 
 #### 背景説明
 

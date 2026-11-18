@@ -69,7 +69,7 @@ A longer path is tried on the routes below, in this order per OS, and bound / co
 
 - None of the routes changes the calling process's cwd, so they can be used from multi-threaded programs
 - A path that fits no route gets `ENAMETOOLONG` (an `OSError` with errno), as a path too long for the standard library does
-- On macOS / Linux, where the thread cwd route can be used, a path is reached at any depth as long as the file name is within 253 bytes (107 on Linux). Under docker's default seccomp, Linux cannot use the thread cwd route
+- On macOS / Linux, where the thread cwd route can be used, a path is reached at any depth as long as the file name is within 253 bytes (107 on Linux). Linux cannot use the thread cwd route under a seccomp filter (docker's default, for example)
 - The length limits of each route, and where a path stops being reached, are in [docs/MANUAL.md](./docs/MANUAL.md#how-a-long-path-is-reached)
 
 ## What differs from the standard library for a long path
