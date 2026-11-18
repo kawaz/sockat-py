@@ -24,7 +24,7 @@ jobs:
         python: ["3.11", "3.15"]
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.3.3
         with:
           python-version: ${{ matrix.python }}
       - uses: extractions/setup-just@v4
@@ -54,8 +54,12 @@ jobs:
       - uses: vmactions/freebsd-vm@v1
         with:
           usesh: true
-          prepare: pkg install -y py311-pytest
-          run: PYTHONPATH=src python3.11 -m pytest -q -p no:cacheprovider
+          # The flavour of the pytest package follows FreeBSD's default Python
+          # (py311-, py312-, ...), so it is read off the python3 package.
+          prepare: |
+            pkg install -y python3
+            pkg install -y "$(python3 -c 'import sys; print("py%d%d-pytest" % sys.version_info[:2])')"
+          run: PYTHONPATH=src python3 -m pytest -q -p no:cacheprovider
 
   # The Unix systems without a dirfd-relative bind / connect or a thread cwd.
   # They run the whole suite in a VM so the routes they share with macOS

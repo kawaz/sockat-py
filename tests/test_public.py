@@ -30,6 +30,7 @@ from _support import (
     ping,
     raises_errno,
     recv_exact,
+    run_child,
     stale_socket,
     with_name,
 )
@@ -348,33 +349,13 @@ def test_the_sockets_are_set_up_as_the_standard_sets_them_up(tmp: TmpDirs, total
 # connects get into a sockat listener on a long path before it is full as into
 # a standard listener on a short one. Counted against the standard rather
 # than a number, since the default and how the kernel rounds it differ by
-# system.
+# system. Each queued connect holds an fd, so the count runs in a child
+# process that raises its own limit of open files (_children.default_backlog).
 def test_the_listener_has_the_standards_default_backlog(tmp: TmpDirs) -> None:
     t = tmp.new()
-
-    def fill(listener: socket.socket, path: bytes) -> int:
-        queued: list[socket.socket] = []
-        try:
-            while len(queued) < 10_000:
-                try:
-                    queued.append(sockat.connect_nonblocking(path))
-                except (BlockingIOError, ConnectionRefusedError):
-                    return len(queued)
-            raise AssertionError("the backlog never filled")
-        finally:
-            for c in queued:
-                c.close()
-
-    short = t + b"/std.sock"
-    std = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    with std:
-        std.bind(short)
-        std.listen()
-        std_count = fill(std, short)
-    long = nest(t, 400)
-    with sockat.bind(long) as listener:
-        assert fill(listener, long) == std_count
-    assert std_count > 1
+    got = run_child("default_backlog", t, args={"DIR": t})
+    assert got["sockat"] == got["std"]
+    assert int(got["std"]) > 1
 
 
 # Short paths are the standard's business: sockat hands them over unchanged, so

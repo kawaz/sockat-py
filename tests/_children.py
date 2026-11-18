@@ -11,8 +11,10 @@ assertion exits non-zero, which fails the test.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
+import resource
 import socket
 import sys
 from collections.abc import Callable
@@ -27,10 +29,12 @@ from _support import (
     check_route,
     forced,
     is_socket,
+    nest,
     posix_cfg,
     with_name,
 )
 
+import sockat
 from sockat import _route
 from sockat._route import BIND, CONNECT, Config, Route
 from sockat._sys import DIRECT_MAX
@@ -216,6 +220,47 @@ def cwd_changed() -> None:
     report(bind=repr(bind_error), connect=repr(connect_error))
 
 
+def default_backlog() -> None:
+    """Fill a standard listener at a short path under DIR and a sockat
+    listener at a 400-byte path with nonblocking connects, and report how many
+    got into each before it was full.
+
+    Every queued connect holds an fd, so the soft limit of open files is first
+    raised to the hard one: a default soft limit can run out before the
+    backlog fills (OpenBSD's does), which would end the count early with
+    EMFILE rather than at the backlog. The limit is process-wide, hence the
+    child process."""
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    want = hard if hard != resource.RLIM_INFINITY else 10_240
+    if soft != resource.RLIM_INFINITY and soft < want:
+        with contextlib.suppress(ValueError, OSError):
+            resource.setrlimit(resource.RLIMIT_NOFILE, (want, hard))
+
+    def fill(path: bytes) -> int:
+        queued: list[socket.socket] = []
+        try:
+            while len(queued) < 10_000:
+                try:
+                    queued.append(sockat.connect_nonblocking(path))
+                except (BlockingIOError, ConnectionRefusedError):
+                    return len(queued)
+            raise AssertionError("the backlog never filled")
+        finally:
+            for c in queued:
+                c.close()
+
+    t = arg("DIR")
+    short = t + b"/std.sock"
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as std:
+        std.bind(short)
+        std.listen()
+        std_count = fill(short)
+    long = nest(t, 400)
+    with sockat.bind(long):
+        sockat_count = fill(long)
+    report(std=str(std_count), sockat=str(sockat_count))
+
+
 SCENARIOS: dict[str, Callable[[], None]] = {
     f.__name__: f
     for f in (
@@ -226,6 +271,7 @@ SCENARIOS: dict[str, Callable[[], None]] = {
         relative_failures,
         relative_input,
         cwd_changed,
+        default_backlog,
     )
 }
 
