@@ -29,6 +29,7 @@ from _support import (
     mark_untouched,
     nest,
     parent,
+    place,
     posix_cfg,
     raises_errno,
     run_child,
@@ -224,15 +225,6 @@ def test_a_place_must_be_sticky_or_the_users_own(mode: int, owner: int, want: bo
 
 def test_roots_own_place_is_safe_for_root() -> None:
     assert _route.only_we_can_replace(0o700 | stat.S_IFDIR, 0, 0)
-
-
-def place(parent_dir: bytes, name: bytes, mode: int) -> bytes:
-    """A directory ``name`` under ``parent_dir`` with exactly ``mode`` (set
-    after creating it, so the umask does not interfere)."""
-    d = parent_dir + b"/" + name
-    os.mkdir(d)
-    os.chmod(d, mode)
-    return d
 
 
 # The same rule on real directories, through the route order. A place anyone may

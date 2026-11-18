@@ -86,6 +86,24 @@ def bind_from_env() -> None:
     report(route=route.value, bases=json.dumps([os.fsdecode(b) for b in cfg.tmp_bases]))
 
 
+def connect_report() -> None:
+    """Connect to PATH (absolute, or relative to the cwd) on Linux with the
+    real /proc and no thread-cwd route, through BASE as the only place for
+    the symlink, or through the places read from the environment
+    (``Config.from_env``: ``$TMPDIR``, then ``/tmp``) when BASE is not given,
+    with the umask UMASK (octal) when given, and report the route and the
+    places."""
+    umask = opt_arg("UMASK")
+    if umask is not None:
+        os.umask(int(umask, 8))
+    base = opt_arg("BASE")
+    bases = (base,) if base is not None else Config.from_env().tmp_bases
+    cfg = Config(tmp_bases=bases, proc_self_fd=b"/proc/self/fd", thread_cwd=False)
+    client, route = _route.run_long(CONNECT, arg("PATH"), cfg)
+    client.close()
+    report(route=route.value, bases=json.dumps([os.fsdecode(b) for b in cfg.tmp_bases]))
+
+
 def relative_routes() -> None:
     """Every check of a forced route (:func:`_support.check_route`, and
     :func:`_support.check_full_backlog`) on the relative route, with PATH
@@ -267,6 +285,7 @@ SCENARIOS: dict[str, Callable[[], None]] = {
         make_stale_socket,
         bind_report,
         bind_from_env,
+        connect_report,
         relative_routes,
         relative_failures,
         relative_input,

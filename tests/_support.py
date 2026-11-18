@@ -156,6 +156,15 @@ def listing(d: bytes) -> list[bytes]:
     return sorted(os.listdir(d))
 
 
+def place(parent_dir: bytes, name: bytes, mode: int) -> bytes:
+    """A directory ``name`` under ``parent_dir`` with exactly ``mode`` (set
+    after creating it, so the umask does not interfere)."""
+    d = parent_dir + b"/" + name
+    os.mkdir(d)
+    os.chmod(d, mode)
+    return d
+
+
 def assert_empty(d: bytes) -> None:
     """Nothing was left in ``d`` (the place for the symlink)."""
     left = os.listdir(d)
