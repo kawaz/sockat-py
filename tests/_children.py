@@ -11,6 +11,7 @@ assertion exits non-zero, which fails the test.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import errno
 import json
@@ -25,6 +26,7 @@ from _support import (
     RESULT_MARK,
     Forced,
     accept_ping,
+    assert_cleaned_up_as_asyncio_does,
     assert_untouched,
     check_full_backlog,
     check_route,
@@ -34,12 +36,14 @@ from _support import (
     posix_cfg,
     raises_errno,
     routes,
+    serve_asyncio,
+    thread_cwd_usable,
     with_name,
 )
 
 import sockat
 from sockat import _route
-from sockat._route import BIND, CONNECT, Config, Route
+from sockat._route import BIND, CONNECT, Config, Request, Route
 from sockat._sys import DIRECT_MAX, WIDE_PATH_MAX
 
 
@@ -181,10 +185,94 @@ def relative_input() -> None:
     listener, bind_route = _route.run_long(BIND, rel, cfg)
     with listener:
         assert is_socket(rel)
+        # Reported as given, relative, as the standard reports a short
+        # relative path it bound or connected to.
+        assert listener.getsockname() == os.fsdecode(rel)
         client, connect_route = _route.run_long(CONNECT, rel, cfg)
         with client:
+            assert client.getpeername() == os.fsdecode(rel)
             accept_ping(listener, client)
     report(bind=bind_route.value, connect=connect_route.value)
+
+
+UNRELATED = b"unrelated, not to be removed"
+"""What the files that stand next to a socket's spelling hold
+(:func:`asyncio_namesakes`)."""
+
+
+def put_unrelated(path: bytes) -> None:
+    with open(path, "wb") as f:
+        f.write(UNRELATED)
+
+
+def assert_unrelated(path: bytes, what: str) -> None:
+    assert os.path.lexists(path), what
+    with open(path, "rb") as f:
+        assert f.read() == UNRELATED, what
+
+
+def asyncio_namesakes() -> None:
+    """A listener whose kernel address is a spelling relative to the cwd, used
+    with asyncio as the standard's is (:func:`_support.serve_asyncio`, bound
+    before the loop), while a file unrelated to the socket sits where that
+    spelling names from the process cwd. asyncio (Python 3.13 and later)
+    removes the file at the listener's address when the server closes, if it
+    is still the inode it found there at the start: had it been handed the
+    spelling, it would have found the unrelated file both times and removed
+    it. It must be left alone, and the socket file at the path removed (or,
+    before 3.13, left) as for the standard's. Two spellings:
+
+    * the thread-cwd route (where the system allows it): the file name alone,
+      THREAD (far from the cwd, file name ``s.sock``), with ``s.sock`` in the
+      cwd unrelated;
+    * the relative route: REL below the cwd, then the cwd changed to OTHER,
+      which holds an unrelated file at REL's relative spelling, before the
+      loop starts.
+
+    Reports which of them ran."""
+    checked: list[str] = []
+
+    def public(path: bytes) -> Callable[[Request], socket.socket]:
+        def connect(req: Request) -> socket.socket:
+            return sockat.connect_nonblocking(path) if req.nonblocking else sockat.connect(path)
+
+        return connect
+
+    if thread_cwd_usable():
+        p = arg("THREAD")
+        name = os.path.basename(p)
+        put_unrelated(name)
+        listener, r = _route.run_long(BIND, p, posix_cfg(thread_cwd=True))
+        assert r is Route.THREAD_CWD, r
+        assert socket.socket.getsockname(listener) == os.fsdecode(name), "the premise: the kernel holds the name"
+        # Checked however the exchange ended: the server is closed (and its
+        # cleanup run) on the way out of a failure too.
+        try:
+            asyncio.run(serve_asyncio("thread-cwd", listener, public(p), os.fsdecode(p), served=True))
+        finally:
+            assert_unrelated(name, "the unrelated file in the cwd was removed")
+        assert_cleaned_up_as_asyncio_does("thread-cwd", p)
+        checked.append("thread-cwd")
+
+    p = arg("REL")
+    other = arg("OTHER")
+    rel = _route.Relative.new(p, os.path.dirname(p))
+    assert rel is not None
+    assert len(rel.path) <= DIRECT_MAX, rel
+    namesake = os.path.join(other, rel.path)
+    os.makedirs(os.path.dirname(namesake))
+    put_unrelated(namesake)
+    listener, r = _route.run_long(BIND, p, posix_cfg())
+    assert r is Route.RELATIVE, r
+    assert os.fsencode(socket.socket.getsockname(listener)) == rel.path, "the premise: the kernel holds the spelling"
+    os.chdir(other)
+    try:
+        asyncio.run(serve_asyncio("relative", listener, public(p), os.fsdecode(p), served=True))
+    finally:
+        assert_unrelated(namesake, "the unrelated file at the spelling from the new cwd was removed")
+    assert_cleaned_up_as_asyncio_does("relative", p)
+    checked.append("relative")
+    report(checked=",".join(checked))
 
 
 def cwd_changed() -> None:
@@ -303,6 +391,7 @@ SCENARIOS: dict[str, Callable[[], None]] = {
         relative_routes,
         relative_failures,
         relative_input,
+        asyncio_namesakes,
         cwd_changed,
         default_backlog,
     )

@@ -71,9 +71,12 @@ names up to DIRECT_MAX everywhere: it never uses the widened form."""
 # to the socket module), before anything else (on Apple, before the widened
 # form). Every check of a route (the socket at the given absolute path, data
 # both ways, blocking and nonblocking connects, close-on-exec, the peer is this
-# process, the cwd unchanged, every address fitting sun_path, asyncio serving
-# and cleaning up; a nonblocking connect fails at once on a full backlog) is
-# run on it, in a child whose cwd is the socket's ancestor.
+# process, the cwd unchanged, the path reported as the address while every
+# address the kernel holds fits sun_path, asyncio serving and cleaning up as
+# for the standard's; a nonblocking connect fails at once on a full backlog)
+# is run on it, in a child whose cwd is the socket's ancestor. The kernel holds
+# the relative spelling as the listener's address, which names the socket
+# only from that cwd; the path given is reported instead.
 #
 # On Apple the connects also take the widened form with the relative spelling
 # (a path over 253 bytes whose relative spelling is over DIRECT_MAX and at
@@ -258,8 +261,10 @@ def test_a_failure_on_the_relative_route_is_not_retried(tmp: TmpDirs) -> None:
 # connect (the thread-cwd route is tried for `connect` too, unlike the fork
 # route: it has no side effect), close-on-exec, the peer is this process (the
 # server's SO_PEERCRED / LOCAL_PEERPID names the caller: the thread belongs to
-# it), the process cwd unchanged, and a nonblocking connect fails at once on a
-# full backlog.
+# it), the process cwd unchanged, the path reported as the address (the kernel
+# holds the file name alone, which names a file in whatever the process cwd
+# is), asyncio serving and cleaning up as for the standard's, and a
+# nonblocking connect fails at once on a full backlog.
 @needs_thread_cwd
 def test_the_thread_cwd_route_binds_and_connects_from_this_process(tmp: TmpDirs) -> None:
     p = nest(tmp.new(), 600)

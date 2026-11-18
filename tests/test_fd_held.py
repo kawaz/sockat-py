@@ -20,6 +20,7 @@ runs (docker) also make one owned by another user."""
 
 from __future__ import annotations
 
+import asyncio
 import errno
 import json
 import os
@@ -43,6 +44,8 @@ from _support import (
     check_unreachable,
     dir_id,
     is_cloexec,
+    kernel_peername,
+    kernel_sockname,
     listener_at,
     listing,
     mark_untouched,
@@ -53,6 +56,7 @@ from _support import (
     place,
     raises_errno,
     run_child,
+    serve_asyncio,
     stale_socket,
     with_name,
 )
@@ -116,7 +120,9 @@ def check_fd_held(p: bytes, cfg: Config, held_in: bytes) -> None:
     """Connect (blocking and nonblocking) to a listener at ``p`` through
     ``cfg`` and check that each connect takes the fd-held form under
     ``held_in`` and is a working stream: the blocking mode asked for,
-    close-on-exec, its addresses readable, the peer is this process, data
+    close-on-exec, the path reported as its peer (the kernel holds
+    ``/proc/self/fd/<fd>/s``, meaningless once the fd is closed) and the
+    kernel's addresses readable, the peer is this process, data
     both ways. The place is used (its mtime moved) and empty after each
     connect, and the cwd is unchanged."""
     cwd, cwd_id = os.getcwd(), dir_id(".")
@@ -129,8 +135,9 @@ def check_fd_held(p: bytes, cfg: Config, held_in: bytes) -> None:
                 assert r is Route.FD_HELD, req
                 assert client.getblocking() is blocking, req
                 assert is_cloexec(client), req
-                client.getsockname()
-                client.getpeername()
+                assert client.getpeername() == os.fsdecode(p), req
+                kernel_sockname(client)
+                kernel_peername(client)
                 server, _ = listener.accept()
                 with server:
                     assert peer_pid(server) == me, req
@@ -157,6 +164,28 @@ def test_a_connect_through_an_unsafe_place_holds_a_private_directory_by_its_fd(t
     p = far_path(tmp)
     held_in = unsafe_place(tmp, mode)
     check_fd_held(p, fd_cfg([held_in]), held_in)
+
+
+# The fd-held connect, adopted by asyncio as the standard's is
+# (asyncio.open_unix_connection(sock=)), blocking or not: data flows both ways
+# and the transport reports the path given as its peer, not the spelling
+# through the held directory (whose fd is closed when the connect returns).
+# The listener is bound under a short name and renamed (no bind route reaches
+# the 100-byte name without the thread-cwd route), so only the client's side
+# is checked here; the bind routes are put through asyncio by check_route.
+def test_a_connect_through_the_held_directory_is_adopted_by_asyncio(tmp: TmpDirs) -> None:
+    p = far_path(tmp)
+    held_in = unsafe_place(tmp)
+    cfg = fd_cfg([held_in])
+
+    def connect(req: Request) -> socket.socket:
+        client, r = _route.run_long(req, p, cfg)
+        assert r is Route.FD_HELD, req
+        return client
+
+    with listener_at(p) as listener:
+        asyncio.run(serve_asyncio("fd-held", listener, connect, os.fsdecode(p), served=False))
+    assert_empty(held_in)
 
 
 # Run as root (docker), a sticky place owned by another user is not safe either

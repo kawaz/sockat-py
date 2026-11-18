@@ -40,6 +40,7 @@ from typing import TypeVar
 import sockat
 from sockat import _route, _sys
 from sockat._route import BIND, CONNECT, CONNECT_NONBLOCKING, Config, Request, Route
+from sockat._sockets import PathSocket
 from sockat._sys import DIRECT_MAX, IS_APPLE, IS_LINUX
 
 T = TypeVar("T")
@@ -74,6 +75,15 @@ The ``socket`` module does not export either constant."""
 SO_NOSIGPIPE = 0x1022
 """``SO_NOSIGPIPE`` of ``<sys/socket.h>`` (Apple). The ``socket`` module does
 not export it."""
+
+ASYNCIO_CLEANS_UP = sys.version_info >= (3, 13)
+"""Whether ``asyncio.start_unix_server(sock=)`` cleans up the listener's
+socket file (``cleanup_socket``, on by default, added in Python 3.13): at the
+start it reads the listener's ``getsockname()`` and records the ``st_ino``
+of ``os.stat`` of it (an error other than ``FileNotFoundError`` fails the
+start), and when the server closes it reads ``getsockname()`` again and
+removes the file there if ``os.stat`` still finds that inode. Before 3.13
+the file is left where it is, as a plain ``close`` leaves it."""
 
 
 # ---------------------------------------------------------------------------
@@ -225,6 +235,35 @@ def accept_ping(listener: socket.socket, client: socket.socket) -> None:
     server, _ = listener.accept()
     with server:
         ping(server, client)
+
+
+def kernel_sockname(s: socket.socket) -> str | bytes:
+    """The address the kernel reports for ``s`` itself: the standard
+    ``getsockname``, past what :class:`PathSocket` reports in its place (for
+    a listener bound through a route, the spelling the route handed to the
+    kernel)."""
+    addr = socket.socket.getsockname(s)
+    assert isinstance(addr, (str, bytes)), addr
+    return addr
+
+
+def kernel_peername(s: socket.socket) -> str | bytes:
+    """The address the kernel reports for the peer of ``s``: the standard
+    ``getpeername``, past what :class:`PathSocket` reports in its place."""
+    addr = socket.socket.getpeername(s)
+    assert isinstance(addr, (str, bytes)), addr
+    return addr
+
+
+def assert_sockat_type(what: str, s: socket.socket, path: str | bytes) -> None:
+    """``s`` is of the type sockat returns for ``path`` (as given, so a
+    relative path counts by its own length): a plain :class:`socket.socket`,
+    nothing added, for a path the ``socket`` module takes (at most
+    :data:`DIRECT_MAX` bytes), and for a longer one a :class:`PathSocket`, a
+    subclass of it that reports the path as the address (the kernel holds a
+    route's spelling there instead)."""
+    want = socket.socket if len(os.fsencode(path)) <= DIRECT_MAX else PathSocket
+    assert type(s) is want, f"{what}: {type(s)}, not {want}"
 
 
 def is_cloexec(s: socket.socket | int) -> bool:
@@ -427,39 +466,56 @@ def check_route(f: Forced, places: Sequence[bytes] = ()) -> None:
     * every socket is close-on-exec, as the ``socket`` module makes its own;
     * the server's peer-credential query names this process (no route
       connects from another process), on Linux and Apple;
-    * the addresses the kernel reports (``getsockname`` / ``getpeername`` of
-      the listener, the client and the accepted stream) can be read without
-      an error, whatever spelling the route bound, and each fits ``sun_path``
-      with its NUL (:func:`assert_address_fits`);
+    * every socket is of the type sockat returns for the path
+      (:func:`assert_sockat_type`: the standard's for a path it takes, a
+      :class:`PathSocket` past that), and the addresses are what the
+      standard reports for a path it binds: the path (a ``str``, decoded by
+      :func:`os.fsdecode`) as the listener's and the accepted stream's own
+      address and as the client's peer, whatever spelling the route handed
+      to the kernel; the client's own address and the accepted stream's peer
+      are the kernel's (a client is not bound);
+    * the addresses the kernel itself holds (:func:`kernel_sockname` /
+      :func:`kernel_peername` of the listener, the client and the accepted
+      stream) can be read without an error, and each fits ``sun_path`` with
+      its NUL (:func:`assert_address_fits`);
     * the process cwd is the same afterwards, and nothing is left in
       ``places`` (the places for the symlink);
-    * the listener and both connects, handed to asyncio, serve and are
-      cleaned up (:func:`check_asyncio`).
+    * the listener and both connects, handed to asyncio, serve, report the
+      path, and are cleaned up as asyncio cleans up the standard's
+      (:func:`check_asyncio`).
 
     The socket file is removed at the end, so the path can be used again.
     """
     cwd, cwd_id = os.getcwd(), dir_id(".")
     me = os.getpid()
+    name = os.fsdecode(f.path)
     listener, r = f.way(BIND)
     with listener:
         assert r is f.want(BIND), f"{f.what}: bind took {r}"
         assert is_socket(f.path), f"{f.what}: no socket at the path"
-        assert isinstance(listener, socket.socket)
+        assert_sockat_type(f"{f.what}: the listener", listener, f.path)
         assert listener.getblocking(), f"{f.what}: the listener is blocking, as the standard's"
         assert is_cloexec(listener), f"{f.what}: listener"
-        assert_address_fits(f"{f.what}: the listener", listener.getsockname())
+        assert listener.getsockname() == name, f"{f.what}: the listener"
+        assert_address_fits(f"{f.what}: the listener", kernel_sockname(listener))
         for req, blocking in ((CONNECT, True), (CONNECT_NONBLOCKING, False)):
             client, r = f.way(req)
             with client:
                 assert r is f.want(req), f"{f.what}: {req} took {r}"
+                assert_sockat_type(f"{f.what}: {req}", client, f.path)
                 assert client.getblocking() is blocking, f"{f.what}: {req}"
                 assert is_cloexec(client), f"{f.what}: {req}"
-                assert_address_fits(f"{f.what}: {req} client", client.getsockname())
-                assert_address_fits(f"{f.what}: {req} client's peer", client.getpeername())
+                assert client.getpeername() == name, f"{f.what}: {req} client's peer"
+                assert client.getsockname() == kernel_sockname(client), f"{f.what}: {req} client"
+                assert_address_fits(f"{f.what}: {req} client", kernel_sockname(client))
+                assert_address_fits(f"{f.what}: {req} client's peer", kernel_peername(client))
                 server, _ = listener.accept()
                 with server:
-                    assert_address_fits(f"{f.what}: {req} server", server.getsockname())
-                    assert_address_fits(f"{f.what}: {req} server's peer", server.getpeername())
+                    assert_sockat_type(f"{f.what}: {req} server", server, f.path)
+                    assert server.getsockname() == name, f"{f.what}: {req} server"
+                    assert server.getpeername() == kernel_peername(server), f"{f.what}: {req} server's peer"
+                    assert_address_fits(f"{f.what}: {req} server", kernel_sockname(server))
+                    assert_address_fits(f"{f.what}: {req} server's peer", kernel_peername(server))
                     assert peer_pid(server) in (me, None), f"{f.what}: {req}"
                     if not blocking:
                         try:
@@ -480,69 +536,126 @@ def check_route(f: Forced, places: Sequence[bytes] = ()) -> None:
 
 
 def assert_address_fits(what: str, addr: str | bytes) -> None:
-    """The address a socket reports (``getsockname`` / ``getpeername``) is at
-    most :data:`DIRECT_MAX` bytes: what the route bound fits ``sun_path``
-    with its NUL.
+    """An address the kernel holds for a socket (:func:`kernel_sockname` /
+    :func:`kernel_peername`) is at most :data:`DIRECT_MAX` bytes: what the
+    route bound fits ``sun_path`` with its NUL.
 
-    Why it must: the ``socket`` module of CPython reads a pathname address
-    on the systems other than Linux up to the first NUL in ``sun_path``, not
-    by the length the kernel returns. An address that fills ``sun_path`` with
-    no NUL (a bind in the widened sockaddr on Apple) is read past the end of
+    Why it must, although a :class:`PathSocket` reports the path in its
+    place: the ``socket`` module of CPython reads a pathname address on the
+    systems other than Linux up to the first NUL in ``sun_path``, not by the
+    length the kernel returns. An address that fills ``sun_path`` with no NUL
+    (a bind in the widened sockaddr on Apple) is read past the end of
     ``sun_path`` into memory it never cleared, so it comes back as its first
     104 bytes followed by whatever bytes lie there, different from run to
-    run; asyncio's ``start_unix_server(sock=)`` then hands that to
-    ``os.stat`` and fails at random (``NotADirectoryError`` and the like). So
-    no bind route may leave an address longer than this, and a bind in the
-    widened form always does (its path is over :data:`DIRECT_MAX` bytes, and
-    the module reports at least the 104 bytes of ``sun_path``), which makes
-    the check deterministic rather than a matter of luck. An unbound socket
-    (a client) reports the empty address."""
+    run. Whoever reads the kernel's address (the standard ``getsockname`` /
+    ``getpeername``, which :class:`PathSocket` calls first so that it fails
+    where the standard's fails; a client in another process, whose peer is
+    this listener) reads memory past the address. So no bind route may leave
+    an address longer than this, and a bind in the widened form always does
+    (its path is over :data:`DIRECT_MAX` bytes, and the module reports at
+    least the 104 bytes of ``sun_path``), which makes the check deterministic
+    rather than a matter of luck. An unbound socket (a client) reports the
+    empty address."""
     shown = os.fsencode(addr)
     assert len(shown) <= DIRECT_MAX, f"{what}: an address of {len(shown)} bytes: {shown!r}"
 
 
-def check_asyncio(f: Forced) -> None:
-    """Hand a listener bound through ``f`` to asyncio
-    (``asyncio.start_unix_server(sock=)``, the documented recipe) and adopt a
-    nonblocking and a blocking connect through ``f``
-    (``asyncio.open_unix_connection(sock=)``), exchange data both ways, and
-    close the server, which runs asyncio's cleanup of the listener's socket
-    file (Python 3.13 and later: ``getsockname`` then ``os.stat`` of what it
-    returned, at the start and at the close). Every step must go through
-    without an error, on every bind route.
+Connect = Callable[[Request], socket.socket]
 
-    What asyncio's cleanup does with the file depends on the route's spelling
-    (the address it reads is the spelling, not the caller's path), so whether
-    the file is still there afterwards is not checked; it is removed here if
-    it is."""
+
+async def serve_asyncio(what: str, listener: socket.socket, connect: Connect, path: str, served: bool) -> None:
+    """Hand ``listener`` to asyncio (``asyncio.start_unix_server(sock=)``,
+    with nothing else given, so ``cleanup_socket`` is left at its default)
+    and adopt a nonblocking and a blocking connect made by ``connect``
+    (``asyncio.open_unix_connection(sock=)``), exchange data both ways, and
+    close the server.
+
+    The client's transport reports ``path`` as its ``peername``. When
+    ``served`` (the listener was bound at ``path``, rather than renamed
+    there), the server's socket reports ``path`` as its address, and so does
+    the transport of every stream it accepted (``sockname``), as asyncio
+    reports the standard's."""
+    names: list[object] = []
 
     async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        names.append(writer.get_extra_info("sockname"))
         data = await reader.readexactly(4)
         writer.write(b"pong" if data == b"ping" else b"????")
         await writer.drain()
         writer.close()
         await writer.wait_closed()
 
-    async def main() -> list[bytes]:
-        got: list[bytes] = []
+    server = await asyncio.start_unix_server(handle, sock=listener)
+    async with server:
+        if served:
+            assert [s.getsockname() for s in server.sockets] == [path], what
+        for req in (CONNECT_NONBLOCKING, CONNECT):
+            reader, writer = await asyncio.open_unix_connection(sock=connect(req))
+            assert writer.get_extra_info("peername") == path, f"{what}: {req}"
+            writer.write(b"ping")
+            await writer.drain()
+            assert await reader.readexactly(4) == b"pong", f"{what}: {req}"
+            writer.close()
+            await writer.wait_closed()
+    assert len(names) == 2, what
+    if served:
+        assert names == [path, path], what
+
+
+def assert_cleaned_up_as_asyncio_does(what: str, path: bytes) -> None:
+    """After a server that served a listener bound at ``path`` closed, the
+    socket file is where asyncio leaves the standard's
+    (:data:`ASYNCIO_CLEANS_UP`): removed from Python 3.13, still there
+    before (and removed here, so the path can be used again)."""
+    if ASYNCIO_CLEANS_UP:
+        assert not os.path.lexists(path), f"{what}: asyncio did not remove the socket file at the path"
+    else:
+        assert is_socket(path), f"{what}: the socket file is not where asyncio leaves it"
+        os.unlink(path)
+
+
+def check_asyncio(f: Forced) -> None:
+    """Use the sockets of ``f`` with asyncio the way the standard's are used,
+    with nothing added (:func:`serve_asyncio`), twice:
+
+    * bound before any event loop exists (``asyncio.run`` after the bind).
+      This is how a listener is usually made, and the one that matters on
+      Linux: the /proc route binds ``/proc/self/fd/<n>/<name>`` with a
+      directory fd it closes again, and the event loop made afterwards takes
+      that free fd number for its own (the selector, the self-pipe), so the
+      kernel's spelling then names something else (``NotADirectoryError`` from
+      ``os.stat`` at the start of the server, had asyncio been handed it);
+    * bound on the loop's thread with the loop running.
+
+    Every step must go through without an error, on every route: the start
+    of the server (Python 3.13 and later ``os.stat`` the listener's
+    address), the exchange, the close (which, from 3.13, removes the file at
+    the listener's address). Afterwards the socket file at the path is
+    removed from 3.13 and left before, as for the standard's
+    (:func:`assert_cleaned_up_as_asyncio_does`): asyncio reads the path,
+    not a spelling that might name another file or none."""
+    path = os.fsdecode(f.path)
+
+    def bind() -> socket.socket:
         listener, r = f.way(BIND)
         assert r is f.want(BIND), f"{f.what}: bind took {r}"
-        server = await asyncio.start_unix_server(handle, sock=listener)
-        async with server:
-            for req in (CONNECT_NONBLOCKING, CONNECT):
-                sock, r = f.way(req)
-                assert r is f.want(req), f"{f.what}: {req} took {r}"
-                reader, writer = await asyncio.open_unix_connection(sock=sock)
-                writer.write(b"ping")
-                await writer.drain()
-                got.append(await reader.readexactly(4))
-                writer.close()
-                await writer.wait_closed()
-        return got
+        return listener
 
-    assert asyncio.run(main()) == [b"pong", b"pong"], f.what
-    with contextlib.suppress(FileNotFoundError):
-        os.unlink(f.path)
+    def connect(req: Request) -> socket.socket:
+        sock, r = f.way(req)
+        assert r is f.want(req), f"{f.what}: {req} took {r}"
+        return sock
+
+    what = f"{f.what}, bound before the loop"
+    listener = bind()
+    asyncio.run(serve_asyncio(what, listener, connect, path, served=True))
+    assert_cleaned_up_as_asyncio_does(what, f.path)
+
+    async def bound_in_the_loop() -> None:
+        await serve_asyncio(f"{f.what}, bound in the loop", bind(), connect, path, served=True)
+
+    asyncio.run(bound_in_the_loop())
+    assert_cleaned_up_as_asyncio_does(f"{f.what}, bound in the loop", f.path)
 
 
 def check_full_backlog(f: Forced) -> None:

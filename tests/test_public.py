@@ -38,6 +38,7 @@ from _support import (
 import sockat
 from sockat import _route
 from sockat._route import BIND, CONNECT, Route
+from sockat._sockets import PathSocket
 from sockat._sys import DIRECT_MAX
 
 
@@ -304,6 +305,8 @@ def test_a_leading_nul_on_linux_is_an_abstract_address_for_the_standard() -> Non
         addr = addr + b"x" * (n - len(addr))
         assert len(addr) == n
         with sockat.bind(addr) as listener:
+            # The standard's socket, nothing added: the address is the kernel's.
+            assert type(listener) is socket.socket
             assert listener.getsockname() == addr
             with sockat.connect(addr) as client:
                 accept_ping(listener, client)
@@ -323,7 +326,11 @@ def test_a_leading_nul_on_linux_is_an_abstract_address_for_the_standard() -> Non
 # sockat's sockets are set up like the standard's because they are made by
 # the socket module (socket.socket(AF_UNIX, SOCK_STREAM)) on every route:
 #
-# * a plain socket.socket of family AF_UNIX and type SOCK_STREAM;
+# * family AF_UNIX and type SOCK_STREAM; for a path the standard takes (60
+#   bytes) a plain socket.socket, nothing added; for a longer one (300 bytes)
+#   a PathSocket, a subclass of socket.socket (so isinstance holds and every
+#   method is the standard's) that reports the path as the address, since the
+#   kernel holds the spelling the route handed it instead;
 # * close-on-exec (the socket module makes every socket non-inheritable),
 #   checked on the fd itself (FD_CLOEXEC);
 # * a listener and a `connect` stream are blocking, a `connect_nonblocking`
@@ -338,7 +345,8 @@ def test_the_sockets_are_set_up_as_the_standard_sets_them_up(tmp: TmpDirs, total
     p = nest(tmp.new(), total)
     with std, sockat.bind(p) as listener, sockat.connect(p) as client, sockat.connect_nonblocking(p) as nb:
         for s in (listener, client, nb):
-            assert type(s) is socket.socket
+            assert isinstance(s, socket.socket)
+            assert type(s) is (socket.socket if total <= DIRECT_MAX else PathSocket)
             assert (s.family, s.type) == (socket.AF_UNIX, socket.SOCK_STREAM)
             assert not s.get_inheritable()
             assert is_cloexec(s)
@@ -367,10 +375,11 @@ def test_the_listener_has_the_standards_default_backlog(tmp: TmpDirs) -> None:
 
 
 # Short paths are the standard's business: sockat hands them over unchanged, so
-# the addresses the sockets report (getsockname of the listener and of an
-# accepted stream, getpeername of a client) are exactly what the standard
-# reports for the same path, and a standard client reaches a sockat listener
-# and the other way round.
+# the sockets are plain socket.socket objects with nothing added (the accepted
+# stream and a dup too), the addresses the sockets report (getsockname of the
+# listener and of an accepted stream, getpeername of a client) are exactly what
+# the standard reports for the same path, and a standard client reaches a
+# sockat listener and the other way round.
 def test_a_short_path_behaves_exactly_like_the_standard(tmp: TmpDirs) -> None:
     t = tmp.new()
     p = os.fsdecode(t + b"/s.sock")
@@ -385,10 +394,15 @@ def test_a_short_path_behaves_exactly_like_the_standard(tmp: TmpDirs) -> None:
             want = (std_listener.getsockname(), std_client.getpeername(), accepted.getsockname())
     os.unlink(p)
     with sockat.bind(p) as listener:
-        with sockat.connect(p) as client:
-            accepted, _ = listener.accept()
-            with accepted:
-                assert (listener.getsockname(), client.getpeername(), accepted.getsockname()) == want
+        assert type(listener) is socket.socket
+        for connect in (sockat.connect, sockat.connect_nonblocking):
+            with connect(p) as client:
+                assert type(client) is socket.socket
+                accepted, _ = listener.accept()
+                with accepted, accepted.dup() as dup:
+                    assert type(accepted) is socket.socket
+                    assert type(dup) is socket.socket
+                    assert (listener.getsockname(), client.getpeername(), accepted.getsockname()) == want
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as c:
             c.connect(p)
             accept_ping(listener, c)
@@ -400,10 +414,72 @@ def test_a_short_path_behaves_exactly_like_the_standard(tmp: TmpDirs) -> None:
             accept_ping(std_l, client)
 
 
-# The returned sockets are ordinary socket.socket objects: a long-path
-# listener accepts a client from another thread, and the streams can be
-# wrapped in files, half-closed and duplicated as usual. Nothing about the
-# route leaks into the objects.
+# A long path is reported the way the standard reports a short one, so code
+# that reads the address back (asyncio's server cleanup, logging, repr) sees
+# the path the caller gave and not the spelling a route handed to the kernel
+# (/proc/self/fd/<n>/<name>, a relative path, a temporary symlink gone by
+# then, the file name alone): the path, as a str decoded by os.fsdecode as the
+# socket module decodes a pathname address (a bytes or os.PathLike path
+# included), as the listener's and the accepted stream's own address
+# (getsockname) and as a client's peer (getpeername), for both connects. What
+# the standard reports from the kernel stays the kernel's: a client's own
+# address and the accepted stream's peer (the client is not bound) are what
+# the standard's are for a short path. Lengths on both sides of what a sockaddr
+# carries (DIRECT_MAX + 1; 253 / 254 around the widened form of macOS) and far
+# past it.
+@pytest.mark.parametrize("total", [DIRECT_MAX + 1, 253, 254, 400, 1000])
+def test_a_long_path_reports_the_path_given_as_the_standard_reports_a_short_one(tmp: TmpDirs, total: int) -> None:
+    t = tmp.new()
+    short = os.fsdecode(t + b"/std.sock")
+    with sockat.bind(short) as std_listener, sockat.connect(short) as std_client:
+        std_accepted, _ = std_listener.accept()
+        with std_accepted:
+            unbound = (std_client.getsockname(), std_accepted.getpeername())
+    makers: list[Callable[[bytes], str | bytes | os.PathLike[str] | os.PathLike[bytes]]] = [
+        os.fsdecode,
+        bytes,
+        lambda b: Path(os.fsdecode(b)),
+        BytesPathLike,
+    ]
+    for i, make in enumerate(makers):
+        p = nest(t, total, f"{i}.sock".encode())
+        want = os.fsdecode(p)
+        with sockat.bind(make(p)) as listener:
+            assert listener.getsockname() == want, make
+            for connect in (sockat.connect, sockat.connect_nonblocking):
+                with connect(make(p)) as client:
+                    assert client.getpeername() == want, (make, connect)
+                    accepted, _ = listener.accept()
+                    with accepted:
+                        assert accepted.getsockname() == want, (make, connect)
+                        assert (client.getsockname(), accepted.getpeername()) == unbound
+                        ping(accepted, client)
+
+
+# A path is bytes to the kernel and need not be valid UTF-8 (Linux file systems
+# take any byte but NUL and "/"). The socket module decodes a pathname address
+# with os.fsdecode (surrogateescape), so a short path with the byte 0xff comes
+# back as a str that os.fsencode turns into the same bytes again; a long path
+# is reported the same way, round-tripping to the path given. macOS file
+# systems refuse names that are not UTF-8, so this is Linux's.
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="macOS file systems take UTF-8 names only")
+def test_a_path_that_is_not_utf8_is_reported_as_the_socket_module_decodes_it(tmp: TmpDirs) -> None:
+    t = tmp.new()
+    for total in (60, 300):
+        p = nest(t, total, b"\xff" + f"{total}.sock".encode())
+        with sockat.bind(p) as listener, sockat.connect(p) as client:
+            assert os.fsencode(listener.getsockname()) == p
+            assert listener.getsockname() == os.fsdecode(p)
+            assert os.fsencode(client.getpeername()) == p
+            accept_ping(listener, client)
+
+
+# The returned sockets are ordinary socket.socket objects (for a long path a
+# PathSocket, a subclass that only reports the path as the address): a
+# long-path listener accepts a client from another thread, and the streams can
+# be wrapped in files, half-closed and duplicated as usual. A dup is the same
+# kind of socket and reports the same path. Nothing about the route leaks into
+# the objects.
 def test_the_results_are_ordinary_sockets(tmp: TmpDirs) -> None:
     p = nest(tmp.new(), 500)
     listener = sockat.bind(p)
@@ -423,6 +499,8 @@ def test_the_results_are_ordinary_sockets(tmp: TmpDirs) -> None:
         with server:
             dup = server.dup()
             with dup:
+                assert type(dup) is PathSocket
+                assert dup.getsockname() == os.fsdecode(p)
                 assert recv_exact(dup, 5) == b"hello"
                 assert dup.recv(1) == b""
             server.sendall(b"bye")

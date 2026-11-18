@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import errno
 import os
+import re
 import sys
 
 import pytest
@@ -24,6 +25,7 @@ from _support import (
     check_unreachable,
     forced,
     is_socket,
+    kernel_sockname,
     listener_at,
     mark_untouched,
     nest,
@@ -84,17 +86,39 @@ def test_long_paths_take_the_proc_route(tmp: TmpDirs, total: int) -> None:
     assert_untouched(place)
 
 
-# The kernel records the spelling that was bound, so the address of a listener
-# bound through /proc names a /proc/self/fd path, which means nothing once the
-# directory fd is closed (and nothing in other processes). This is why users
-# keep their own path; reading it must not fail.
-def test_the_address_of_a_proc_bind_is_the_proc_spelling(tmp: TmpDirs) -> None:
+# Why the listener reports the path rather than the kernel's address: the
+# kernel records the spelling that was bound, /proc/self/fd/<n>/<name>, and the
+# directory fd <n> is closed as soon as the bind returns. The number is then
+# free, and an fd the process opens later takes it (POSIX: open takes the
+# lowest free number; files are opened here until one gets it, in case a lower
+# number was freed meanwhile), so the spelling names whatever that is: here a
+# regular file, which makes os.stat of the spelling NotADirectoryError. That is what asyncio's
+# start_unix_server(sock=) did with a listener bound before the event loop
+# was made (the loop's own fds took the number; Python 3.13 and later stat
+# the listener's address at the start). So getsockname reports the path,
+# while the kernel's spelling stays readable through the standard method
+# (socket.socket.getsockname), within sun_path.
+def test_the_kernel_holds_the_proc_spelling_whose_fd_is_reused_so_the_path_is_reported(tmp: TmpDirs) -> None:
     p = nest(tmp.new(), 200)
-    listener, _ = _route.run_long(BIND, p, proc_cfg())
+    listener, r = _route.run_long(BIND, p, proc_cfg())
     with listener:
-        shown = os.fsencode(listener.getsockname())
-        assert shown.startswith(b"/proc/self/fd/"), shown
-        assert shown.endswith(b"/s.sock")
+        assert r is Route.PROC_FD
+        assert listener.getsockname() == os.fsdecode(p)
+        kernel = os.fsencode(kernel_sockname(listener))
+        m = re.fullmatch(rb"/proc/self/fd/(\d+)/s\.sock", kernel)
+        assert m is not None, kernel
+        n = int(m.group(1))
+        opened: list[int] = []
+        try:
+            while not opened or opened[-1] != n:
+                opened.append(os.open(with_name(p, b"plain-file"), os.O_RDONLY | os.O_CREAT, 0o600))
+                assert opened[-1] <= n, "the premise: the closed directory fd's number is free"
+            with pytest.raises(NotADirectoryError):
+                os.stat(kernel)
+        finally:
+            for fd in opened:
+                os.close(fd)
+        assert os.stat(listener.getsockname()).st_ino == os.lstat(p).st_ino
 
 
 # A failure on the /proc route is the kernel's error for the path (ENOENT for
@@ -267,8 +291,10 @@ def test_without_proc_the_posix_order_runs(tmp: TmpDirs, empty: bool) -> None:
 # Every Linux route but the relative one (forced in a child process in
 # test_routes_posix) gets every check of a route (see check_route: the socket
 # at the path, data both ways, blocking / nonblocking connects, close-on-exec,
-# the peer is this process, the cwd unchanged, nothing left in the place) and
-# the nonblocking connect against a full backlog (a blocking connect would
+# the peer is this process, the cwd unchanged, nothing left in the place, the
+# path reported as the address, asyncio serving and cleaning up as for the
+# standard's, the listener bound before the loop and in it) and the
+# nonblocking connect against a full backlog (a blocking connect would
 # wait for room on Linux; the nonblocking one must fail at once with EAGAIN on
 # every route):
 #

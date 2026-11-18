@@ -23,6 +23,8 @@ from _support import (
     check_unreachable,
     forced,
     is_socket,
+    kernel_peername,
+    kernel_sockname,
     listener_at,
     listing,
     mark_untouched,
@@ -79,32 +81,39 @@ def test_the_widened_sockaddr_carries_253_bytes(tmp: TmpDirs) -> None:
 # bytes of the path followed by whatever bytes lie there before a NUL (seen:
 # none, or a few bytes that differ from run to run; a CPython behaviour, not
 # sockat's): it is never the path, and it is always longer than DIRECT_MAX,
-# which is what assert_address_fits catches on every bind route. asyncio's
-# start_unix_server(sock=) hands that address to os.stat and fails at random
-# (NotADirectoryError and the like). A connect in the widened form leaves no
-# such address on its own socket (a client is not bound), so the connects
-# keep the widened form; the client's peer address and the accepted stream's
-# addresses are at least readable without an error.
+# which is what assert_address_fits catches on the kernel's address of every
+# bind route. The listener of a route reports the path in place of the
+# kernel's address, but it asks the kernel first (so that it fails where the
+# standard's fails), and whatever else reads the kernel's address (a client in
+# another process asking for its peer) gets the same bytes; so the bind must
+# not leave such an address at all. Read here through the standard method
+# (socket.socket.getsockname), as wide_op alone does not report the path. A
+# connect in the widened form leaves no such address on its own socket (a
+# client is not bound), so the connects keep the widened form; the client's
+# peer address and the accepted stream's addresses are at least readable
+# without an error.
 def test_the_address_of_a_widened_bind_is_cut_short(tmp: TmpDirs) -> None:
     p = nest(tmp.new(), 200)
     with _route.wide_op(BIND, p) as listener:
-        shown = os.fsencode(listener.getsockname())
+        shown = os.fsencode(kernel_sockname(listener))
         assert shown != p
         assert shown.startswith(p[:SUN_PATH_CAP]), shown
         assert len(shown) > DIRECT_MAX, shown
         with _route.wide_op(CONNECT, p) as client:
-            client.getpeername()
+            kernel_peername(client)
             server, _ = listener.accept()
             with server:
-                server.getsockname()
-                server.getpeername()
+                kernel_sockname(server)
+                kernel_peername(server)
 
 
 # Every Apple route but the relative ones (forced in a child process in
 # test_routes_posix) gets every check of a route (see check_route: the socket
 # at the path, data both ways, blocking / nonblocking connects, close-on-exec,
-# the peer is this process, the cwd unchanged, nothing left in the place, every
-# address fitting sun_path, asyncio serving and cleaning up) and the
+# the peer is this process, the cwd unchanged, nothing left in the place, the
+# path reported as the address while every address the kernel holds fits
+# sun_path, asyncio serving and cleaning up as for the standard's, the listener
+# bound before the loop and in it) and the
 # nonblocking connect against a full backlog (on macOS a full backlog fails at
 # once with ECONNREFUSED for a blocking connect too, so what differs there is
 # the socket that comes back: it must be nonblocking on every route):
