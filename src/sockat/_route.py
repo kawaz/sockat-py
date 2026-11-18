@@ -247,13 +247,19 @@ def open_dir(directory: bytes) -> int:
     if sys.platform == "linux" or sys.platform == "android":
         return os.open(directory, os.O_PATH | os.O_DIRECTORY)
     if sys.platform == "darwin" or sys.platform == "ios":
-        # os.O_SEARCH is there on Apple systems for every supported Python;
-        # typeshed declares it only from 3.13 on, hence the lookup by name.
-        o_search: int | None = getattr(os, "O_SEARCH", None)
-        if o_search is not None:
-            flags = o_search
-            return search_or_read_only(directory, lambda: os.open(directory, flags))
+        return search_or_read_only(directory, lambda: os.open(directory, _APPLE_O_SEARCH))
     return _open_read_only(directory)
+
+
+_APPLE_O_SEARCH = 0x40000000 | os.O_DIRECTORY
+"""``O_SEARCH`` of Apple's ``<sys/fcntl.h>``: ``O_EXEC (0x40000000) |
+O_DIRECTORY``.
+
+Design rationale: written out rather than taken from ``os.O_SEARCH``, which
+some Python builds for macOS do not have (the python-build-standalone 3.11 of
+the CI lacks it; the module defines it only when the build saw the macro).
+The value is the system's, not Python's, so it does not depend on the
+build."""
 
 
 def _open_read_only(directory: bytes) -> int:
