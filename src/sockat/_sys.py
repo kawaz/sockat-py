@@ -12,11 +12,12 @@ Contents:
 * :func:`op` — ``bind(2)`` / ``connect(2)`` of a ``socket.socket`` with such an
   address.
 * :func:`op_at` — ``bindat(2)`` / ``connectat(2)`` (FreeBSD).
-* :func:`enter_dir_in_this_thread` — a cwd of the calling thread's own
-  (Linux: ``unshare(CLONE_FS)``, Apple: ``pthread_fchdir_np``).
+* :func:`thread_cwd_possible` / :func:`enter_dir_in_this_thread` — a cwd of
+  the calling thread's own (Linux: ``unshare(CLONE_FS)``, Apple:
+  ``pthread_fchdir_np``).
 
-:mod:`ctypes` is imported on first use, so a system that never needs these
-calls (Linux, whose long paths go through /proc) never loads it.
+:mod:`ctypes` is imported on first use, so a process that never needs these
+calls never loads it.
 """
 
 from __future__ import annotations
@@ -211,6 +212,27 @@ _PR_GET_SECCOMP = 21
 """``PR_GET_SECCOMP`` of ``<linux/prctl.h>``."""
 
 
+def _seccomp_filter_off() -> bool:
+    """Linux: whether ``prctl(PR_GET_SECCOMP)`` answers 0 (no seccomp filter
+    on the calling thread, which a thread it starts inherits)."""
+    import ctypes as c
+
+    rc: int = _c().prctl(c.c_int(_PR_GET_SECCOMP), c.c_ulong(0), c.c_ulong(0), c.c_ulong(0), c.c_ulong(0))
+    return rc == 0
+
+
+def thread_cwd_possible() -> bool:
+    """Whether :func:`enter_dir_in_this_thread` may succeed, as far as it can
+    be told without a thread (before anything is made for it): Linux, no
+    seccomp filter on; Apple, ``pthread_fchdir_np`` is there. ``unshare``
+    itself can still be refused in the thread."""
+    if IS_LINUX:
+        return _seccomp_filter_off()
+    if IS_APPLE:
+        return hasattr(_c(), "pthread_fchdir_np")
+    return False
+
+
 def enter_dir_in_this_thread(dirfd: int) -> bool:
     """Make the directory ``dirfd`` the cwd of the calling thread only, and
     ``True``; ``False`` when the system will not give the thread a cwd of its
@@ -231,7 +253,7 @@ def enter_dir_in_this_thread(dirfd: int) -> bool:
     import ctypes as c
 
     if IS_LINUX:
-        if _c().prctl(c.c_int(_PR_GET_SECCOMP), c.c_ulong(0), c.c_ulong(0), c.c_ulong(0), c.c_ulong(0)) != 0:
+        if not _seccomp_filter_off():
             return False
         if _c().unshare(c.c_int(_CLONE_FS)) != 0:
             return False

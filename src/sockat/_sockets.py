@@ -3,8 +3,8 @@ whose standard type lets the address be reported differently reports the
 path given; docs/decisions/DR-0003).
 
 For a path longer than ``sun_path``, the kernel reports the spelling the bind
-went through (``/proc/self/fd/<fd>/<name>``, a relative path, a symlink gone
-by then, the file name alone), not the path. Code that reads the address back
+went through (``R/<name>``, ``/proc/self/fd/<fd>/R/<name>``: through a
+symlink R gone by then), not the path. Code that reads the address back
 (asyncio's ``start_unix_server`` removes the socket file it names when the
 server closes; ``repr``, logging) then works on the wrong file or fails.
 :class:`PathSocket` is a :class:`socket.socket` that reports the path given
