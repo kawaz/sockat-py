@@ -93,6 +93,19 @@ class Route(Enum):
     AT_DIR = "at-dir"
     """A connect's fallback: ``connectat(2)`` of the file name on the fd of
     the socket's directory (FreeBSD)."""
+    THREAD_CWD_WITHOUT_D = "thread-cwd-without-d"
+    """A bind's form without D, where D could be made nowhere:
+    ``.sockat.XXXXXXXXXX/<name>`` (R in the socket's directory) from a
+    throwaway thread whose own cwd is the socket's directory (Linux,
+    Apple)."""
+    AT_WITHOUT_D = "at-without-d"
+    """A bind's form without D: ``bindat(2)`` of
+    ``.sockat.XXXXXXXXXX/<name>`` on the fd of the socket's directory
+    (FreeBSD)."""
+    PROC_WITHOUT_D = "proc-without-d"
+    """A bind's form without D through /proc:
+    ``/proc/self/fd/<fd of the socket's directory>/.sockat.XXXXXXXXXX/<name>``,
+    through the ``socket`` module (Linux)."""
 
 
 class SocketDir(Enum):
@@ -227,8 +240,9 @@ def routes(req: Request, path: bytes, cfg: Config) -> tuple[socket.socket, Route
     2. the central route (:func:`central_route`): a private directory D,
        reached by its fd through a thread's own cwd (Linux, Apple) or
        ``bindat`` / ``connectat`` (FreeBSD), then through /proc (Linux);
-    3. where it cannot be used: a bind ends at :func:`bind_without_central`,
-       a connect takes its fallbacks (:func:`connect_fallbacks`).
+    3. where it cannot be used: a bind goes on to :func:`bind_without_central`
+       (the form without D where D could be made nowhere), a connect takes
+       its fallbacks (:func:`connect_fallbacks`).
     """
     check_no_nul(path)
     directory, name = _path.split(path)
@@ -247,10 +261,10 @@ def routes(req: Request, path: bytes, cfg: Config) -> tuple[socket.socket, Route
     try:
         proc_ok = IS_LINUX and proc_usable(dirfd, cfg.proc_self_fd)
         done = central_route(req, real_dir, name, dirfd, cfg, proc_ok=proc_ok)
-        if done is not None:
+        if isinstance(done, tuple):
             return done
         if req.op is Op.BIND:
-            return bind_without_central(req, path, directory, name, cfg)
+            return bind_without_central(req, real_dir, name, dirfd, cfg, proc_ok=proc_ok, why=done)
         return connect_fallbacks(req, path, directory, name, dirfd, cfg, proc_ok=proc_ok)
     finally:
         if dirfd is not None:
@@ -274,15 +288,22 @@ def proc_usable(dirfd: int | None, proc_self_fd: bytes) -> bool:
 
 
 def bind_without_central(
-    req: Request, path: bytes, directory: bytes, name: bytes, cfg: Config
+    req: Request, real_dir: bytes, name: bytes, dirfd: int | None, cfg: Config, *, proc_ok: bool, why: Skip
 ) -> tuple[socket.socket, Route]:
-    """A bind the central route did not carry. The SPEC tries the fork route
-    here (with D, or without it when D could be made nowhere), which this
+    """A bind the central route did not carry (``why``, from
+    :func:`central_route`). Where D could be made nowhere
+    (:attr:`Skip.NO_OWN_DIR`), the SPEC's form without D is tried first
+    (:func:`bind_without_own_dir`). Past that, and where D could be made but
+    no means carried the bind, the SPEC tries the fork route, which this
     implementation does not have (DR-0001): what a plain bind of a path longer
     than ``sun_path`` answers, ``ENAMETOOLONG``.
 
     Kept as one function so that what Python does in the fork route's place
     can be decided in one spot (hub QUESTIONS D12-Q3)."""
+    if why is Skip.NO_OWN_DIR:
+        done = bind_without_own_dir(req, real_dir, name, dirfd, cfg, proc_ok=proc_ok)
+        if done is not None:
+            return done
     raise _enametoolong()
 
 
@@ -452,6 +473,10 @@ IN_OWN_DIR_LEN = RANDOM_LEN + 1
 """What ``R/`` adds in front of the file name in the central route's
 spelling (``R/<name>``)."""
 
+WITHOUT_OWN_DIR_LEN = len(OWN_DIR_PREFIX_IN_SOCKET_DIR) + RANDOM_LEN + 1
+"""What ``.sockat.XXXXXXXXXX/`` adds in front of the file name in the
+spelling of a bind's form without D (19 bytes)."""
+
 _ALPHABET = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
 
 
@@ -567,7 +592,11 @@ class OwnDir:
                     return None
                 verified = True
                 set_own_dir_mode(fd, base_fd, name, proc_self_fd)
-                link = _make_link(fd, target, link_name)
+                if link_name is None:
+                    link = _make_link(fd, target, random_part)
+                else:
+                    fixed = link_name
+                    link = _make_link(fd, target, lambda: fixed, attempts=1)
                 if link is None:
                     return None
                 made = cls(base_fd, owns_base, name, fd, link)
@@ -611,13 +640,13 @@ def _make_dir(base_fd: int, prefix: bytes) -> bytes | None:
     return None
 
 
-def _make_link(fd: int, target: bytes, link_name: bytes | None) -> bytes | None:
-    """``symlinkat(target, fd, name)`` under ``link_name`` or, when ``None``,
-    a fresh random name (``EEXIST``: another, up to :data:`ATTEMPTS`); the
-    name, or ``None`` when it cannot be created."""
-    for _ in range(ATTEMPTS if link_name is None else 1):
+def _make_link(fd: int, target: bytes, draw: Callable[[], bytes], *, attempts: int = ATTEMPTS) -> bytes | None:
+    """``symlinkat(target, fd, name)`` under a name from ``draw`` (``EEXIST``:
+    another, up to ``attempts``); the name, or ``None`` when it cannot be
+    created (the generator failing included)."""
+    for _ in range(attempts):
         try:
-            name = random_part() if link_name is None else link_name
+            name = draw()
         except NotImplementedError:
             return None
         try:
@@ -704,6 +733,9 @@ class Skip(Enum):
     UNUSABLE = "unusable"
     """The route could not be used (too long, nothing to hold, the means
     refused)."""
+    NO_OWN_DIR = "no-own-dir"
+    """The central route had a means to try, but D could be made in none of
+    the places (a bind then tries the form without D)."""
     WIDE_REFUSED = "wide-refused"
     """The spelling needed the widened form and the kernel refused it
     (Apple)."""
@@ -718,19 +750,28 @@ class Means(Enum):
 
 
 def central_means(name: bytes, dirfd: int | None, cfg: Config, *, proc_ok: bool) -> list[Means]:
-    """The means of the central route that can be tried for ``name``, in
-    order, judged as far as they can be before D is made (SPEC: nothing is
-    made for means that cannot be used):
+    """The means of the central route that can be tried for ``name``
+    (:func:`means_for` of ``R/<name>``), in order, judged as far as they can
+    be before D is made (SPEC: nothing is made for means that cannot be
+    used)."""
+    # D's fd is not known before D is opened; the socket directory's (or a
+    # two-digit one when that is not open) stands in for /proc, and the exact
+    # length is checked again with D's own fd.
+    return means_for(b"R" * RANDOM_LEN + b"/" + name, dirfd if dirfd is not None else 10, cfg, proc_ok=proc_ok)
 
-    * FreeBSD: ``bindat`` / ``connectat``, when ``R/<name>`` fits a sockaddr;
+
+def means_for(spelling: bytes, fd: int, cfg: Config, *, proc_ok: bool) -> list[Means]:
+    """The means that can be tried for ``spelling`` handed over relative to
+    a directory held by the fd numbered ``fd``, in order:
+
+    * FreeBSD: ``bindat`` / ``connectat``, when ``spelling`` fits a sockaddr;
     * Linux, Apple: a thread's own cwd, when it is not turned off, the
       system may give one (:func:`._sys.thread_cwd_possible`) and
-      ``R/<name>`` fits a sockaddr;
-    * Linux: /proc, when it can be used and ``/proc/self/fd/<n>/R/<name>``
-      fits a sockaddr with the fd number of the socket's directory (the
-      exact length is checked again with D's own fd).
+      ``spelling`` fits a sockaddr;
+    * Linux: /proc, when it can be used and ``/proc/self/fd/<fd>/<spelling>``
+      fits a sockaddr.
     """
-    fits = IN_OWN_DIR_LEN + len(name) <= DIRECT_MAX
+    fits = len(spelling) <= DIRECT_MAX
     means: list[Means] = []
     if IS_FREEBSD:
         if fits:
@@ -738,20 +779,14 @@ def central_means(name: bytes, dirfd: int | None, cfg: Config, *, proc_ok: bool)
         return means
     if fits and cfg.thread_cwd and HAS_THREAD_CWD and thread_cwd_possible():
         means.append(Means.THREAD_CWD)
-    if proc_ok:
-        # D's fd is not known before D is opened; the socket directory's (or a
-        # two-digit one when that is not open) stands in, and the exact length
-        # is checked again with D's own fd.
-        digits = str(dirfd if dirfd is not None else 10).encode()
-        estimate = _join(_join(cfg.proc_self_fd, digits), b"R" * RANDOM_LEN + b"/" + name)
-        if len(estimate) <= DIRECT_MAX:
-            means.append(Means.PROC)
+    if proc_ok and len(_join(_join(cfg.proc_self_fd, str(fd).encode()), spelling)) <= DIRECT_MAX:
+        means.append(Means.PROC)
     return means
 
 
 def central_route(
     req: Request, real_dir: bytes, name: bytes, dirfd: int | None, cfg: Config, *, proc_ok: bool
-) -> tuple[socket.socket, Route] | None:
+) -> tuple[socket.socket, Route] | Skip:
     """The central route (SPEC): D in the first of
     :attr:`Config.own_dir_places` where it can be made (:class:`OwnDir`),
     holding R, a symlink to ``real_dir`` (the realpath of the socket's
@@ -761,15 +796,17 @@ def central_route(
     outcome, so the spelling the kernel keeps (``R/<name>``) names nothing
     afterwards, from any cwd.
 
-    ``None`` (nothing left behind) when no means can be used, D can be made
-    nowhere, or every means turned out unusable once tried. A failure of the
-    bind / connect itself is the outcome and is raised."""
+    Nothing is left behind when it does not carry the call:
+    :attr:`Skip.NO_OWN_DIR` when D can be made nowhere,
+    :attr:`Skip.UNUSABLE` when no means can be used (nothing is made) or
+    every means turned out unusable once tried. A failure of the bind /
+    connect itself is the outcome and is raised."""
     means = central_means(name, dirfd, cfg, proc_ok=proc_ok)
     if not means:
-        return None
+        return Skip.UNUSABLE
     own = OwnDir.make(cfg.own_dir_places, dirfd, real_dir, proc_self_fd=cfg.proc_self_fd)
     if own is None:
-        return None
+        return Skip.NO_OWN_DIR
     try:
         spelling = own.link + b"/" + name
         for m in means:
@@ -783,9 +820,56 @@ def central_route(
                 via = proc_spelling(own.fd, spelling, cfg.proc_self_fd)
                 if via is not None:
                     return plain_op(req, via), Route.PROC_OWN_DIR
-        return None
+        return Skip.UNUSABLE
     finally:
         own.remove()
+
+
+def bind_without_own_dir(
+    req: Request, real_dir: bytes, name: bytes, dirfd: int | None, cfg: Config, *, proc_ok: bool
+) -> tuple[socket.socket, Route] | None:
+    """The SPEC's form without D, for a bind where D could be made nowhere:
+    R (``.sockat.`` and :data:`RANDOM_LEN` letters or digits, a symlink to
+    ``real_dir``, the realpath of the socket's directory) made in the
+    socket's directory itself through its fd ``dirfd`` (``EEXIST``: another
+    name, up to :data:`ATTEMPTS`), and the bind of ``R/<name>`` from that fd
+    by the central route's means in their order: a thread's own cwd (Linux,
+    Apple) or ``bindat`` (FreeBSD), then
+    ``/proc/self/fd/<dirfd>/R/<name>`` (Linux). R is removed again whatever
+    the outcome, so the spelling the kernel keeps names nothing afterwards.
+
+    ``None`` when the form cannot be used: the socket's directory could not
+    be opened, no means can be used for the spelling (19 bytes and the file
+    name: up to 88 bytes of name on Linux, 84 on Apple and the BSDs, fewer
+    through /proc), both checked before anything is made; R cannot be
+    created; or every means turned out unusable once tried. A failure of the
+    bind itself is the outcome and is raised."""
+    if dirfd is None:
+        return None
+    sample = OWN_DIR_PREFIX_IN_SOCKET_DIR + b"R" * RANDOM_LEN + b"/" + name
+    means = means_for(sample, dirfd, cfg, proc_ok=proc_ok)
+    if not means:
+        return None
+    link = _make_link(dirfd, real_dir, lambda: random_name(OWN_DIR_PREFIX_IN_SOCKET_DIR))
+    if link is None:
+        return None
+    try:
+        spelling = link + b"/" + name
+        for m in means:
+            if m is Means.AT:
+                return at_op(req, dirfd, spelling), Route.AT_WITHOUT_D
+            if m is Means.THREAD_CWD:
+                done = thread_cwd_op(req, dirfd, spelling)
+                if isinstance(done, socket.socket):
+                    return done, Route.THREAD_CWD_WITHOUT_D
+            else:
+                via = proc_spelling(dirfd, spelling, cfg.proc_self_fd)
+                if via is not None:
+                    return plain_op(req, via), Route.PROC_WITHOUT_D
+        return None
+    finally:
+        with contextlib.suppress(OSError):
+            os.unlink(link, dir_fd=dirfd)
 
 
 def thread_cwd_op(req: Request, dirfd: int, spelling: bytes) -> socket.socket | Skip:
@@ -824,11 +908,12 @@ def thread_cwd_op(req: Request, dirfd: int, spelling: bytes) -> socket.socket | 
     except RuntimeError:
         sock.close()
         return Skip.UNUSABLE
-    # The thread uses `dirfd` (D, which the caller removes and closes as soon
-    # as this returns) and `sock`: whatever interrupts the wait (an exception
-    # such as KeyboardInterrupt out of join), the thread is waited for to the
-    # end first, so it never enters a closed (or reused) fd. The interruption
-    # is raised then, with the socket closed.
+    # The thread uses `dirfd` (D, or the socket's directory for the form
+    # without D, which the caller closes as soon as this returns) and `sock`:
+    # whatever interrupts the wait (an exception such as KeyboardInterrupt out
+    # of join), the thread is waited for to the end first, so it never enters
+    # a closed (or reused) fd. The interruption is raised then, with the
+    # socket closed.
     interrupted: BaseException | None = None
     while True:
         try:
