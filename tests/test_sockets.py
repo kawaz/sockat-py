@@ -14,11 +14,13 @@ import socket
 from collections.abc import Callable
 
 import pytest
-from _support import TmpDirs, accept_ping, kernel_peername, nest, ping
+from _support import TmpDirs, accept_ping, kernel_peername, needs_long_bind, nest, ping
 
 import sockat
 from sockat._sockets import PathSocket
 from sockat._sys import DIRECT_MAX
+
+pytestmark = needs_long_bind
 
 
 def fd_nonblocking(s: socket.socket) -> bool:

@@ -33,7 +33,8 @@ def test_the_lengths_per_system() -> None:
     # XNU takes an address of up to SOCK_MAXADDRLEN (255) bytes: 2 header
     # bytes and 253 bytes of path.
     assert WIDE_PATH_MAX == 253
-    # The thread-cwd route exists where a thread can have a cwd of its own.
+    # The thread's own cwd (a means of the central route) exists where a
+    # thread can have a cwd of its own.
     assert _sys.HAS_THREAD_CWD is (sys.platform.startswith("linux") or sys.platform == "darwin")
 
 
@@ -63,7 +64,7 @@ def test_the_standard_sockaddr_layout() -> None:
 # The hand-built standard sockaddr is one the kernel takes as the socket
 # module's own: bind(2) / connect(2) through `op` with it binds at the path
 # (the address the kernel reports is the path, as for the socket module) and
-# connects to it. This is the form the thread-cwd route and bindat use.
+# connects to it. This is the form bindat / connectat use.
 def test_op_binds_and_connects_with_a_hand_built_sockaddr(tmp: TmpDirs) -> None:
     p = tmp.new() + b"/s.sock"
     listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -106,7 +107,7 @@ def test_the_widened_sockaddr_is_not_there_elsewhere() -> None:
 
 
 # A thread entered into a directory has that directory as its own cwd (what
-# the thread-cwd route binds / connects the file name against), while the
+# the central route binds / connects `R/<name>` against), while the
 # process cwd, which every other thread keeps using, does not change. Where
 # the system will not give the thread a cwd of its own (Linux under a seccomp
 # filter such as docker's default, where unshare(CLONE_FS) is not even tried),

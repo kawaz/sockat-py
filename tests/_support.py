@@ -37,9 +37,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TypeVar
 
+import pytest
+
 import sockat
 from sockat import _route, _sys
-from sockat._route import BIND, CONNECT, CONNECT_NONBLOCKING, Config, Request, Route
+from sockat._route import BIND, CONNECT, CONNECT_NONBLOCKING, SOCKET_DIR, Config, OwnDirPlace, Request, Route
 from sockat._sockets import PathSocket
 from sockat._sys import DIRECT_MAX, IS_APPLE, IS_LINUX
 
@@ -49,14 +51,17 @@ TESTS_DIR = Path(__file__).resolve().parent
 SRC_DIR = Path(sockat.__file__).resolve().parents[1]
 CHILDREN = TESTS_DIR / "_children.py"
 
+PROC = b"/proc/self/fd"
+"""Where the kernel lists the fds of the process (Linux)."""
+
 NO_PROC = b"/nonexistent/proc/self/fd"
 """Where ``/proc/self/fd`` is said to be when /proc is to look absent
 (Linux): a path that does not exist. Only the place to look is changed; the
 real /proc is untouched."""
 
 NO_PLACE = b"/nonexistent"
-"""A place for the symlink that does not exist (so the symlink route cannot
-be used there)."""
+"""A place (for D or a symlink) that does not exist, so nothing can be made
+there."""
 
 FULL_BACKLOG = errno.EAGAIN if IS_LINUX else errno.ECONNREFUSED
 """What a nonblocking connect answers while the listener's backlog is full:
@@ -327,14 +332,27 @@ def at_once(f: Callable[[], T]) -> T:
 
 
 def listener_at(path: bytes) -> socket.socket:
-    """A listener on a socket file at ``path``, bound under a short name in
-    the same directory through the public API and renamed to ``path``. For
-    paths no bind route reaches (a file name too long for every sockaddr):
-    the socket file is the same inode after the rename, so the listener
-    accepts connections made to ``path``."""
-    short = with_name(path, b"l.sock")
-    listener = sockat.bind(short)
-    os.rename(short, path)
+    """A listener on a socket file at ``path``, bound by the standard under a
+    short name in a fresh directory directly under ``/tmp`` and renamed to
+    ``path`` (which must be on the same file system, as every test path under
+    ``/tmp`` is). For paths no bind route reaches (a file name too long for
+    every sockaddr), and for listeners that must not depend on the routes
+    under test: the socket file is the same inode after the rename, so the
+    listener accepts connections made to ``path``."""
+    short_dir = tempfile.mkdtemp(prefix="sockat-l-", dir="/tmp")
+    short = os.path.join(short_dir, "l.sock")
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        listener.bind(short)
+        listener.listen()
+        os.rename(os.fsencode(short), path)
+    except BaseException:
+        listener.close()
+        raise
+    finally:
+        with contextlib.suppress(OSError):
+            os.unlink(short)
+        os.rmdir(short_dir)
     return listener
 
 
@@ -343,24 +361,40 @@ def listener_at(path: bytes) -> socket.socket:
 # ---------------------------------------------------------------------------
 
 
-def posix_cfg(
-    bases: Sequence[bytes] = (), *, wide: bool = IS_APPLE, thread_cwd: bool = False, proc: bytes = NO_PROC
+def fallback_cfg(
+    links: Sequence[bytes] = (), *, wide: bool = IS_APPLE, proc: bytes = NO_PROC, thread_cwd: bool = False
 ) -> Config:
-    """The route order's inputs with ``bases`` as the places for the symlink,
-    and on Linux /proc made to look absent, so the POSIX order runs there
-    too. ``wide`` off stands in for an Apple kernel that refuses the widened
-    sockaddr. The thread-cwd route is off unless asked for, so a path that
-    falls through every other route reaches the fork route's place, where
-    this implementation answers ``ENAMETOOLONG``. ``proc`` is where
-    ``/proc/self/fd`` is said to be."""
-    return Config(tmp_bases=tuple(bases), wide=wide, proc_self_fd=proc, thread_cwd=thread_cwd)
+    """The route order's inputs with no place for D (so the central route
+    cannot be used, and a bind ends at the fork route's place, where this
+    implementation answers ``ENAMETOOLONG``), ``links`` as the places for a
+    connect's symlink, and on Linux /proc made to look absent unless ``proc``
+    says where to look. ``wide`` off stands in for an Apple kernel that
+    refuses the widened sockaddr."""
+    return Config(own_dir_places=(), link_places=tuple(links), wide=wide, proc_self_fd=proc, thread_cwd=thread_cwd)
+
+
+def central_cfg(
+    own: Sequence[OwnDirPlace] = (SOCKET_DIR,),
+    links: Sequence[bytes] = (),
+    *,
+    thread_cwd: bool = True,
+    proc: bytes = PROC,
+    wide: bool = IS_APPLE,
+) -> Config:
+    """The route order's inputs with ``own`` as the places for D (the socket's
+    directory unless given), the thread's own cwd tried unless turned off,
+    the real /proc unless ``proc`` says where else to look, ``links`` as the
+    places for a connect's symlink."""
+    return Config(
+        own_dir_places=tuple(own), link_places=tuple(links), wide=wide, proc_self_fd=proc, thread_cwd=thread_cwd
+    )
 
 
 @functools.cache
 def thread_cwd_usable() -> bool:
-    """Whether the thread-cwd route can be used here: a throwaway thread gets
-    a cwd of its own (Linux: ``unshare(CLONE_FS)``, not tried under a seccomp
-    filter such as docker's default; Apple: ``pthread_fchdir_np``).
+    """Whether a throwaway thread gets a cwd of its own here (Linux:
+    ``unshare(CLONE_FS)``, not tried under a seccomp filter such as docker's
+    default; Apple: ``pthread_fchdir_np``).
 
     Probed on the running system. Where the answer is known in advance it is
     asserted, so a broken probe cannot quietly move the tests to the "not
@@ -382,6 +416,7 @@ def thread_cwd_usable() -> bool:
     finally:
         os.close(fd)
     usable = got[0]
+    assert usable == _sys.thread_cwd_possible() or IS_LINUX, "the pre-check disagrees with the thread"
     want = os.environ.get("SOCKAT_TEST_THREAD_CWD")
     if want is not None:
         assert usable == (want == "1"), f"SOCKAT_TEST_THREAD_CWD={want} but the probe says {usable}"
@@ -390,17 +425,39 @@ def thread_cwd_usable() -> bool:
     return usable
 
 
-def symlink_route(req: Request) -> Route:
-    """The symlink route a request takes: a bind goes through a link to the
-    socket's directory, a connect through a link to the socket file."""
-    return Route.SYMLINK_TO_DIR if req.op is _sys.Op.BIND else Route.SYMLINK_TO_FILE
+HAS_PROC = IS_LINUX and os.path.isdir(b"/proc/self/fd")
+"""Whether /proc can be used here (Linux)."""
+
+
+def central_route_here() -> Route | None:
+    """The central route the real configuration takes here for a short file
+    name, or ``None`` where it has no means (NetBSD, OpenBSD, illumos): a
+    thread's own cwd where it can be used, else bindat on FreeBSD, else
+    /proc on Linux."""
+    if sys.platform.startswith("freebsd"):
+        return Route.AT
+    if thread_cwd_usable():
+        return Route.THREAD_CWD
+    if HAS_PROC:
+        return Route.PROC_OWN_DIR
+    return None
+
+
+needs_long_bind = pytest.mark.skipif(
+    central_route_here() is None,
+    reason="no means of the central route here, so no long path can be bound (no fork route in Python)",
+)
+"""For the tests that bind long paths through the public API."""
+
+NAME_MAX_CENTRAL = DIRECT_MAX - _route.IN_OWN_DIR_LEN
+"""The longest file name the central route binds by a thread's own cwd or
+bindat (``R/<name>`` in a sockaddr): 96 on Linux, 92 on Apple and the
+BSDs."""
 
 
 def routes(bind: Route, connect: Route) -> Callable[[Request], Route]:
     """The route a request takes where a bind and a connect go different
-    ways: ``bind`` for the bind, ``connect`` for both connects. On Apple a
-    connect may take the widened sockaddr and a bind never does, so a path
-    a connect reaches in the widened form is bound some other way."""
+    ways: ``bind`` for the bind, ``connect`` for both connects."""
 
     def want(req: Request) -> Route:
         return bind if req.op is _sys.Op.BIND else connect
@@ -436,12 +493,22 @@ class Forced:
     want: Callable[[Request], Route]
 
 
-def forced(what: str, path: bytes, cfg: Config | None, want: Route | Callable[[Request], Route]) -> Forced:
+def forced(
+    what: str,
+    path: bytes,
+    cfg: Config | None,
+    want: Route | Callable[[Request], Route],
+    *,
+    bind_cfg: Config | None = None,
+) -> Forced:
     """A :class:`Forced` through :func:`_route.run_long` with ``cfg``, or
     through :func:`_route.run` (as the public API goes) when ``cfg`` is
-    ``None``."""
+    ``None``; the bind with ``bind_cfg`` when given (for a connect's
+    fallback, which no bind takes)."""
 
     def way(req: Request) -> tuple[socket.socket, Route]:
+        if req.op is _sys.Op.BIND and bind_cfg is not None:
+            return _route.run_long(req, path, bind_cfg)
         if cfg is None:
             return _route.run(req, path)
         return _route.run_long(req, path, cfg)
@@ -478,8 +545,9 @@ def check_route(f: Forced, places: Sequence[bytes] = ()) -> None:
       :func:`kernel_peername` of the listener, the client and the accepted
       stream) can be read without an error, and each fits ``sun_path`` with
       its NUL (:func:`assert_address_fits`);
-    * the process cwd is the same afterwards, and nothing is left in
-      ``places`` (the places for the symlink);
+    * the process cwd is the same afterwards, nothing but the socket file is
+      in its directory (no D or R named ``.sockat.*``), and nothing is left
+      in ``places`` (the places for D or the symlink);
     * the listener and both connects, handed to asyncio, serve, report the
       path, and are cleaned up as asyncio cleans up the standard's
       (:func:`check_asyncio`).
@@ -527,6 +595,7 @@ def check_route(f: Forced, places: Sequence[bytes] = ()) -> None:
                     ping(server, client)
     assert os.getcwd() == cwd, f"{f.what}: the cwd changed"
     assert dir_id(".") == cwd_id, f"{f.what}: the cwd changed"
+    assert listing(parent(f.path)) == [os.path.basename(f.path)], f"{f.what}: left next to the socket"
     for p in places:
         assert_empty(p)
     os.unlink(f.path)
@@ -620,10 +689,11 @@ def check_asyncio(f: Forced) -> None:
 
     * bound before any event loop exists (``asyncio.run`` after the bind).
       This is how a listener is usually made, and the one that matters on
-      Linux: the /proc route binds ``/proc/self/fd/<n>/<name>`` with a
-      directory fd it closes again, and the event loop made afterwards takes
-      that free fd number for its own (the selector, the self-pipe), so the
-      kernel's spelling then names something else (``NotADirectoryError`` from
+      Linux: the central route through /proc binds
+      ``/proc/self/fd/<n>/R/<name>`` with D's fd, closed again, and the event
+      loop made afterwards takes that free fd number for its own (the
+      selector, the self-pipe), so the kernel's spelling then names something
+      else (a bind through /proc without R gave ``NotADirectoryError`` from
       ``os.stat`` at the start of the server, had asyncio been handed it);
     * bound on the loop's thread with the loop running.
 
@@ -692,7 +762,7 @@ def check_full_backlog(f: Forced) -> None:
 
 
 def check_unreachable(path: bytes, cfg: Config, untouched: Sequence[bytes] = ()) -> None:
-    """Check that a path only the fork route would reach is ``ENAMETOOLONG``
+    """Check that a path no route reaches with ``cfg`` is ``ENAMETOOLONG``
     for the bind and both connects (this implementation has no fork route),
     and that nothing happens: nothing appears next to the socket, no
     connection reaches a listener at the path, and nothing is created in the
@@ -739,7 +809,12 @@ def run_child(
     ``env`` gives another, require it to succeed, and return what it
     reported. ``args`` reach the child as ``SOCKAT_ARG_<KEY>``."""
     child_env: dict[bytes, bytes] = dict(os.environb)
-    child_env[b"PYTHONPATH"] = os.fsencode(f"{SRC_DIR}{os.pathsep}{TESTS_DIR}")
+    # The source and the tests first, then whatever the test process had
+    # (where pytest itself was installed, which _support imports).
+    paths = [os.fsencode(SRC_DIR), os.fsencode(TESTS_DIR)]
+    if os.environb.get(b"PYTHONPATH"):
+        paths.append(os.environb[b"PYTHONPATH"])
+    child_env[b"PYTHONPATH"] = os.fsencode(os.pathsep).join(paths)
     child_env[b"PWD"] = cwd
     for k, v in (env or {}).items():
         child_env[os.fsencode(k)] = v

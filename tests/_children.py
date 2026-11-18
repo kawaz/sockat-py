@@ -1,6 +1,6 @@
 """Scenarios run in a child process by :func:`_support.run_child`, for the
-tests that need a cwd, ``$PWD`` or ``$TMPDIR`` of their own (process-wide
-state the test process must not change).
+tests that need a cwd, ``$PWD``, ``$TMPDIR`` or a umask of their own
+(process-wide state the test process must not change).
 
 Run as ``python _children.py <scenario>`` with the cwd and environment the
 test chose; arguments come as ``SOCKAT_ARG_<KEY>`` environment variables. A
@@ -13,9 +13,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import errno
+import dataclasses
 import json
 import os
+import re
 import resource
 import socket
 import sys
@@ -23,27 +24,28 @@ from collections.abc import Callable
 
 from _support import (
     CHECKS_FULL_BACKLOG,
+    NO_PROC,
+    PROC,
     RESULT_MARK,
     Forced,
     accept_ping,
     assert_cleaned_up_as_asyncio_does,
     assert_untouched,
+    central_cfg,
+    central_route_here,
     check_full_backlog,
     check_route,
+    fallback_cfg,
     forced,
     is_socket,
     nest,
-    posix_cfg,
-    raises_errno,
     routes,
     serve_asyncio,
-    thread_cwd_usable,
-    with_name,
 )
 
 import sockat
 from sockat import _route
-from sockat._route import BIND, CONNECT, Config, Request, Route
+from sockat._route import BIND, CONNECT, CONNECT_NONBLOCKING, SOCKET_DIR, Config, OwnDirPlace, Request, Route
 from sockat._sys import DIRECT_MAX, WIDE_PATH_MAX
 
 
@@ -66,72 +68,71 @@ def make_stale_socket() -> None:
     report()
 
 
-def bind_report() -> None:
-    """Bind PATH through the POSIX order (no place for a symlink, /proc made
-    to look absent on Linux, at PROC when given, no thread-cwd route) and
-    report the route taken and the relative spelling (``-`` when there is
-    none)."""
-    p = arg("PATH")
-    directory, _ = os.path.split(p)
-    rel = _route.Relative.new(p, directory)
-    spelling = os.fsdecode(rel.path) if rel is not None else "-"
-    proc = opt_arg("PROC")
-    cfg = posix_cfg(proc=proc) if proc is not None else posix_cfg()
-    listener, route = _route.run_long(BIND, p, cfg)
-    listener.close()
-    report(route=route.value, rel=spelling)
-
-
-def bind_from_env() -> None:
-    """Bind PATH with the configuration read from the environment
-    (``Config.from_env``: ``$TMPDIR``, then ``/tmp``), /proc made to look
-    absent on Linux, and report the route."""
-    base = Config.from_env()
-    cfg = Config(tmp_bases=base.tmp_bases, wide=base.wide, proc_self_fd=posix_cfg().proc_self_fd, thread_cwd=False)
-    listener, route = _route.run_long(BIND, arg("PATH"), cfg)
-    listener.close()
-    report(route=route.value, bases=json.dumps([os.fsdecode(b) for b in cfg.tmp_bases]))
+def means_cfg(means: str, own: tuple[OwnDirPlace, ...]) -> tuple[Config, Route]:
+    """The configuration that forces one means of the central route (as
+    ``test_central.means_here`` names them), with ``own`` as the places for
+    D, and the route it takes."""
+    if means == "thread-cwd":
+        return central_cfg(own, proc=NO_PROC), Route.THREAD_CWD
+    if means == "proc":
+        return central_cfg(own, thread_cwd=False), Route.PROC_OWN_DIR
+    assert means == "at", means
+    return central_cfg(own), Route.AT
 
 
 def connect_report() -> None:
-    """Connect to PATH (absolute, or relative to the cwd) on Linux with the
-    real /proc and no thread-cwd route, through BASE as the only place for
-    the symlink, or through the places read from the environment
-    (``Config.from_env``: ``$TMPDIR``, then ``/tmp``) when BASE is not given,
-    with the umask UMASK (octal) when given, and report the route and the
-    places."""
-    umask = opt_arg("UMASK")
-    if umask is not None:
-        os.umask(int(umask, 8))
+    """Connect to PATH (absolute, or relative to the cwd) by the fallbacks
+    alone (the thread's own cwd off; OWN as the only place for D when given,
+    none otherwise), through BASE as the only place for the symlink, or the
+    places read from the environment (``Config.from_env``: ``$TMPDIR``, then
+    ``/tmp``) when BASE is not given; on Linux the real /proc when PROC is
+    ``1``, none otherwise. Report the route and the places."""
     base = opt_arg("BASE")
-    bases = (base,) if base is not None else Config.from_env().tmp_bases
-    cfg = Config(tmp_bases=bases, proc_self_fd=b"/proc/self/fd", thread_cwd=False)
+    links = (base,) if base is not None else Config.from_env().link_places
+    proc = PROC if opt_arg("PROC") == b"1" else NO_PROC
+    own = opt_arg("OWN")
+    cfg = dataclasses.replace(fallback_cfg(links, proc=proc), own_dir_places=(own,) if own is not None else ())
     client, route = _route.run_long(CONNECT, arg("PATH"), cfg)
     client.close()
-    report(route=route.value, bases=json.dumps([os.fsdecode(b) for b in cfg.tmp_bases]))
+    report(route=route.value, bases=json.dumps([os.fsdecode(b) for b in links]))
+
+
+def relative_spelling() -> None:
+    """Report the relative spelling of PATH from the cwd (``-`` for none)."""
+    p = arg("PATH")
+    rel = _route.Relative.new(p, os.path.dirname(p))
+    report(rel=os.fsdecode(rel.path) if rel is not None else "-")
+
+
+def bind_without_own_dir() -> None:
+    """Bind PATH with no place for D (the fallbacks' configuration) and
+    report the errno it fails with."""
+    try:
+        _route.run_long(BIND, arg("PATH"), fallback_cfg())[0].close()
+    except OSError as e:
+        report(errno=str(e.errno))
+    else:
+        raise AssertionError("the bind went through")
 
 
 def relative_routes() -> None:
     """Every check of a forced route (:func:`_support.check_route`, and
-    :func:`_support.check_full_backlog`) on the relative route, with PATH
-    below the cwd so that its relative spelling fits the plain sockaddr; on
-    Apple also, for the connects, on the widened sockaddr with the relative
-    spelling (WPATH, whose relative spelling fits only the widened one). A
-    bind never takes the widened form: WPATH is ENAMETOOLONG for the bind
-    with the thread-cwd route off, nothing created, and with it on the bind
-    goes by the file name from the thread-cwd route."""
-    ways: list[Forced] = [forced("relative", arg("PATH"), posix_cfg(), Route.RELATIVE)]
+    :func:`_support.check_full_backlog`) on the relative fallback of the
+    connects, with PATH below the cwd so that its relative spelling fits the
+    plain sockaddr; on Apple also on the widened sockaddr with the relative
+    spelling (WPATH, whose relative spelling fits only the widened one). The
+    listener is bound by the central route (a bind never takes the relative
+    spelling)."""
+    bind = central_cfg()
+    bound = central_route_here()
+    assert bound is not None
+    ways: list[Forced] = [forced("relative", arg("PATH"), fallback_cfg(), routes(bound, Route.RELATIVE), bind_cfg=bind)]
     wpath = opt_arg("WPATH")
     if wpath is not None:
         rel = _route.Relative.new(wpath, os.path.dirname(wpath))
         assert rel is not None
         assert DIRECT_MAX < len(rel.path) <= WIDE_PATH_MAX, rel
-        before = sorted(os.listdir(os.path.dirname(wpath)))
-        with raises_errno(errno.ENAMETOOLONG):
-            _route.run_long(BIND, wpath, posix_cfg())[0].close()
-        assert sorted(os.listdir(os.path.dirname(wpath))) == before
-        want = routes(Route.THREAD_CWD, Route.WIDE_RELATIVE)
-        ways.append(forced("wide-relative", wpath, posix_cfg(thread_cwd=True), want))
+        ways.append(forced("wide-relative", wpath, fallback_cfg(), routes(bound, Route.WIDE_RELATIVE), bind_cfg=bind))
     for f in ways:
         check_route(f)
         if CHECKS_FULL_BACKLOG:
@@ -140,55 +141,46 @@ def relative_routes() -> None:
 
 
 def relative_failures() -> None:
-    """On the relative route (PATH below the cwd), the kernel's errors come
-    back as they are and nothing is tried after them: the place for the
-    symlink (BASE, marked untouched by the test) stays untouched, though the
-    symlink route and the thread-cwd route are both on."""
+    """On the relative fallback (PATH below the cwd), the kernel's errors
+    come back as they are and nothing is tried after them: the place for the
+    symlink (BASE, marked untouched by the test) stays untouched."""
     p = arg("PATH")
     base = arg("BASE")
     stale = arg("STALE")
-    cfg = posix_cfg([base], thread_cwd=True)
+    cfg = fallback_cfg([base])
     for q in (p, stale):
         # The premise: each path's relative spelling fits the plain sockaddr,
-        # so the relative route is the one that fails.
+        # so the relative fallback is the one that fails.
         rel = _route.Relative.new(q, os.path.dirname(q))
         assert rel is not None
         assert len(rel.path) <= DIRECT_MAX, rel
     errors: dict[str, str] = {}
-    try:
-        _route.run_long(CONNECT, p, cfg)
-    except OSError as e:
-        errors["no-socket"] = str(e.errno)
-    listener, route = _route.run_long(BIND, p, cfg)
-    assert route is Route.RELATIVE, route
-    with listener:
+    for req in (CONNECT, CONNECT_NONBLOCKING):
         try:
-            _route.run_long(BIND, p, cfg)
+            _route.run_long(req, p, cfg)
         except OSError as e:
-            errors["in-use"] = str(e.errno)
-    try:
-        _route.run_long(CONNECT, stale, cfg)
-    except OSError as e:
-        errors["stale"] = str(e.errno)
+            errors[f"no-socket {req.nonblocking}"] = str(e.errno)
+        try:
+            _route.run_long(req, stale, cfg)
+        except OSError as e:
+            errors[f"stale {req.nonblocking}"] = str(e.errno)
     assert_untouched(base)
     report(**errors)
 
 
 def relative_input() -> None:
-    """A long path given relative to the cwd (REL) is bound and connected to
-    in the directory it names below the cwd, through the given
-    configuration (BASE as the only place for the symlink, or none;
-    THREAD=1 turns the thread-cwd route on), and the routes are reported."""
+    """A long path given relative to the cwd (REL) is bound by the central
+    route (D in the socket's directory) and connected to by the fallbacks
+    (BASE as the only place for the symlink, no /proc), in the directory it
+    names below the cwd; the routes are reported."""
     rel = arg("REL")
-    base = opt_arg("BASE")
-    cfg = posix_cfg([base] if base else [], thread_cwd=opt_arg("THREAD") == b"1")
-    listener, bind_route = _route.run_long(BIND, rel, cfg)
+    listener, bind_route = _route.run_long(BIND, rel, central_cfg())
     with listener:
         assert is_socket(rel)
         # Reported as given, relative, as the standard reports a short
         # relative path it bound or connected to.
         assert listener.getsockname() == os.fsdecode(rel)
-        client, connect_route = _route.run_long(CONNECT, rel, cfg)
+        client, connect_route = _route.run_long(CONNECT, rel, fallback_cfg([arg("BASE")]))
         with client:
             assert client.getpeername() == os.fsdecode(rel)
             accept_ping(listener, client)
@@ -196,8 +188,8 @@ def relative_input() -> None:
 
 
 UNRELATED = b"unrelated, not to be removed"
-"""What the files that stand next to a socket's spelling hold
-(:func:`asyncio_namesakes`)."""
+"""What the files that stand where a socket's spelling would name hold
+(:func:`spelling_namesakes`)."""
 
 
 def put_unrelated(path: bytes) -> None:
@@ -211,121 +203,142 @@ def assert_unrelated(path: bytes, what: str) -> None:
         assert f.read() == UNRELATED, what
 
 
-def asyncio_namesakes() -> None:
-    """A listener whose kernel address is a spelling relative to the cwd, used
-    with asyncio as the standard's is (:func:`_support.serve_asyncio`, bound
-    before the loop), while a file unrelated to the socket sits where that
-    spelling names from the process cwd. asyncio (Python 3.13 and later)
-    removes the file at the listener's address when the server closes, if it
-    is still the inode it found there at the start: had it been handed the
-    spelling, it would have found the unrelated file both times and removed
-    it. It must be left alone, and the socket file at the path removed (or,
-    before 3.13, left) as for the standard's. Two spellings:
-
-    * the thread-cwd route (where the system allows it): the file name alone,
-      THREAD (far from the cwd, file name ``s.sock``), with ``s.sock`` in the
-      cwd unrelated;
-    * the relative route: REL below the cwd, then the cwd changed to OTHER,
-      which holds an unrelated file at REL's relative spelling, before the
-      loop starts.
-
-    Reports which of them ran."""
+def spelling_namesakes() -> None:
+    """For each means of MEANS (comma-separated): bind PATH (far from the
+    cwd, file name ``s.sock``) through it while a file ``s.sock`` unrelated to
+    the socket sits in the cwd. The spelling the kernel keeps (``R/s.sock``,
+    or behind ``/proc/self/fd/<n>/``) names nothing: ``os.stat`` and
+    ``os.unlink`` of it are ``FileNotFoundError``, and the unrelated file is
+    left alone. Then the same listener path is served by asyncio as the
+    standard's is (:func:`_support.serve_asyncio`, bound before the loop):
+    from Python 3.13 asyncio removes the file at the listener's address when
+    the server closes, which must be the socket file at PATH, not the file in
+    the cwd. Reports which means ran."""
+    p = arg("PATH")
+    name = os.path.basename(p)
+    put_unrelated(name)
     checked: list[str] = []
+    for means in os.fsdecode(arg("MEANS")).split(","):
+        cfg, want = means_cfg(means, (SOCKET_DIR,))
+        listener, r = _route.run_long(BIND, p, cfg)
+        with listener:
+            assert r is want, r
+            kernel = os.fsencode(socket.socket.getsockname(listener))
+            assert re.fullmatch(rb"(/proc/self/fd/\d+/)?[A-Za-z0-9]{10}/" + re.escape(name), kernel), kernel
+            for f in (os.stat, os.unlink):
+                try:
+                    f(kernel)
+                except FileNotFoundError:
+                    pass
+                else:
+                    raise AssertionError(f"{means}: {f.__name__} of the kernel's spelling found something")
+            assert_unrelated(name, f"{means}: the unrelated file in the cwd was touched")
+        os.unlink(p)
 
-    def public(path: bytes) -> Callable[[Request], socket.socket]:
-        def connect(req: Request) -> socket.socket:
-            return sockat.connect_nonblocking(path) if req.nonblocking else sockat.connect(path)
+        def connect(req: Request, cfg: Config = cfg) -> socket.socket:
+            return _route.run_long(req, p, cfg)[0]
 
-        return connect
-
-    if thread_cwd_usable():
-        p = arg("THREAD")
-        name = os.path.basename(p)
-        put_unrelated(name)
-        listener, r = _route.run_long(BIND, p, posix_cfg(thread_cwd=True))
-        assert r is Route.THREAD_CWD, r
-        assert socket.socket.getsockname(listener) == os.fsdecode(name), "the premise: the kernel holds the name"
-        # Checked however the exchange ended: the server is closed (and its
-        # cleanup run) on the way out of a failure too.
+        listener, _ = _route.run_long(BIND, p, cfg)
         try:
-            asyncio.run(serve_asyncio("thread-cwd", listener, public(p), os.fsdecode(p), served=True))
+            asyncio.run(serve_asyncio(means, listener, connect, os.fsdecode(p), served=True))
         finally:
-            assert_unrelated(name, "the unrelated file in the cwd was removed")
-        assert_cleaned_up_as_asyncio_does("thread-cwd", p)
-        checked.append("thread-cwd")
-
-    p = arg("REL")
-    other = arg("OTHER")
-    rel = _route.Relative.new(p, os.path.dirname(p))
-    assert rel is not None
-    assert len(rel.path) <= DIRECT_MAX, rel
-    namesake = os.path.join(other, rel.path)
-    os.makedirs(os.path.dirname(namesake))
-    put_unrelated(namesake)
-    listener, r = _route.run_long(BIND, p, posix_cfg())
-    assert r is Route.RELATIVE, r
-    assert os.fsencode(socket.socket.getsockname(listener)) == rel.path, "the premise: the kernel holds the spelling"
-    os.chdir(other)
-    try:
-        asyncio.run(serve_asyncio("relative", listener, public(p), os.fsdecode(p), served=True))
-    finally:
-        assert_unrelated(namesake, "the unrelated file at the spelling from the new cwd was removed")
-    assert_cleaned_up_as_asyncio_does("relative", p)
-    checked.append("relative")
+            assert_unrelated(name, f"{means}: asyncio removed the unrelated file in the cwd")
+        assert_cleaned_up_as_asyncio_does(means, p)
+        checked.append(means)
     report(checked=",".join(checked))
+
+
+def asyncio_namesakes() -> None:
+    """The public API's listener at PATH (far from the cwd, file name
+    ``s.sock``, bound by the central route), served by asyncio as the
+    standard's is (:func:`_support.serve_asyncio`, bound before the loop,
+    the public connects adopted), while a file ``s.sock`` unrelated to the
+    socket sits in the cwd: asyncio's cleanup (Python 3.13 and later) removes
+    the socket file at PATH, not that file."""
+    p = arg("PATH")
+    name = os.path.basename(p)
+    put_unrelated(name)
+
+    def connect(req: Request) -> socket.socket:
+        return sockat.connect_nonblocking(p) if req.nonblocking else sockat.connect(p)
+
+    try:
+        asyncio.run(serve_asyncio("public", sockat.bind(p), connect, os.fsdecode(p), served=True))
+    finally:
+        assert_unrelated(name, "the unrelated file in the cwd was touched")
+    assert_cleaned_up_as_asyncio_does("public", p)
+    report()
+
+
+def own_dir_where() -> None:
+    """Bind PATH with the configuration read from the environment
+    (``Config.from_env``) and report the route and the places D was made in
+    (``st_dev:st_ino`` of each, comma-separated)."""
+    made: list[str] = []
+    real = _route.mkdir_at
+
+    def mkdir_at(base_fd: int, name: bytes) -> None:
+        real(base_fd, name)
+        st = os.fstat(base_fd)
+        made.append(f"{st.st_dev}:{st.st_ino}")
+
+    _route.mkdir_at = mkdir_at
+    listener, route = _route.run_long(BIND, arg("PATH"), Config.from_env())
+    listener.close()
+    report(route=route.value, places=",".join(made))
+
+
+def bind_with_umask() -> None:
+    """With the umask UMASK (octal), bind PATH through the means MEANS with
+    PLACE as the only place for D, and report the route, or the errno it
+    fails with. (A connect is not
+    made: a umask without the owner's write bit makes the socket file itself
+    one nobody may connect to, as with the standard.)"""
+    os.umask(int(arg("UMASK"), 8))
+    cfg, want = means_cfg(os.fsdecode(arg("MEANS")), (arg("PLACE"),))
+    try:
+        listener, route = _route.run_long(BIND, arg("PATH"), cfg)
+    except OSError as e:
+        report(errno=str(e.errno))
+        return
+    listener.close()
+    assert route is want, route
+    assert is_socket(arg("PATH"))
+    report(route=route.value)
 
 
 def cwd_changed() -> None:
     """The relative spelling is resolved against the cwd at the moment of the
-    bind / connect, and the cwd is shared by every thread, so another thread
-    that changes it in between sends the call to another directory. When the
-    cwd is still changed afterwards, ``Relative.run`` must notice and turn
-    the result into an error even though the call itself succeeded.
+    connect, and the cwd is shared by every thread, so another thread that
+    changes it in between sends the call to another directory. When the cwd
+    is still changed afterwards, ``Relative.run`` must notice and turn the
+    result into an error even though the call itself succeeded.
 
     The change is made from inside the call (the function chdirs before it
-    binds / connects), standing in for another thread. PATH is below the cwd
-    (ONE); OTHER has the same subtree, so the call succeeds there."""
+    connects), standing in for another thread. PATH is below the cwd (ONE);
+    OTHER has a listener at the same relative spelling, so the connect
+    succeeds there."""
     p = arg("PATH")
-    one = os.getcwdb()
     two = arg("OTHER")
     directory, _ = os.path.split(p)
     rel = _route.Relative.new(p, directory)
     assert rel is not None
     assert b".." not in rel.path.split(b"/"), rel.path
-
-    def chdir_then(f: Callable[[bytes], socket.socket]) -> Callable[[bytes], socket.socket]:
-        def call(q: bytes) -> socket.socket:
-            os.chdir(two)
-            return f(q)
-
-        return call
-
-    try:
-        rel.run(chdir_then(lambda q: _route.plain_op(BIND, q)))
-    except OSError as e:
-        bind_error = e
-    else:
-        raise AssertionError("a bind into another directory was returned")
-    assert type(bind_error) is _route.CwdChanged, repr(bind_error)
-    assert bind_error.errno is None, repr(bind_error)
-    # The bind went to the other directory and that socket file is left there
-    # (where it went is not known to Relative.run, so it must not remove
-    # anything); nothing is at the given path.
-    assert is_socket(os.path.join(two, rel.path))
-    assert not is_socket(p)
-
-    # A listener in the other directory, at the same relative spelling.
-    c = with_name(p, b"c.sock")
-    c_rel = with_name(rel.path, b"c.sock")
+    # A listener in the other directory, at the same relative spelling (bound
+    # from there: the spelling is short, the absolute path is not).
+    one = os.getcwdb()
     listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    listener.bind(c_rel)
+    os.chdir(two)
+    listener.bind(rel.path)
     listener.listen()
     os.chdir(one)
-    rel = _route.Relative.new(c, directory)
-    assert rel is not None
-    assert rel.path == c_rel
+
+    def chdir_then(q: bytes) -> socket.socket:
+        os.chdir(two)
+        return _route.plain_op(CONNECT, q)
+
     try:
-        rel.run(chdir_then(lambda q: _route.plain_op(CONNECT, q)))
+        rel.run(chdir_then)
     except OSError as e:
         connect_error = e
     else:
@@ -337,7 +350,7 @@ def cwd_changed() -> None:
     server, _ = listener.accept()
     with server, listener:
         assert server.recv(1) == b"", "the discarded client is closed"
-    report(bind=repr(bind_error), connect=repr(connect_error))
+    report(connect=repr(connect_error))
 
 
 def default_backlog() -> None:
@@ -385,13 +398,16 @@ SCENARIOS: dict[str, Callable[[], None]] = {
     f.__name__: f
     for f in (
         make_stale_socket,
-        bind_report,
-        bind_from_env,
         connect_report,
+        relative_spelling,
+        bind_without_own_dir,
         relative_routes,
         relative_failures,
         relative_input,
+        spelling_namesakes,
         asyncio_namesakes,
+        own_dir_where,
+        bind_with_umask,
         cwd_changed,
         default_backlog,
     )

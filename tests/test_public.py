@@ -18,13 +18,17 @@ from pathlib import Path
 
 import pytest
 from _support import (
+    NAME_MAX_CENTRAL,
     SO_NOSIGPIPE,
     TmpDirs,
     accept_ping,
+    central_route_here,
     dir_id,
     is_cloexec,
     is_socket,
+    listener_at,
     listing,
+    needs_long_bind,
     nest,
     parent,
     ping,
@@ -94,7 +98,10 @@ def test_a_path_the_standard_takes_goes_to_it_and_one_byte_more_takes_a_route(tm
             assert client.getpeername() == p
             accept_ping(listener, client)
 
-    # One byte more takes a route and still ends up at the given path.
+    # One byte more takes a route and still ends up at the given path (where
+    # the central route has a means; elsewhere no long path can be bound).
+    if central_route_here() is None:
+        return
     q = nest(t, DIRECT_MAX + 1, b"s.sock")
     listener, r = _route.run(BIND, q)
     with listener:
@@ -130,6 +137,7 @@ def test_a_short_path_reads_nothing_from_the_environment(tmp: TmpDirs, monkeypat
 # sides of the standard's length are included, and two bases: TMPDIR as the
 # test runs with it (on macOS a long per-session directory) and /tmp.
 @pytest.mark.parametrize("total", [100, DIRECT_MAX, DIRECT_MAX + 1, 108, 200, 253, 254, 400, 1000])
+@needs_long_bind
 def test_bind_and_connect_work_at_any_length(tmp: TmpDirs, total: int) -> None:
     bases = [tmp.new(), tmp.new(under=tempfile.gettempdir())]
     for base in bases:
@@ -152,6 +160,7 @@ def test_bind_and_connect_work_at_any_length(tmp: TmpDirs, total: int) -> None:
 # standard's socket module itself does not take os.PathLike, sockat does, by
 # os.fspath) and a long one.
 @pytest.mark.parametrize("total", [60, 300])
+@needs_long_bind
 def test_paths_are_str_bytes_or_path_like(tmp: TmpDirs, total: int) -> None:
     t = tmp.new()
     makers: list[Callable[[bytes], str | bytes | os.PathLike[str] | os.PathLike[bytes]]] = [
@@ -171,26 +180,24 @@ def test_paths_are_str_bytes_or_path_like(tmp: TmpDirs, total: int) -> None:
                 accept_ping(listener, client)
 
 
-# A file name longer than the plain sockaddr carries (DIRECT_MAX + 1 bytes)
-# and one of 254 bytes (NAME_MAX is 255), directly under a short directory.
+# A file name longer than the central route's `R/<name>` carries
+# (NAME_MAX_CENTRAL + 1 bytes), one longer than the plain sockaddr carries
+# (DIRECT_MAX + 1) and one of 254 bytes (NAME_MAX is 255), directly under a
+# short directory.
 #
-# * bind: every route that does not hand the whole path to the kernel ends with
-#   the file name in a sockaddr (Linux: behind "/proc/self/fd/N/", through the
-#   link to the directory, or as is from the thread-cwd route; FreeBSD:
-#   bindat), and the bind never takes the widened sockaddr (macOS included:
-#   the address it would leave on the listener does not fit sun_path, and the
-#   socket module reads such an address past its end), so no bind route
-#   reaches a file name over DIRECT_MAX bytes: ENAMETOOLONG, and nothing is
-#   created. On macOS this is where the bind stops (a file name of 104
-#   bytes), well before the 253 bytes a connect reaches.
-# * connect: the link to the socket file is spelled without the file name, so
-#   the name's length does not matter (on macOS the widened sockaddr carries
-#   the whole path too). A socket bound under a short name and renamed to the
+# * bind: the central route carries the file name in a sockaddr behind `R/`
+#   (or behind /proc/self/fd/<n>/R/, shorter still), and no other bind route
+#   is left (no fork route in Python; the bind never takes the widened
+#   sockaddr, macOS included), so ENAMETOOLONG, and nothing is created.
+# * connect: the fallbacks reach it: the link to the socket file is spelled
+#   without the file name, /proc and the fd-held form on Linux, the widened
+#   sockaddr on macOS. A socket bound under a short name and renamed to the
 #   long one is reached and talks; with nothing there the error is the
-#   kernel's ENOENT, not ENAMETOOLONG. FreeBSD takes bindat / connectat only,
-#   which carry the file name in a sockaddr: ENAMETOOLONG for the connect too.
-@pytest.mark.parametrize("n", [DIRECT_MAX + 1, 254])
-def test_a_file_name_longer_than_a_sockaddr_carries_cannot_be_bound_but_can_be_connected_to(
+#   kernel's ENOENT, not ENAMETOOLONG. FreeBSD falls back to connectat of the
+#   file name, which a sockaddr carries up to DIRECT_MAX bytes: past that,
+#   ENAMETOOLONG for the connect too.
+@pytest.mark.parametrize("n", [NAME_MAX_CENTRAL + 1, DIRECT_MAX + 1, 254])
+def test_a_file_name_longer_than_the_central_route_carries_cannot_be_bound_but_can_be_connected_to(
     tmp: TmpDirs, n: int
 ) -> None:
     t = tmp.new()
@@ -198,18 +205,32 @@ def test_a_file_name_longer_than_a_sockaddr_carries_cannot_be_bound_but_can_be_c
     with raises_errno(errno.ENAMETOOLONG):
         sockat.bind(p)
     assert listing(t) == []
-    if sys.platform.startswith("freebsd"):
+    if sys.platform.startswith("freebsd") and n > DIRECT_MAX:
         with raises_errno(errno.ENAMETOOLONG):
             sockat.connect(p)
         return
     with pytest.raises(FileNotFoundError):
         sockat.connect(p)
-    with sockat.bind(t + b"/s.sock") as listener:
-        os.rename(t + b"/s.sock", p)
+    with listener_at(p) as listener:
         with sockat.connect(p) as client:
             accept_ping(listener, client)
         with sockat.connect_nonblocking(p) as client:
             accept_ping(listener, client)
+
+
+# Where the central route has no means (NetBSD, OpenBSD, illumos: no thread
+# cwd, no bindat, no /proc), no long path can be bound (the SPEC's next step
+# is the fork route, which Python does not have): ENAMETOOLONG with nothing
+# created. A connect to a listener at such a path still gets through its
+# fallbacks.
+@pytest.mark.skipif(central_route_here() is not None, reason="the central route has a means here")
+def test_without_the_central_route_a_long_bind_is_enametoolong(tmp: TmpDirs) -> None:
+    p = nest(tmp.new(), 300)
+    with raises_errno(errno.ENAMETOOLONG):
+        sockat.bind(p)
+    assert listing(parent(p)) == []
+    with listener_at(p) as listener, sockat.connect(p) as client:
+        accept_ping(listener, client)
 
 
 # ----- errors -----
@@ -223,6 +244,7 @@ def test_a_file_name_longer_than_a_sockaddr_carries_cannot_be_bound_but_can_be_c
 # route" and end up reporting something else (or creating the socket
 # elsewhere).
 @pytest.mark.parametrize("total", [150, 300, 600])
+@needs_long_bind
 def test_long_path_errors_are_the_kernels(tmp: TmpDirs, total: int) -> None:
     t = tmp.new()
     p = nest(t, total)
@@ -340,6 +362,7 @@ def test_a_leading_nul_on_linux_is_an_abstract_address_for_the_standard() -> Non
 #   promise is "the same as the standard", checked against the standard's
 #   own socket rather than a fixed answer).
 @pytest.mark.parametrize("total", [60, 300])
+@needs_long_bind
 def test_the_sockets_are_set_up_as_the_standard_sets_them_up(tmp: TmpDirs, total: int) -> None:
     std = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     p = nest(tmp.new(), total)
@@ -367,6 +390,7 @@ def test_the_sockets_are_set_up_as_the_standard_sets_them_up(tmp: TmpDirs, total
 # than a number, since the default and how the kernel rounds it differ by
 # system. Each queued connect holds an fd, so the count runs in a child
 # process that raises its own limit of open files (_children.default_backlog).
+@needs_long_bind
 def test_the_listener_has_the_standards_default_backlog(tmp: TmpDirs) -> None:
     t = tmp.new()
     got = run_child("default_backlog", t, args={"DIR": t})
@@ -417,8 +441,9 @@ def test_a_short_path_behaves_exactly_like_the_standard(tmp: TmpDirs) -> None:
 # A long path is reported the way the standard reports a short one, so code
 # that reads the address back (asyncio's server cleanup, logging, repr) sees
 # the path the caller gave and not the spelling a route handed to the kernel
-# (/proc/self/fd/<n>/<name>, a relative path, a temporary symlink gone by
-# then, the file name alone): the path, as a str decoded by os.fsdecode as the
+# (`R/<name>` or /proc/self/fd/<n>/R/<name> for a bind, through a symlink R
+# gone by then; /proc/self/fd/<n>/<name>, a relative path, a temporary
+# symlink for a connect): the path, as a str decoded by os.fsdecode as the
 # socket module decodes a pathname address (a bytes or os.PathLike path
 # included), as the listener's and the accepted stream's own address
 # (getsockname) and as a client's peer (getpeername), for both connects. What
@@ -428,6 +453,7 @@ def test_a_short_path_behaves_exactly_like_the_standard(tmp: TmpDirs) -> None:
 # carries (DIRECT_MAX + 1; 253 / 254 around the widened form of macOS) and far
 # past it.
 @pytest.mark.parametrize("total", [DIRECT_MAX + 1, 253, 254, 400, 1000])
+@needs_long_bind
 def test_a_long_path_reports_the_path_given_as_the_standard_reports_a_short_one(tmp: TmpDirs, total: int) -> None:
     t = tmp.new()
     short = os.fsdecode(t + b"/std.sock")
@@ -463,6 +489,7 @@ def test_a_long_path_reports_the_path_given_as_the_standard_reports_a_short_one(
 # is reported the same way, round-tripping to the path given. macOS file
 # systems refuse names that are not UTF-8, so this is Linux's.
 @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="macOS file systems take UTF-8 names only")
+@needs_long_bind
 def test_a_path_that_is_not_utf8_is_reported_as_the_socket_module_decodes_it(tmp: TmpDirs) -> None:
     t = tmp.new()
     for total in (60, 300):
@@ -480,6 +507,7 @@ def test_a_path_that_is_not_utf8_is_reported_as_the_socket_module_decodes_it(tmp
 # be wrapped in files, half-closed and duplicated as usual. A dup is the same
 # kind of socket and reports the same path. Nothing about the route leaks into
 # the objects.
+@needs_long_bind
 def test_the_results_are_ordinary_sockets(tmp: TmpDirs) -> None:
     p = nest(tmp.new(), 500)
     listener = sockat.bind(p)
@@ -516,6 +544,7 @@ def test_the_results_are_ordinary_sockets(tmp: TmpDirs) -> None:
 # SPEC's way there), which needs read permission, so it is not promised there.
 @pytest.mark.skipif(os.geteuid() == 0, reason="root bypasses the permission under test")
 @pytest.mark.skipif(sys.platform.startswith("freebsd"), reason="bindat opens the directory O_RDONLY")
+@needs_long_bind
 def test_a_directory_without_read_permission_is_enough(tmp: TmpDirs) -> None:
     p = nest(tmp.new(), 400)
     directory = parent(p)
@@ -532,6 +561,7 @@ def test_a_directory_without_read_permission_is_enough(tmp: TmpDirs) -> None:
 # keep checking the cwd: no call may change the cwd of the process (other
 # threads' relative lookups would break), and every socket lands at its own
 # path. The lengths mix the routes the system picks.
+@needs_long_bind
 def test_concurrent_calls_leave_the_cwd_alone(tmp: TmpDirs) -> None:
     cwd, cwd_id = os.getcwd(), dir_id(".")
     stop = threading.Event()

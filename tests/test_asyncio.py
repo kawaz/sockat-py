@@ -10,18 +10,16 @@ from __future__ import annotations
 import asyncio
 import os
 import socket
-import sys
 from collections.abc import Callable
 
 import pytest
 from _support import (
     TmpDirs,
     assert_cleaned_up_as_asyncio_does,
+    needs_long_bind,
     nest,
-    nest_tail,
     run_child,
     serve_asyncio,
-    thread_cwd_usable,
 )
 
 import sockat
@@ -60,14 +58,15 @@ def public_connect(path: bytes) -> Callable[[Request], socket.socket]:
 # The listener is bound before the event loop exists (asyncio.run after the
 # bind: the usual way of making a server's socket) and, separately, on the
 # loop's thread with the loop running. The first is the one that failed on
-# Linux when the kernel's spelling was handed to asyncio: the /proc route
-# binds /proc/self/fd/<n>/<name> with a directory fd it closes again, the loop
-# made afterwards takes the number <n> for its own fds, and the stat at the
-# start of the server failed with NotADirectoryError. Bound in the loop, the
-# number stays free and the same stat only finds nothing, which asyncio
+# Linux when the kernel's spelling was handed to asyncio: a bind through
+# /proc leaves /proc/self/fd/<n>/... with a directory fd it closes again, the
+# loop made afterwards takes the number <n> for its own fds, and the stat at
+# the start of the server failed with NotADirectoryError. Bound in the loop,
+# the number stays free and the same stat only finds nothing, which asyncio
 # ignores, so that alone did not show it.
 @pytest.mark.parametrize("bound", ["before the loop", "in the loop"])
 @pytest.mark.parametrize("total", [60, DIRECT_MAX + 1, 400])
+@needs_long_bind
 def test_sockets_from_sockat_are_used_by_asyncio_as_the_standards_are(tmp: TmpDirs, total: int, bound: str) -> None:
     path = nest(tmp.new(), total)
     what = f"{total} bytes, bound {bound}"
@@ -84,21 +83,16 @@ def test_sockets_from_sockat_are_used_by_asyncio_as_the_standards_are(tmp: TmpDi
 
 
 # The close of a server must remove the socket file at the path and nothing
-# else, even where the kernel's spelling of the listener's address names
-# another file from the process cwd: the thread-cwd route's spelling is the
-# file name alone (with a file of that name in the cwd), and the relative
-# route's is relative to the cwd at the bind (with the cwd then changed to a
-# directory holding a file at the same relative spelling). Had asyncio been
-# handed the spelling, it would have recorded the unrelated file's inode at
-# the start and removed that file at the close. The cwd is changed, so this
-# runs in a child process (_children.asyncio_namesakes); the thread-cwd part
-# runs where the system gives a thread a cwd of its own. FreeBSD has neither
-# spelling: a thread has no cwd of its own there, and a long path is bound
-# with bindat before the relative route is reached.
-@pytest.mark.skipif(sys.platform.startswith("freebsd"), reason="FreeBSD binds a long path with bindat")
+# else, even where the kernel's spelling of the listener's address would name
+# another file if resolved against the process cwd: the central route's
+# spelling is `R/<name>` (or behind /proc/self/fd/<n>/), and a file of the
+# socket's name sits in the cwd. Had asyncio been handed the spelling, a
+# spelling without R (the file name alone) would have named that file, whose
+# inode asyncio would record at the start and remove at the close. The cwd is
+# set for the test, so this runs in a child process
+# (_children.asyncio_namesakes).
+@needs_long_bind
 def test_asyncio_removes_the_socket_file_not_a_namesake_from_the_cwd(tmp: TmpDirs) -> None:
     t = tmp.new()
-    thread = nest(tmp.new(), 600, b"s.sock")
-    rel = nest_tail(t + b"/one", 90, b"r.sock")
-    out = run_child("asyncio_namesakes", t, {"THREAD": thread, "REL": rel, "OTHER": t + b"/other"})
-    assert out == {"checked": "thread-cwd,relative" if thread_cwd_usable() else "relative"}
+    p = nest(tmp.new(), 600, b"s.sock")
+    assert run_child("asyncio_namesakes", t, {"PATH": p}) == {}

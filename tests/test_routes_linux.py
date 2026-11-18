@@ -1,6 +1,8 @@
-"""The Linux routes: ``/proc/self/fd/<dirfd>/<name>`` where /proc can be
-used, the POSIX order where it cannot (no /proc, or a file name too long to
-fit behind ``/proc/self/fd/<n>/``), and every route forced and checked.
+"""The Linux routes: the central route's means (thread cwd, /proc) for the
+binds and connects, and a connect's fallbacks where /proc can be used
+(``/proc/self/fd/<dirfd>/<name>``, the fd-held form, the symlink) and where it
+cannot (the relative spelling, the symlink). The fd-held form is in
+``test_fd_held.py``, the central route in general in ``test_central.py``.
 
 "No /proc" is stood in for by pointing ``Config.proc_self_fd`` at a path
 that does not exist, or at an empty directory (a /proc mount point with
@@ -10,48 +12,51 @@ from __future__ import annotations
 
 import errno
 import os
-import re
+import socket
 import sys
 
 import pytest
 from _support import (
     NO_PROC,
+    PROC,
     TmpDirs,
     accept_ping,
     assert_far_from_cwd,
     assert_untouched,
+    central_cfg,
     check_full_backlog,
     check_route,
     check_unreachable,
+    fallback_cfg,
     forced,
     is_socket,
-    kernel_sockname,
     listener_at,
+    listing,
     mark_untouched,
     nest,
     nest_tail,
-    posix_cfg,
+    parent,
     raises_errno,
+    routes,
     run_child,
     stale_socket,
-    symlink_route,
     thread_cwd_usable,
     with_name,
 )
 
 from sockat import _route
-from sockat._route import BIND, CONNECT, CONNECT_NONBLOCKING, Config, Route
+from sockat._route import BIND, CONNECT, CONNECT_NONBLOCKING, SOCKET_DIR, Config, Route
 from sockat._sys import DIRECT_MAX
 
-pytestmark = pytest.mark.skipif(not sys.platform.startswith("linux"), reason="the /proc route is Linux's")
-
-PROC = b"/proc/self/fd"
+pytestmark = pytest.mark.skipif(not sys.platform.startswith("linux"), reason="the /proc routes are Linux's")
 
 
-def proc_cfg(bases: list[bytes] | None = None, *, thread_cwd: bool = False) -> Config:
-    """The real /proc, ``bases`` as the places for the symlink, the
-    thread-cwd route off unless asked for."""
-    return Config(tmp_bases=tuple(bases or ()), proc_self_fd=PROC, thread_cwd=thread_cwd)
+def proc_fallback_cfg(links: list[bytes] | None = None, *, own: tuple[bytes, ...] = ()) -> Config:
+    """The real /proc, no means of the central route but /proc (the thread's
+    own cwd off), ``own`` as the places for D (none: the central route and
+    the fd-held form cannot be used), ``links`` as the places for the
+    symlink."""
+    return Config(own_dir_places=own, link_places=tuple(links or ()), proc_self_fd=PROC, thread_cwd=False)
 
 
 def no_proc(t: bytes, empty: bool) -> bytes:
@@ -64,20 +69,50 @@ def no_proc(t: bytes, empty: bool) -> bytes:
     return p
 
 
-# Every path over DIRECT_MAX bytes takes /proc/self/fd/<dirfd>/<name> on
-# Linux, however long the directory part is (the directory never goes into the
-# sockaddr, only the fd number and the file name). With /proc there, nothing
-# else is tried: the place for the symlink given here stays untouched.
+# Every path over DIRECT_MAX bytes, however long its directory part, is bound
+# and connected to by the central route through /proc where the thread's own
+# cwd is off (the directory never goes into the sockaddr, only the fd number,
+# R and the file name), and by the thread's own cwd where it is on and can be
+# used. Nothing else is tried: the place for the symlink stays untouched.
 @pytest.mark.parametrize("total", [DIRECT_MAX + 1, 300, 1000])
-def test_long_paths_take_the_proc_route(tmp: TmpDirs, total: int) -> None:
+@pytest.mark.parametrize("thread", [False, True])
+def test_long_paths_take_the_central_route(tmp: TmpDirs, total: int, thread: bool) -> None:
+    if thread and not thread_cwd_usable():
+        pytest.skip("the system does not give a thread a cwd of its own here")
     p = nest(tmp.new(), total)
     place = tmp.new()
     mark_untouched(place)
-    c = proc_cfg([place], thread_cwd=True)
+    c = central_cfg(links=[place], thread_cwd=thread)
+    want = Route.THREAD_CWD if thread else Route.PROC_OWN_DIR
     listener, r = _route.run_long(BIND, p, c)
     with listener:
-        assert r is Route.PROC_FD
+        assert r is want
         assert is_socket(p)
+        for req in (CONNECT, CONNECT_NONBLOCKING):
+            client, r = _route.run_long(req, p, c)
+            with client:
+                assert r is want
+                accept_ping(listener, client)
+    assert_untouched(place)
+
+
+# Where the central route is not used (no place for D), a connect takes
+# /proc/self/fd/<dirfd>/<name> with the socket's directory opened O_PATH, for
+# any length of the directory part; nothing after it is tried (the place for
+# the symlink stays untouched). No bind takes it: the bind of the same path
+# is ENAMETOOLONG with nothing created (its spelling would name whatever
+# reuses the fd number afterwards).
+@pytest.mark.parametrize("total", [DIRECT_MAX + 1, 300, 1000])
+def test_a_connect_falls_back_to_proc(tmp: TmpDirs, total: int) -> None:
+    p = nest(tmp.new(), total)
+    place = tmp.new()
+    mark_untouched(place)
+    c = proc_fallback_cfg([place])
+    before = listing(parent(p))
+    with raises_errno(errno.ENAMETOOLONG):
+        _route.run_long(BIND, p, c)
+    assert listing(parent(p)) == before
+    with listener_at(p) as listener:
         for req in (CONNECT, CONNECT_NONBLOCKING):
             client, r = _route.run_long(req, p, c)
             with client:
@@ -86,143 +121,60 @@ def test_long_paths_take_the_proc_route(tmp: TmpDirs, total: int) -> None:
     assert_untouched(place)
 
 
-# Why the listener reports the path rather than the kernel's address: the
-# kernel records the spelling that was bound, /proc/self/fd/<n>/<name>, and the
-# directory fd <n> is closed as soon as the bind returns. The number is then
-# free, and an fd the process opens later takes it (POSIX: open takes the
-# lowest free number; files are opened here until one gets it, in case a lower
-# number was freed meanwhile), so the spelling names whatever that is: here a
-# regular file, which makes os.stat of the spelling NotADirectoryError. That is what asyncio's
-# start_unix_server(sock=) did with a listener bound before the event loop
-# was made (the loop's own fds took the number; Python 3.13 and later stat
-# the listener's address at the start). So getsockname reports the path,
-# while the kernel's spelling stays readable through the standard method
-# (socket.socket.getsockname), within sun_path.
-def test_the_kernel_holds_the_proc_spelling_whose_fd_is_reused_so_the_path_is_reported(tmp: TmpDirs) -> None:
-    p = nest(tmp.new(), 200)
-    listener, r = _route.run_long(BIND, p, proc_cfg())
-    with listener:
-        assert r is Route.PROC_FD
-        assert listener.getsockname() == os.fsdecode(p)
-        kernel = os.fsencode(kernel_sockname(listener))
-        m = re.fullmatch(rb"/proc/self/fd/(\d+)/s\.sock", kernel)
-        assert m is not None, kernel
-        n = int(m.group(1))
-        opened: list[int] = []
-        try:
-            while not opened or opened[-1] != n:
-                opened.append(os.open(with_name(p, b"plain-file"), os.O_RDONLY | os.O_CREAT, 0o600))
-                assert opened[-1] <= n, "the premise: the closed directory fd's number is free"
-            with pytest.raises(NotADirectoryError):
-                os.stat(kernel)
-        finally:
-            for fd in opened:
-                os.close(fd)
-        assert os.stat(listener.getsockname()).st_ino == os.lstat(p).st_ino
-
-
-# A failure on the /proc route is the kernel's error for the path (ENOENT for
-# a missing directory, from opening it, and for a missing socket; EADDRINUSE
-# for an existing one; ECONNREFUSED for a socket nobody listens on), and
-# nothing else is tried: the place for the symlink stays untouched (the
-# thread-cwd route is on too).
-def test_a_failure_on_the_proc_route_is_not_retried(tmp: TmpDirs) -> None:
+# A failure on the /proc fallback is the kernel's error for the path (ENOENT
+# for a missing directory, from opening it, and for a missing socket;
+# ECONNREFUSED for a socket nobody listens on), and nothing else is tried: the
+# place for the symlink stays untouched.
+def test_a_failure_on_the_proc_fallback_is_not_retried(tmp: TmpDirs) -> None:
     p = nest(tmp.new(), 300)
     place = tmp.new()
-    c = proc_cfg([place], thread_cwd=True)
+    c = proc_fallback_cfg([place])
     stale = with_name(p, b"stale.sock")
     stale_socket(stale)
     mark_untouched(place)
-    for req in (BIND, CONNECT, CONNECT_NONBLOCKING):
+    for req in (CONNECT, CONNECT_NONBLOCKING):
         with pytest.raises(FileNotFoundError):
             _route.run_long(req, with_name(p, b"nope/s.sock"), c)
-    with pytest.raises(FileNotFoundError):
-        _route.run_long(CONNECT, p, c)
-    listener, r = _route.run_long(BIND, p, c)
-    with listener:
-        assert r is Route.PROC_FD
-        with raises_errno(errno.EADDRINUSE):
-            _route.run_long(BIND, p, c)
-    for req in (CONNECT, CONNECT_NONBLOCKING):
+        with pytest.raises(FileNotFoundError):
+            _route.run_long(req, p, c)
         with pytest.raises(ConnectionRefusedError):
             _route.run_long(req, stale, c)
     assert_untouched(place)
 
 
 # "/proc/self/fd/<n>/" takes about 17 bytes of the 107 that sun_path holds, so
-# a file name of 95 bytes does not fit behind it. That makes the /proc route
-# unusable, as no /proc does, and the POSIX order runs with the real /proc in
-# place (the path is far from the cwd, so not relative):
-#
-# * bind: the link to the directory does not fit either (/tmp/sockat.X/ is 23
-#   bytes, + 95 > DIRECT_MAX), so the thread-cwd route binds it where it can
-#   be used (the name fits its sockaddr); where not, ENAMETOOLONG. A name of
-#   108 bytes fits no sockaddr at all: ENAMETOOLONG either way, nothing made;
-# * connect: the link to the socket file takes it without either;
-#   with no place for the link, the thread-cwd route where it can be used,
-#   ENAMETOOLONG where not.
-#
-# A name of 80 bytes still fits behind /proc and takes that route.
-def test_a_file_name_that_does_not_fit_behind_proc_takes_the_posix_order(tmp: TmpDirs) -> None:
+# a file name of 95 bytes does not fit behind it, and a connect goes on to the
+# fd-held form (a place for D given) or, with no place for D, the symlink
+# (here under /tmp). A name of 80 bytes still fits behind /proc and takes that
+# fallback.
+def test_a_file_name_that_does_not_fit_behind_proc_goes_on_to_the_next_fallback(tmp: TmpDirs) -> None:
     t = tmp.new()
-    tmp_place = proc_cfg([b"/tmp"], thread_cwd=True)
-    no_place = proc_cfg(thread_cwd=True)
-    usable = thread_cwd_usable()
-
     p = t + b"/" + b"n" * 95
     assert_far_from_cwd(p)
-    if usable:
-        listener, r = _route.run_long(BIND, p, tmp_place)
-        assert r is Route.THREAD_CWD
-    else:
-        with raises_errno(errno.ENAMETOOLONG):
-            _route.run_long(BIND, p, tmp_place)
-        assert os.listdir(t) == []
-        listener = listener_at(p)
-    with listener:
-        assert is_socket(p)
-        for req in (CONNECT, CONNECT_NONBLOCKING):
-            client, r = _route.run_long(req, p, tmp_place)
-            with client:
-                assert r is Route.SYMLINK_TO_FILE, req
-                accept_ping(listener, client)
-        if usable:
-            client, r = _route.run_long(CONNECT, p, no_place)
-            with client:
-                assert r is Route.THREAD_CWD
-                accept_ping(listener, client)
-    if not usable:
-        os.unlink(p)
-        check_unreachable(p, no_place)
-
-    longest = t + b"/" + b"m" * DIRECT_MAX
-    if usable:
-        listener, r = _route.run_long(BIND, longest, tmp_place)
-        listener.close()
-        assert r is Route.THREAD_CWD
-        assert is_socket(longest)
-    with raises_errno(errno.ENAMETOOLONG):
-        _route.run_long(BIND, t + b"/" + b"o" * (DIRECT_MAX + 1), tmp_place)
-    assert not os.path.lexists(t + b"/" + b"o" * (DIRECT_MAX + 1))
-
+    with listener_at(p) as listener:
+        for c, want in (
+            (proc_fallback_cfg(own=(tmp.new(),)), Route.FD_HELD),
+            (proc_fallback_cfg([b"/tmp"]), Route.SYMLINK_TO_FILE),
+        ):
+            for req in (CONNECT, CONNECT_NONBLOCKING):
+                client, r = _route.run_long(req, p, c)
+                with client:
+                    assert r is want, req
+                    accept_ping(listener, client)
     fits = t + b"/" + b"f" * 80
-    listener, r = _route.run_long(BIND, fits, tmp_place)
-    with listener:
-        assert r is Route.PROC_FD
-        client, r = _route.run_long(CONNECT, fits, tmp_place)
+    with listener_at(fits) as listener:
+        client, r = _route.run_long(CONNECT, fits, proc_fallback_cfg([b"/tmp"]))
         with client:
             assert r is Route.PROC_FD
             accept_ping(listener, client)
 
 
-# Why a bind never goes through a link to the socket file: Linux does not
-# follow a symlink in the last component of a bind, it finds the name taken
-# (EADDRINUSE), even when the link dangles. A connect follows it. Pinned (with
-# the socket module itself) so the reason for the two shapes of the symlink
-# route stays checkable.
+# Why a connect's symlink goes to the socket file and no bind goes through
+# one: Linux does not follow a symlink in the last component of a bind, it
+# finds the name taken (EADDRINUSE), even when the link dangles. A connect
+# follows it. Pinned (with the socket module itself) so the reason stays
+# checkable.
 def test_linux_binds_not_through_a_link_to_the_file_but_connects_through_it(tmp: TmpDirs) -> None:
-    import socket
-
     t = tmp.new()
     target = t + b"/s.sock"
     link = t + b"/link"
@@ -238,98 +190,95 @@ def test_linux_binds_not_through_a_link_to_the_file_but_connects_through_it(tmp:
             accept_ping(listener, client)
 
 
-# Without /proc the /proc route cannot be used at all, so Linux takes the POSIX
-# order (as the Unix systems without a dirfd-relative call do) instead of
-# failing, for both shapes of "no /proc" (no such directory; an empty one):
-# relative → symlink → thread cwd → the fork route's place. Each step is
-# reached by taking the earlier ones away:
+# Without /proc (no such directory; an empty one) the central route has only
+# the thread's own cwd (D opened O_RDONLY and set to 0700 by fchmod, as an
+# O_PATH fd takes no fchmod), and a connect's fallbacks are those of the
+# systems without /proc: relative, then symlink. Each step is reached by
+# taking the earlier ones away:
 #
-# * a path whose spelling relative to the cwd fits: the relative route (in a
-#   child whose cwd is near the socket);
-# * a path far from the cwd with a short place: the symlink route;
-# * no place: the thread-cwd route where the system allows it;
-# * the thread-cwd route off (or refused): ENAMETOOLONG, nothing made.
-#
-# With the real /proc, the same paths take the /proc route.
+# * the thread's own cwd, where the system allows it: binds and connects;
+# * with it off: the bind is ENAMETOOLONG with nothing made; a connect to a
+#   path whose relative spelling fits takes the relative fallback (in a child
+#   whose cwd is near the socket); one far from the cwd with a short place
+#   takes the symlink; with no place, ENAMETOOLONG.
 @pytest.mark.parametrize("empty", [False, True])
-def test_without_proc_the_posix_order_runs(tmp: TmpDirs, empty: bool) -> None:
+def test_without_proc_the_order_of_the_systems_without_it_runs(tmp: TmpDirs, empty: bool) -> None:
     t = tmp.new()
     none = no_proc(t, empty)
     place = tmp.new()
 
-    near = nest_tail(t, DIRECT_MAX, b"rel.sock")
-    out = run_child("bind_report", t, {"PATH": near, "PROC": none})
-    assert out["route"] == Route.RELATIVE.value
-    assert is_socket(near)
-
     far = nest(t, 600, b"far.sock")
     assert_far_from_cwd(far)
-    c = posix_cfg([place], proc=none)
-    listener, r = _route.run_long(BIND, far, c)
-    with listener:
-        assert r is Route.SYMLINK_TO_DIR
-        assert is_socket(far)
+    if thread_cwd_usable():
+        c = central_cfg((SOCKET_DIR,), proc=none)
+        listener, r = _route.run_long(BIND, far, c)
+        with listener:
+            assert r is Route.THREAD_CWD
+            client, r = _route.run_long(CONNECT, far, c)
+            with client:
+                assert r is Route.THREAD_CWD
+                accept_ping(listener, client)
+        os.unlink(far)
+
+    c = central_cfg((SOCKET_DIR,), [place], thread_cwd=False, proc=none)
+    before = listing(parent(far))
+    with raises_errno(errno.ENAMETOOLONG):
+        _route.run_long(BIND, far, c)
+    assert listing(parent(far)) == before
+    with listener_at(far) as listener:
         client, r = _route.run_long(CONNECT, far, c)
         with client:
             assert r is Route.SYMLINK_TO_FILE
             accept_ping(listener, client)
-        client, r = _route.run_long(CONNECT, far, proc_cfg())
-        with client:
-            assert r is Route.PROC_FD
-            accept_ping(listener, client)
+    os.unlink(far)
+    check_unreachable(far, fallback_cfg(proc=none))
 
-    thread = nest(t, 600, b"thread.sock")
-    if thread_cwd_usable():
-        listener, r = _route.run_long(BIND, thread, posix_cfg(proc=none, thread_cwd=True))
-        with listener:
-            assert r is Route.THREAD_CWD
-            assert is_socket(thread)
-        os.unlink(thread)
-    check_unreachable(thread, posix_cfg(proc=none))
+    near = nest_tail(t, DIRECT_MAX, b"rel.sock")
+    with listener_at(near) as listener:
+        out = run_child("connect_report", t, {"PATH": near})
+        assert out["route"] == Route.RELATIVE.value
+        listener.setblocking(False)
+        listener.accept()[0].close()
 
 
-# Every Linux route but the relative one (forced in a child process in
-# test_routes_posix) gets every check of a route (see check_route: the socket
-# at the path, data both ways, blocking / nonblocking connects, close-on-exec,
-# the peer is this process, the cwd unchanged, nothing left in the place, the
-# path reported as the address, asyncio serving and cleaning up as for the
-# standard's, the listener bound before the loop and in it) and the
-# nonblocking connect against a full backlog (a blocking connect would
-# wait for room on Linux; the nonblocking one must fail at once with EAGAIN on
-# every route):
+# The fallbacks of a connect on Linux get every check of a route (see
+# check_route: the socket at the path, data both ways, blocking / nonblocking
+# connects, close-on-exec, the peer is this process, the cwd unchanged,
+# nothing left in the place, the path reported as the address, asyncio
+# serving and cleaning up as for the standard's) and the nonblocking connect
+# against a full backlog (a blocking connect would wait for room on Linux;
+# the nonblocking one must fail at once with EAGAIN on every route). The
+# listener is bound by the central route:
 #
 # * the path itself (DIRECT_MAX bytes), through the socket module;
 # * /proc (300 bytes);
 # * with /proc made to look absent, the symlink under a short place (600
-#   bytes);
-# * the thread-cwd route (600 bytes, no place) where the system allows it.
-@pytest.mark.parametrize("what", ["direct", "proc", "symlink", "thread-cwd"])
-def test_every_linux_route(tmp: TmpDirs, what: str) -> None:
+#   bytes).
+@pytest.mark.parametrize("what", ["direct", "proc", "symlink"])
+def test_every_linux_fallback(tmp: TmpDirs, what: str) -> None:
     t = tmp.new()
     place = tmp.new()
+    bind = central_cfg()
+    bound = Route.THREAD_CWD if thread_cwd_usable() else Route.PROC_OWN_DIR
     if what == "direct":
         f = forced(what, nest(t, DIRECT_MAX), None, Route.DIRECT)
     elif what == "proc":
-        f = forced(what, nest(t, 300), proc_cfg(), Route.PROC_FD)
-    elif what == "symlink":
-        f = forced(what, nest(t, 600), posix_cfg([place]), symlink_route)
+        f = forced(what, nest(t, 300), proc_fallback_cfg(), routes(bound, Route.PROC_FD), bind_cfg=bind)
     else:
-        if not thread_cwd_usable():
-            pytest.skip("the system does not give a thread a cwd of its own here")
-        f = forced(what, nest(t, 600), posix_cfg(thread_cwd=True), Route.THREAD_CWD)
-    if what in ("symlink", "thread-cwd"):
+        want = routes(bound, Route.SYMLINK_TO_FILE)
+        f = forced(what, nest(t, 600), fallback_cfg([place], proc=NO_PROC), want, bind_cfg=bind)
         assert_far_from_cwd(f.path)
     check_route(f, [place])
     check_full_backlog(f)
 
 
-# With /proc absent the fork route's place is reached as on the other Unix
-# systems, and it is ENAMETOOLONG for every request with nothing made, while a
-# missing directory is still ENOENT (it is opened first). NO_PROC is the
-# stand-in used by the shared POSIX-order tests, checked here once to be one.
+# With /proc absent and no place for D or the symlink, nothing reaches a long
+# path: ENAMETOOLONG for every request with nothing made, while a missing
+# directory is still ENOENT (it is opened first). NO_PROC is the stand-in used
+# by the shared tests, checked here once to be one.
 def test_without_proc_the_end_of_the_order_is_enametoolong(tmp: TmpDirs) -> None:
     assert not os.path.exists(NO_PROC)
     p = nest(tmp.new(), 300)
-    check_unreachable(p, posix_cfg())
+    check_unreachable(p, fallback_cfg())
     with pytest.raises(FileNotFoundError):
-        _route.run_long(BIND, with_name(p, b"nope/s.sock"), posix_cfg())
+        _route.run_long(BIND, with_name(p, b"nope/s.sock"), fallback_cfg())
