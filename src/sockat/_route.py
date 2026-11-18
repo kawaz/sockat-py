@@ -746,7 +746,8 @@ def fd_held_route(
     the check, or the symlink cannot be created. The outcome of the connect
     is returned as it is. Whatever the outcome, the ``s`` it created is
     removed through the fd, and the directory only while its name still
-    refers to the fd's directory. ``make_dir`` is a parameter so the tests
+    refers to the fd's directory and it passed the check (one that failed it
+    is left alone). ``make_dir`` is a parameter so the tests
     can replace the directory between its creation and the open.
     """
     if sys.platform != "linux" and sys.platform != "android":
@@ -788,11 +789,13 @@ def fd_held_route(
     except OSError:
         # Whatever is at the name now cannot be told to be ours: left alone.
         return Skip.UNUSABLE
+    verified = False
     linked = False
     try:
         st = os.fstat(dirfd)
         if not (stat.S_ISDIR(st.st_mode) and st.st_uid == os.geteuid() and st.st_mode & 0o077 == 0):
             return Skip.UNUSABLE
+        verified = True
         fd_dir = proc_fd_dir(dirfd, proc_self_fd)
         if fd_dir is None:
             return Skip.UNUSABLE
@@ -810,11 +813,15 @@ def fd_held_route(
         if linked:
             with contextlib.suppress(OSError):
                 os.unlink(b"s", dir_fd=dirfd)
-        with contextlib.suppress(OSError):
-            here = os.lstat(held)
-            mine = os.fstat(dirfd)
-            if (here.st_dev, here.st_ino) == (mine.st_dev, mine.st_ino):
-                os.rmdir(held)
+        # Only a directory that passed the check (ours), and only while the
+        # name still refers to it. One that failed it may be someone else's,
+        # put at the name before the open: it is left alone, contents and all.
+        if verified:
+            with contextlib.suppress(OSError):
+                here = os.lstat(held)
+                mine = os.fstat(dirfd)
+                if (here.st_dev, here.st_ino) == (mine.st_dev, mine.st_ino):
+                    os.rmdir(held)
         os.close(dirfd)
 
 
@@ -823,12 +830,12 @@ def safe_base(base: bytes) -> bool:
     ``/private/tmp``), is a directory where no other user (root aside) can
     remove or rename an entry, so the symlink cannot be replaced between its
     creation and the bind / connect through it (:func:`only_we_can_replace`).
-    ``False`` when it cannot be looked up."""
+    ``False`` when it cannot be looked up or is not a directory."""
     try:
         st = os.stat(base)
     except OSError:
         return False
-    return only_we_can_replace(st.st_mode, st.st_uid, os.geteuid())
+    return stat.S_ISDIR(st.st_mode) and only_we_can_replace(st.st_mode, st.st_uid, os.geteuid())
 
 
 def only_we_can_replace(mode: int, owner: int, us: int) -> bool:

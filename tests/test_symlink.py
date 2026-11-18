@@ -227,6 +227,22 @@ def test_roots_own_place_is_safe_for_root() -> None:
     assert _route.only_we_can_replace(0o700 | stat.S_IFDIR, 0, 0)
 
 
+# A place must be a directory to be safe: a file of the user's own with a mode
+# that would make a directory safe (0644, 0700) is not one, nor is a missing
+# place. Taking a file for a safe place would send a connect on Linux past the
+# fd-held form, which uses only places that are not safe.
+def test_a_place_that_is_not_a_directory_is_not_safe(tmp: TmpDirs) -> None:
+    t = tmp.new()
+    for mode in (0o644, 0o700):
+        f = t + f"/file{mode:o}".encode()
+        with open(f, "wb"):
+            pass
+        os.chmod(f, mode)
+        assert not _route.safe_base(f), oct(mode)
+    assert not _route.safe_base(t + b"/missing")
+    assert _route.safe_base(t)
+
+
 # The same rule on real directories, through the route order. A place anyone may
 # write to and that is not sticky (0777, 0775, 0757) is passed over without
 # creating anything in it (its mtime is unchanged) and the next place is used; a

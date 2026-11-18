@@ -517,17 +517,16 @@ def skip_unless_root_for(kind: str) -> None:
 # uid, no permission for group or others) fails, or the open itself
 # (O_NOFOLLOW on a symlink), and the
 # form is unusable before any `s` is created or any connect made (a listener
-# at the path sees nothing). What is left:
+# at the path sees nothing). A directory that failed the check may be someone
+# else's, so it is left alone, contents and all (SPEC: removed only when it
+# passed the check). What is left:
 #
 # * mode (any bit for group or others: 0755, 0750, 0701), owner: the
-#   directory is the one made (the name still refers to the fd's directory)
-#   and is removed;
-# * renamed: the fd holds the replacement, which is at the name, so it is
-#   removed like the directory made (SPEC: removed when the name's
-#   (st_dev, st_ino) is the fd's); the one made is out of reach at its new
-#   name and stays there;
-# * renamed-holding-s: the same, but the replacement holds an `s` this call
-#   did not create, which is left as it is (so the replacement stays too);
+#   directory at the name, as the replacement left it;
+# * renamed: the replacement at the name, empty as it was put there; the one
+#   made is out of reach at its new name and stays there;
+# * renamed-holding-s: the same, and the `s` this call did not create is left
+#   as it is;
 # * symlink: nothing is opened, so nothing is touched: the symlink stays, and
 #   the directory it points to is not used (its mtime is unchanged).
 @pytest.mark.parametrize("kind", REPLACEMENTS)
@@ -544,7 +543,9 @@ def test_a_directory_replaced_before_it_is_opened_is_not_used(tmp: TmpDirs, kind
             listener.accept()
     left = listing(base)
     if kind.startswith("mode-") or kind in ("owner", "renamed"):
-        assert left == [], left
+        [entry] = left
+        assert stat.S_ISDIR(os.lstat(base + b"/" + entry).st_mode)
+        assert listing(base + b"/" + entry) == []
     elif kind == "renamed-holding-s":
         [entry] = left
         assert listing(base + b"/" + entry) == [b"s"]
