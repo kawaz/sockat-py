@@ -51,7 +51,7 @@ A longer path is tried on the routes below, in this order per OS, and bound / co
 | Linux / Android (`/proc` usable) | [/proc](#proc) |
 | Linux / Android (`/proc` not usable) | [relative path](#relative-path) → [symlink](#symlink) → [thread cwd](#thread-cwd) |
 | FreeBSD | [bindat](#bindat) |
-| macOS / iOS | [relative path](#relative-path) → [widened sockaddr](#widened-sockaddr) → [symlink](#symlink) → [thread cwd](#thread-cwd) |
+| macOS / iOS | [relative path](#relative-path) → [widened sockaddr](#widened-sockaddr) (connect only) → [symlink](#symlink) → [thread cwd](#thread-cwd) |
 | NetBSD / OpenBSD / illumos / other Unix | [relative path](#relative-path) → [symlink](#symlink) |
 
 The specification's last route (fork) is not built. A child forked from Python runs Python, so it cannot satisfy the specification's requirement that the child's span be async-signal-safe ([DR-0001](./decisions/DR-0001-python-port-design.md)). A path that no route in the order reaches gets `ENAMETOOLONG`.
@@ -78,7 +78,9 @@ When the path spelled relative to the cwd is a length the standard library accep
 
 #### widened sockaddr
 
-macOS / iOS. XNU takes an address whose `sun_path` runs past 104 bytes, as long as the path is at most 253 bytes. A hand-built sockaddr is passed to libc's `bind(2)` / `connect(2)` through ctypes. The original path is passed when it is at most 253 bytes, failing that the relative path.
+macOS / iOS. XNU takes an address whose `sun_path` runs past 104 bytes, as long as the path is at most 253 bytes. A hand-built sockaddr is passed to libc's `connect(2)` through ctypes. The original path is passed when it is at most 253 bytes, failing that the relative path.
+
+- Only connects use it. On a bind it would leave an address over 104 bytes on the listener, which the standard library's `getsockname` reads past (unrelated bytes follow), and the cleanup of asyncio's `start_unix_server(sock=)` fails on it. So a bind does not use widened spellings on the symlink and thread cwd routes either
 
 #### symlink
 
@@ -86,7 +88,7 @@ A symlink `sockat.XXXXXXXXXX` (10 random characters) is created in a temporary d
 
 | | the symlink points to | spelling passed | reached through `/tmp` |
 |---|---|---|---|
-| bind | the socket's directory | `<place>/sockat.XXXXXXXXXX/<file name>` | a file name of up to 84 bytes (80 where `sun_path` is 104, 230 on macOS) |
+| bind | the socket's directory | `<place>/sockat.XXXXXXXXXX/<file name>` | a file name of up to 84 bytes (80 where `sun_path` is 104) |
 | connect | the socket file | `<place>/sockat.XXXXXXXXXX` | whatever the directory depth and the file name length |
 
 - The places tried are `TMPDIR` (when it is a non-empty absolute path), then `/tmp`. The first one where the spelling fits, that is safe, and where the symlink can be created is used
@@ -106,7 +108,7 @@ Linux / Android and macOS / iOS. Only the cwd of a throwaway `threading.Thread` 
 | macOS / iOS | ctypes `pthread_fchdir_np` (a private libSystem API) | the function is missing or fails |
 
 - Neither the process's cwd nor any other thread's cwd changes. The peer pid seen by the party connected to is still the caller's
-- The file name must fit a sockaddr (107 on Linux, 253 bytes on macOS with the widened sockaddr)
+- The file name must fit a sockaddr (107 on Linux, 103 bytes on macOS; 253 for a connect on macOS, with the widened sockaddr)
 - How the directory is opened: `O_PATH` on Linux, `O_SEARCH` on macOS (search permission is enough for both)
 
 ### How a failing route is treated
@@ -122,11 +124,12 @@ When a path longer than the standard library accepts is `ENAMETOOLONG` (bytes).
 | Linux (thread cwd usable) | file name > 107 | file name > 107, and the symlink route cannot be used |
 | Linux (thread cwd not usable) | the file name does not fit the `/proc` spelling, relative path > 107, and either file name > 84 or the symlink route cannot be used | the file name does not fit the `/proc` spelling, relative path > 107, and the symlink route cannot be used |
 | FreeBSD | file name > 103 | file name > 103 |
-| macOS (thread cwd usable) | file name > 253 | file name > 253, and the symlink route cannot be used |
+| macOS (thread cwd usable) | file name > 103 | file name > 253, and the symlink route cannot be used |
 | NetBSD / OpenBSD | relative path > 103, and either file name > 80 or the symlink route cannot be used | relative path > 103, and the symlink route cannot be used |
 | illumos | relative path > 107, and either file name > 84 or the symlink route cannot be used | relative path > 107, and the symlink route cannot be used |
 
 - On Linux without `/proc`, the condition "does not fit the `/proc` spelling" drops out
+- A path longer than `PATH_MAX` as a whole (1024 bytes on macOS, 4096 on Linux) is `ENAMETOOLONG` on every route (no other system call opens it either; it is outside what sockat handles)
 - The symlink route cannot be used when there is no safe place where the symlink can be created (a sandbox where neither `TMPDIR` nor `/tmp` can be used, and the like). A connect on Linux with `/proc` still gets through a place that is not safe, through the fd-held form, as long as a directory can be created there
 
 ## What differs from the standard library for a long path
@@ -139,11 +142,12 @@ When a path longer than the standard library accepts is `ENAMETOOLONG` (bytes).
 |---|---|
 | /proc | `/proc/self/fd/<fd>/<file name>` (the fd is closed by then) |
 | relative path | the relative path |
-| widened sockaddr | a truncated path. On CPython for macOS, unrelated bytes may follow the cut (the behaviour of the standard library's `getsockname` / `getpeername`; seen on every version from 3.11 to 3.15, varying from run to run). Getting it never raises ([cause, in Japanese](./findings/2026-11-18-cpython-getsockname-widened-sockaddr.md)) |
 | symlink | a path through a symlink that no longer exists |
 | thread cwd, bindat | the file name alone |
 
 Keep the original path yourself and use that.
+
+The `getpeername()` of a connect to a listener that another program bound with a widened sockaddr (Node.js on macOS, for example) is a truncated path, and on CPython for macOS unrelated bytes may follow the cut (the behaviour of the standard library's `getpeername`; getting it never raises; [cause, in Japanese](./findings/2026-11-18-cpython-getsockname-widened-sockaddr.md)).
 
 ### A path that does not end with a name is a ValueError
 
@@ -186,10 +190,13 @@ The results are the standard library's `socket.socket`, so they can be passed st
 
 ```python
 listener = sockat.bind(path)
-server = await asyncio.start_unix_server(handle, sock=listener)
+server = await asyncio.start_unix_server(handle, sock=listener, cleanup_socket=False)  # Python 3.13 and later
 
 reader, writer = await asyncio.open_unix_connection(sock=sockat.connect_nonblocking(path))
 ```
+
+- On Python 3.13 and later, pass `cleanup_socket=False`. asyncio's cleanup `os.stat`s and removes what the listener's `getsockname()` spells, and for a long path that is not the path (the fd in `/proc/self/fd/<fd>/...` is closed and gets reused by another fd, which gives `NotADirectoryError`; the thread cwd spelling is the file name alone and may remove a file of that name in the cwd). The asyncio of 3.11 / 3.12 does no such cleanup and has no such argument
+- Remove the socket file yourself with `os.unlink(path)`
 
 `connect_nonblocking` does not wait for the peer, so it can be called directly from the event loop. `bind` does not wait for a peer either (on the thread cwd route it waits for the thread to end, but the bind returns at once).
 

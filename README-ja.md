@@ -53,7 +53,7 @@ pip install sockat
 | Linux / Android (`/proc` を使える) | /proc |
 | Linux / Android (`/proc` を使えない) | 相対パス → symlink → スレッド cwd |
 | FreeBSD | bindat |
-| macOS / iOS | 相対パス → 広げた sockaddr → symlink → スレッド cwd |
+| macOS / iOS | 相対パス → 広げた sockaddr (connect だけ) → symlink → スレッド cwd |
 | NetBSD / OpenBSD / illumos / その他の Unix | 相対パス → symlink |
 | Windows | 対象外 (import で `ImportError`) |
 
@@ -62,14 +62,14 @@ pip install sockat
 | /proc | ディレクトリを開き、`/proc/self/fd/<fd>/<ファイル名>` で渡す |
 | bindat | `bindat(2)` / `connectat(2)` で、ディレクトリの fd を基準にファイル名で渡す |
 | 相対パス | cwd からの相対パスで渡す。文字列を書き直すだけで cwd は変えない |
-| 広げた sockaddr | macOS のカーネルが受け付ける、253 バイトまで入る sockaddr で渡す |
+| 広げた sockaddr | macOS のカーネルが受け付ける、253 バイトまで入る sockaddr で渡す。connect だけが使う (bind に使うと、listener のアドレスを標準の `getsockname` が読み過ぎる) |
 | symlink | `TMPDIR` か `/tmp` に短い symlink を作って通し、すぐ消す。他人が差し替えられない置き場にだけ作る。`/proc` を使える Linux の connect は、安全でない置き場でも自分専用のディレクトリを作って fd で掴んで使う |
 | スレッド cwd | 使い捨てのスレッドだけ cwd をディレクトリに移し、ファイル名で渡す。プロセスの cwd は変えない |
 | fork | **無い** (仕様の fork の経路は作っていない。仕様の `connect_any` 系も無い) |
 
 - どの経路も呼び出し元のプロセスの cwd を変えないので、マルチスレッドのプログラムから使える
 - どの経路にも収まらないパスは、標準で長すぎるパスと同じく `ENAMETOOLONG` (errno 付きの `OSError`) になる
-- スレッド cwd の経路を使える macOS / Linux では、ファイル名が 253 バイト (Linux は 107) 以内ならどの深さでも届く。seccomp の filter の下 (docker の既定等) の Linux ではスレッド cwd の経路を使えない
+- スレッド cwd の経路を使える macOS / Linux では、ファイル名が 103 バイト (Linux は 107) 以内ならどの深さでも届く (macOS の connect は 253 バイトまで)。seccomp の filter の下 (docker の既定等) の Linux ではスレッド cwd の経路を使えない
 - 各経路の長さの上限と、どこから届かなくなるかは [docs/MANUAL-ja.md](./docs/MANUAL-ja.md#長いパスへの届き方) にある
 
 ## 長いパスで標準と違う点
@@ -83,10 +83,12 @@ pip install sockat
 
 ```python
 listener = sockat.bind(path)
-server = await asyncio.start_unix_server(handle, sock=listener)
+server = await asyncio.start_unix_server(handle, sock=listener, cleanup_socket=False)  # 3.13 以降
 
 reader, writer = await asyncio.open_unix_connection(sock=sockat.connect_nonblocking(path))
 ```
+
+Python 3.13 以降の asyncio は、閉じる時に listener の `getsockname()` の綴りでソケットファイルを消そうとする。長いパスではその綴りが元のパスでないので、`cleanup_socket=False` を渡し、ソケットファイルは自分で消す ([詳しく](./docs/MANUAL-ja.md#asyncio))。
 
 ## ドキュメント
 

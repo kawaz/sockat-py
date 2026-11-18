@@ -18,7 +18,7 @@
 | /proc | `os.open(dir, O_PATH \| O_DIRECTORY)` の fd で `/proc/self/fd/<fd>/<ファイル名>` を標準に渡す | Linux / Android |
 | bindat | ctypes で `bindat(2)` / `connectat(2)` | FreeBSD |
 | 相対パス | 文字列を書き直して標準に渡す | FreeBSD 以外 |
-| 広げた sockaddr | ctypes で libc の `bind(2)` / `connect(2)` に手で組んだ sockaddr を渡す | macOS / iOS |
+| 広げた sockaddr | ctypes で libc の `connect(2)` に手で組んだ sockaddr を渡す | macOS / iOS の connect だけ (bind は使わない。ハブの DR-0009。listener に残るアドレスを標準の `getsockname` が読み過ぎ、asyncio の後始末が落ちるため) |
 | symlink | `os.symlink` で作り、標準に渡し、消す | FreeBSD 以外 |
 | スレッド cwd | sockat が作る使い捨ての `threading.Thread` で、ctypes の `unshare(CLONE_FS)` → `os.fchdir` (Linux。seccomp の filter が掛かっていれば `unshare` を呼ばずに使えないとみなす) / `pthread_fchdir_np` (Apple) をしてから、そのスレッドでファイル名で bind / connect し、スレッドを捨てる | Linux / Android、Apple の OS |
 | fork | 作らない (kawaz 裁定) | — |

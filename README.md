@@ -53,7 +53,7 @@ A longer path is tried on the routes below, in this order per OS, and bound / co
 | Linux / Android (`/proc` usable) | /proc |
 | Linux / Android (`/proc` not usable) | relative path → symlink → thread cwd |
 | FreeBSD | bindat |
-| macOS / iOS | relative path → widened sockaddr → symlink → thread cwd |
+| macOS / iOS | relative path → widened sockaddr (connect only) → symlink → thread cwd |
 | NetBSD / OpenBSD / illumos / other Unix | relative path → symlink |
 | Windows | not supported (`ImportError` on import) |
 
@@ -62,14 +62,14 @@ A longer path is tried on the routes below, in this order per OS, and bound / co
 | /proc | open the directory and pass `/proc/self/fd/<fd>/<file name>` |
 | bindat | `bindat(2)` / `connectat(2)`, by the file name relative to the directory fd |
 | relative path | pass the path relative to the cwd. Only the string is rewritten; the cwd is never changed |
-| widened sockaddr | pass a sockaddr carrying up to 253 bytes, which the macOS kernel accepts |
+| widened sockaddr | pass a sockaddr carrying up to 253 bytes, which the macOS kernel accepts. Used by connects only (on a bind, the standard library's `getsockname` would read past the listener's address) |
 | symlink | create a short symlink under `TMPDIR` or `/tmp`, go through it, and remove it at once. It is created only in a place where no other user can replace it. A connect on Linux with `/proc` also uses a place that is not safe, through a private directory created there and held by its fd |
 | thread cwd | move the cwd of a throwaway thread alone into the directory and pass the file name. The process's cwd is never changed |
 | fork | **none** (the specification's fork route is not built. Neither are the specification's `connect_any` variants) |
 
 - None of the routes changes the calling process's cwd, so they can be used from multi-threaded programs
 - A path that fits no route gets `ENAMETOOLONG` (an `OSError` with errno), as a path too long for the standard library does
-- On macOS / Linux, where the thread cwd route can be used, a path is reached at any depth as long as the file name is within 253 bytes (107 on Linux). Linux cannot use the thread cwd route under a seccomp filter (docker's default, for example)
+- On macOS / Linux, where the thread cwd route can be used, a path is reached at any depth as long as the file name is within 103 bytes (107 on Linux; 253 for a connect on macOS). Linux cannot use the thread cwd route under a seccomp filter (docker's default, for example)
 - The length limits of each route, and where a path stops being reached, are in [docs/MANUAL.md](./docs/MANUAL.md#how-a-long-path-is-reached)
 
 ## What differs from the standard library for a long path
@@ -83,10 +83,12 @@ A longer path is tried on the routes below, in this order per OS, and bound / co
 
 ```python
 listener = sockat.bind(path)
-server = await asyncio.start_unix_server(handle, sock=listener)
+server = await asyncio.start_unix_server(handle, sock=listener, cleanup_socket=False)  # Python 3.13 and later
 
 reader, writer = await asyncio.open_unix_connection(sock=sockat.connect_nonblocking(path))
 ```
+
+On Python 3.13 and later, asyncio tries to remove the socket file through the listener's `getsockname()` when it closes. For a long path that spelling is not the path, so pass `cleanup_socket=False` and remove the socket file yourself ([details](./docs/MANUAL.md#asyncio)).
 
 ## Documentation
 

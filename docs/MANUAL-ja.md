@@ -51,7 +51,7 @@ assert server.recv(4) == b"ping"
 | Linux / Android (`/proc` を使える) | [/proc](#proc) |
 | Linux / Android (`/proc` を使えない) | [相対パス](#相対パス) → [symlink](#symlink) → [スレッド cwd](#スレッド-cwd) |
 | FreeBSD | [bindat](#bindat) |
-| macOS / iOS | [相対パス](#相対パス) → [広げた sockaddr](#広げた-sockaddr) → [symlink](#symlink) → [スレッド cwd](#スレッド-cwd) |
+| macOS / iOS | [相対パス](#相対パス) → [広げた sockaddr](#広げた-sockaddr) (connect だけ) → [symlink](#symlink) → [スレッド cwd](#スレッド-cwd) |
 | NetBSD / OpenBSD / illumos / その他の Unix | [相対パス](#相対パス) → [symlink](#symlink) |
 
 仕様の最後の経路 (fork) は作っていない。Python から fork した子は Python を実行するので、仕様が求める「子の区間は async-signal-safe」を満たせないため ([DR-0001](./decisions/DR-0001-python-port-design.md))。順番の最後まで届かなかったパスは `ENAMETOOLONG` になる。
@@ -80,13 +80,15 @@ cwd からの相対パスが標準にそのまま渡せる長さなら、それ�
 
 macOS / iOS。XNU は `sun_path` が 104 バイトを超えるアドレスも、パスが 253 バイトまでなら受け付ける。ctypes で libc の `bind(2)` / `connect(2)` に手で組んだ sockaddr を渡す。元のパスが 253 バイト以内ならそれを、無理なら相対パスを渡す。
 
+- connect だけが使う。bind に使うと listener に 104 バイトを超えるアドレスが残り、標準の `getsockname` がそれを読み過ぎて (後ろに無関係なバイトが付く)、asyncio の `start_unix_server(sock=)` の後始末が落ちる。なので bind は symlink とスレッド cwd でも広げた綴りを使わない
+
 #### symlink
 
 一時ディレクトリに `sockat.XXXXXXXXXX` (乱数 10 文字) の symlink を作り、それを通して bind / connect して、すぐ消す。
 
 | | symlink の先 | 渡す綴り | `/tmp` で届く範囲 |
 |---|---|---|---|
-| bind | ソケットのディレクトリ | `<置き場>/sockat.XXXXXXXXXX/<ファイル名>` | ファイル名が 84 バイト (`sun_path` が 104 の OS は 80、macOS は 230) 以内 |
+| bind | ソケットのディレクトリ | `<置き場>/sockat.XXXXXXXXXX/<ファイル名>` | ファイル名が 84 バイト (`sun_path` が 104 の OS は 80) 以内 |
 | connect | ソケットのファイル | `<置き場>/sockat.XXXXXXXXXX` | ディレクトリの深さにもファイル名の長さにもよらない |
 
 - 置き場の候補は `TMPDIR` (空でない絶対パスの時)、`/tmp` の順。綴りが収まり、安全で、symlink を作れた最初の候補を使う
@@ -106,7 +108,7 @@ Linux / Android と macOS / iOS。使い捨ての `threading.Thread` の cwd だ
 | macOS / iOS | ctypes の `pthread_fchdir_np` (libSystem の非公開 API) | 関数が無い、または失敗した時 |
 
 - プロセスの cwd も、他のスレッドの cwd も変わらない。connect した相手から見える peer の pid も呼び出し元のまま
-- ファイル名は sockaddr に入る長さ (Linux 107、macOS は広げた sockaddr で 253 バイト) まで
+- ファイル名は sockaddr に入る長さ (Linux 107、macOS 103 バイト。macOS の connect は広げた sockaddr で 253 バイト) まで
 - ディレクトリの開き方: Linux は `O_PATH`、macOS は `O_SEARCH` (どちらも検索権限で足りる)
 
 ### 経路の失敗の扱い
@@ -122,11 +124,12 @@ Linux / Android と macOS / iOS。使い捨ての `threading.Thread` の cwd だ
 | Linux (スレッド cwd を使える) | ファイル名 > 107 | ファイル名 > 107、symlink も使えない |
 | Linux (スレッド cwd を使えない) | ファイル名が `/proc` の綴りに収まらず、相対パス > 107、ファイル名 > 84 か symlink を使えない | ファイル名が `/proc` の綴りに収まらず、相対パス > 107、symlink も使えない |
 | FreeBSD | ファイル名 > 103 | ファイル名 > 103 |
-| macOS (スレッド cwd を使える) | ファイル名 > 253 | ファイル名 > 253、symlink も使えない |
+| macOS (スレッド cwd を使える) | ファイル名 > 103 | ファイル名 > 253、symlink も使えない |
 | NetBSD / OpenBSD | 相対パス > 103、ファイル名 > 80 か symlink を使えない | 相対パス > 103、symlink も使えない |
 | illumos | 相対パス > 107、ファイル名 > 84 か symlink を使えない | 相対パス > 107、symlink も使えない |
 
 - `/proc` を使えない Linux では「`/proc` の綴りに収まらず」の条件が外れる
+- パス全体が `PATH_MAX` (macOS 1024、Linux 4096 バイト) を超えるパスは、どの経路でも `ENAMETOOLONG` になる (他のシステムコールでも開けないパスで、sockat の対象外)
 - symlink を使えないのは、symlink を作れる安全な置き場が無い時 (`TMPDIR` も `/tmp` も使えないサンドボックス等)。`/proc` を使える Linux の connect は、置き場が安全でなくてもディレクトリを作れれば fd で掴む形で届く
 
 ## 長いパスで標準と違う点
@@ -139,11 +142,12 @@ Linux / Android と macOS / iOS。使い捨ての `threading.Thread` の cwd だ
 |---|---|
 | /proc | `/proc/self/fd/<fd>/<ファイル名>` (fd はもう閉じている) |
 | 相対パス | 相対パス |
-| 広げた sockaddr | 途中で切れたパス。macOS の CPython では、切れた後ろに無関係なバイトが付くことがある (標準の `getsockname` / `getpeername` の振る舞い。3.11〜3.15 のどれでも起き、実行ごとに変わる)。取得で例外にはならない ([原因](./findings/2026-11-18-cpython-getsockname-widened-sockaddr.md)) |
 | symlink | もう無い symlink を通したパス |
 | スレッド cwd、bindat | ファイル名だけ |
 
 元のパスは自分で持っておき、それを使う。
+
+他のプログラムが広げた sockaddr で bind した listener (macOS の Node.js 等) に connect した時の `getpeername()` は途中で切れたパスで、macOS の CPython では切れた後ろに無関係なバイトが付くことがある (標準の `getpeername` の振る舞い。取得で例外にはならない。[原因](./findings/2026-11-18-cpython-getsockname-widened-sockaddr.md))。
 
 ### 名前で終わらないパスは ValueError
 
@@ -186,10 +190,13 @@ macOS では、相手の backlog が満杯の時も connect は `ECONNREFUSED` �
 
 ```python
 listener = sockat.bind(path)
-server = await asyncio.start_unix_server(handle, sock=listener)
+server = await asyncio.start_unix_server(handle, sock=listener, cleanup_socket=False)  # 3.13 以降
 
 reader, writer = await asyncio.open_unix_connection(sock=sockat.connect_nonblocking(path))
 ```
+
+- Python 3.13 以降は `cleanup_socket=False` を渡す。asyncio の後始末は listener の `getsockname()` の綴りを `os.stat` して消すが、長いパスではそれが元のパスでない (`/proc/self/fd/<fd>/...` の fd は閉じていて別の fd に使い回され `NotADirectoryError` になる。スレッド cwd の綴りはファイル名だけで、cwd の同じ名前のファイルを消しうる)。3.11 / 3.12 の asyncio は後始末をせず、この引数も無い
+- ソケットファイルは自分で `os.unlink(path)` する
 
 `connect_nonblocking` は相手を待たないので、イベントループから直接呼べる。`bind` も相手を待たない (スレッド cwd の経路ではスレッドの終わりを待つが、bind してすぐ終わる)。
 
