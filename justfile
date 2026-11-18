@@ -38,21 +38,33 @@ test *ARGS: check
 
 # Linux の試験を docker で回す (macOS の手元から Linux の経路を確かめる)
 #
-# 手元の .venv は macOS 用なので使わず、コンテナの中で pytest を入れる。
+# 手元の .venv は macOS 用なので使わず、コンテナの中で pytest を /tmp/deps に入れる。
 # リポは読み取り専用で mount し、bytecode も書かせない。docker の既定の seccomp は
 # unshare(2) を EPERM で断る (スレッド cwd の経路が使えない側) ので、
-# seccomp=unconfined (使える側) と両方で回す。
-[doc("Linux の試験を docker で回す (python 3.11 と最新 × seccomp の既定 / unconfined)")]
+# seccomp=unconfined (使える側) と両方で回す。どちらの側かは
+# SOCKAT_TEST_THREAD_CWD で試験に伝え、試験の探りと食い違ったら落とす (探りが壊れて
+# 「使えない側」の試験だけが走るのを防ぐ)。root は権限の検査を素通りするので、読み取り
+# 権限の無いディレクトリの試験は nobody (uid 65534) の回でだけ走る。
+[doc("Linux の試験を docker で回す (python 3.11 と最新 × seccomp の既定 / unconfined、unconfined は root と nobody)")]
 [script]
 test-linux *ARGS:
     for py in 3.11 3.15; do
-      for sec in default unconfined; do
-        echo "== python:${py}-slim, seccomp=${sec}"
+      for run in default:root unconfined:root unconfined:nobody; do
+        sec=${run%%:*}
+        user=${run##*:}
+        echo "== python:${py}-slim, seccomp=${sec}, user=${user}"
         opt=()
-        [ "$sec" = unconfined ] && opt=(--security-opt seccomp=unconfined)
-        docker run --rm "${opt[@]}" -v "$PWD":/work:ro -w /work \
-          -e PYTHONDONTWRITEBYTECODE=1 -e PYTHONPATH=/work/src \
-          "python:${py}-slim" sh -c 'pip install -q --root-user-action=ignore --disable-pip-version-check pytest && python -m pytest -q -p no:cacheprovider "$@"' sh "$@"
+        thread=0
+        if [ "$sec" = unconfined ]; then
+          opt=(--security-opt seccomp=unconfined)
+          thread=1
+        fi
+        uid=0:0
+        [ "$user" = nobody ] && uid=65534:65534
+        docker run --rm "${opt[@]}" --user "$uid" -v "$PWD":/work:ro -w /work \
+          -e PYTHONDONTWRITEBYTECODE=1 -e HOME=/tmp -e PYTHONPATH=/work/src:/tmp/deps \
+          -e SOCKAT_TEST_THREAD_CWD="$thread" \
+          "python:${py}-slim" sh -c 'pip install -q --root-user-action=ignore --disable-pip-version-check --target /tmp/deps pytest && python -m pytest -q -p no:cacheprovider "$@"' sh "$@"
       done
     done
 
