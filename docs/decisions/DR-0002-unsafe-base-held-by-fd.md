@@ -17,7 +17,7 @@
 | 開いて確かめる | `os.open(..., O_PATH \| O_DIRECTORY \| O_NOFOLLOW)` の fd を `os.fstat` し、ディレクトリ・持ち主が `os.geteuid()`・group と other に権限が無い (`mode & 0o077 == 0`) を確かめ、通ったら `os.chmod("/proc/self/fd/<fd>", 0o700)` で持ち主のビットをそろえる |
 | symlink | `os.symlink(<元のパス>, "s", dir_fd=fd)` |
 | connect | `/proc/self/fd/<fd>/s` を標準の `connect` に渡す |
-| 片付け | 自分が作った `s` だけ `os.unlink("s", dir_fd=fd)` (差し替えられた他人のディレクトリの `s` は消さない)。名前を `os.lstat` した `(st_dev, st_ino)` が fd と一致する時だけ `os.rmdir`。fd を閉じる |
+| 片付け | 自分が作った `s` だけ `os.unlink("s", dir_fd=fd)` (差し替えられた他人のディレクトリの `s` は消さない)。ディレクトリは、確かめが通っていて、名前を `os.lstat` した `(st_dev, st_ino)` が fd と一致する時だけ `os.rmdir` (確かめに落ちたものは中身も含めて触らない)。fd を閉じる |
 
 - 使うのは `/proc` を使える (ディレクトリの fd の `/proc/self/fd/<fd>` を引ける) Linux の connect 系だけ。`run_long` が /proc の経路のために開いたディレクトリの fd でこれを確かめ、`posix_run` に渡す
 - 置き場の候補ごとに、安全なら symlink の経路、安全でなければこの形を試す (`TMPDIR` → `/tmp`)

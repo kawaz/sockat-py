@@ -40,4 +40,4 @@ macOS で、広げた sockaddr (パス 104 バイト超) で bind したソケ�
 - CPython 側の不具合: 長さを返った `addrlen` (バッファ長で抑えたもの) でなく NUL で決め、初期化されていない領域を読む
 - sockat の側では直せない (戻り値は標準の `socket.socket` で、アドレスを読むのは標準の `getsockname`)。sockat-py の MANUAL に「後ろに無関係なバイトが付くことがある」と書き、試験は「取得で例外にならない・先頭が綴りの前方と一致」だけを見る
 - 未確認: Linux で、他のプログラムが NUL 無しの 108 バイトのパスで bind したソケットに connect / accept した時に同じことが起きるか (CPython 自身はそのパスを bind で断る)
-- CPython への起票はしていない (するかは kawaz が決める)
+- 2026-11-18 に security@python.org へ報告した (CPython の security policy に従い非公開で。公開の issue gh-52619 と同じ根の macOS 版として)

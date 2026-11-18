@@ -90,7 +90,7 @@ macOS / iOS。XNU は `sun_path` が 104 バイトを超えるアドレスも、
 | connect | ソケットのファイル | `<置き場>/sockat.XXXXXXXXXX` | ディレクトリの深さにもファイル名の長さにもよらない |
 
 - 置き場の候補は `TMPDIR` (空でない絶対パスの時)、`/tmp` の順。綴りが収まり、安全で、symlink を作れた最初の候補を使う
-- **安全な置き場**は次のどちらか。満たさない候補には何も作らず次へ進む (下の fd で掴む形を除く)
+- **安全な置き場**はディレクトリで、次のどちらか。満たさない候補には何も作らず次へ進む (下の fd で掴む形を除く)
   - sticky bit が立っていて、持ち主が root か自分 (`/tmp` がこれ)
   - 持ち主が自分で、group と other に書き込み権限が無い (macOS の `$TMPDIR` がこれ)
 - **fd で掴む形** (`/proc` を使える Linux の connect だけ): 安全でない候補には、mode 0700 のディレクトリ `sockat.XXXXXXXXXX` を作り、`O_PATH | O_DIRECTORY | O_NOFOLLOW` で開いて持ち主が自分で group と other に権限が無いことを確かめ、その fd の中にソケットのファイルを指す symlink `s` を作って `/proc/self/fd/<fd>/s` で connect する。名前でなく fd で辿るので、他人がディレクトリを差し替えても影響しない。終わったら `s` とディレクトリを消す
