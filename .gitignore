@@ -1,0 +1,8 @@
+/tmp.local
+/.venv
+/dist
+__pycache__/
+*.local.code-workspace
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/

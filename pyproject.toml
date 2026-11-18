@@ -1,0 +1,51 @@
+[project]
+name = "sockat"
+version = "0.1.0"
+description = "Bind / connect Unix domain sockets at paths longer than sun_path"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Yoshiaki Kawazu" }]
+requires-python = ">=3.11"
+dependencies = []
+keywords = ["unix", "socket", "sun_path", "AF_UNIX", "ENAMETOOLONG"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Operating System :: POSIX",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: POSIX :: BSD",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: System :: Networking",
+    "Typing :: Typed",
+]
+
+[project.urls]
+Homepage = "https://github.com/kawaz/sockat-py"
+Repository = "https://github.com/kawaz/sockat-py"
+Specification = "https://github.com/kawaz/sockat/blob/main/docs/SPEC.md"
+
+[build-system]
+requires = ["uv_build>=0.13,<0.14"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = ["pytest>=9", "mypy>=2", "ruff>=0.17"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF", "PT", "ANN"]
+
+[tool.mypy]
+strict = true
+python_version = "3.11"
+files = ["src", "tests"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["-ra", "--strict-markers"]
