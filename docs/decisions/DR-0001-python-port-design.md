@@ -91,7 +91,7 @@
 ## Consequences
 
 - fork の経路でしか届かない所は、bind も connect も `ENAMETOOLONG` になる。そうなるのは、スレッド cwd の経路が使えず (NetBSD / OpenBSD / illumos、`unshare` を断る seccomp の下の /proc の無い Linux)、bind でファイル名が symlink の綴りに収まらないか、symlink を置ける場所が無い時。README の OS × 経路の表に「fork の経路なし」と書く
-- PY-Q1 で C 拡張を入れることになったら、決定 1 の fork の行と決定 2 の `connect_any` 系、決定 6 の配布を書き換える。経路の本体は Python のまま
+- PY-Q1 で C 拡張を入れることになったら、決定 1 の fork の行と決定 2 の `connect_any` 系、決定 6 の配布を書き換える。経路の本体は Python のまま。`connect_any` 系は既定で import されない別のモジュール (例: `sockat.any`) に置く (ハブの DR-0007: `connect_any` 系は使う人が選んで有効にする仕組みの後ろに置く)
 - SPEC が変わったら、この実装と README / MANUAL を追従させる
 
 ## 関連
