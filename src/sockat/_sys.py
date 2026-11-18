@@ -67,9 +67,14 @@ SUN_PATH_OFFSET = 2
 """Offset of ``sun_path`` in ``struct sockaddr_un`` (2 on every supported
 system)."""
 
-SUN_PATH_CAP = 104 if _BSD_LAYOUT else 108
-"""Length of the ``sun_path`` array of ``struct sockaddr_un``: 104 on the BSDs
-and Apple, 108 on Linux, Android and illumos. The ``socket`` module refuses a
+_SUN_PATH_108 = IS_LINUX or sys.platform.startswith("sunos")
+"""Linux, Android and illumos, whose ``sun_path`` is 108 bytes."""
+
+SUN_PATH_CAP = 108 if _SUN_PATH_108 else 104
+"""Length of the ``sun_path`` array of ``struct sockaddr_un``: 108 on Linux,
+Android and illumos, 104 on the BSDs and Apple. Another Unix is taken as 104,
+the smaller (DR-0001: a path the standard library would take then goes
+through a route instead, rather than one it refuses being handed to it). The ``socket`` module refuses a
 path of this many bytes or more (``path.len >= sizeof sun_path`` in CPython's
 ``socketmodule.c``), so a path fits the standard form when it is shorter."""
 
