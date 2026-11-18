@@ -8,7 +8,11 @@ socket and call ``bind`` + ``listen`` / ``connect`` on it::
     listener = sockat.bind("/a/very/deep/directory/.../server.sock")
     client = sockat.connect("/a/very/deep/directory/.../server.sock")
 
-* The return value is a plain :class:`socket.socket`.
+* The return value is a :class:`socket.socket`. For a long path it is a
+  subclass whose ``getsockname()`` (listener, accepted sockets) and
+  ``getpeername()`` (connected stream) report the path given, as the
+  standard library reports a short one, so code that reads the address back
+  (asyncio's server cleanup) works on the path.
 * A path the :mod:`socket` module accepts (``sun_path`` less 1 byte: 107 on
   Linux, 103 on macOS and the BSDs) goes to it unchanged, so it behaves as the
   standard library does.

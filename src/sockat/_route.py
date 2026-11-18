@@ -19,6 +19,7 @@ from enum import Enum
 from typing import TypeAlias
 
 from . import _path
+from ._sockets import PathSocket
 from ._sys import (
     DIRECT_MAX,
     HAS_THREAD_CWD,
@@ -142,10 +143,10 @@ def run(req: Request, path: StrOrBytesPath) -> tuple[socket.socket, Route]:
     spelled = os.fspath(path)
     raw = os.fsencode(spelled)
     if IS_LINUX and raw.startswith(b"\0"):
-        return plain_op(req, spelled), Route.DIRECT
+        return plain_op(req, spelled, standard=True), Route.DIRECT
     check_no_nul(raw)
     if len(raw) <= DIRECT_MAX:
-        return plain_op(req, spelled), Route.DIRECT
+        return plain_op(req, spelled, standard=True), Route.DIRECT
     return run_long(req, raw, Config.from_env())
 
 
@@ -156,6 +157,17 @@ def check_no_nul(path: bytes) -> None:
 
 
 def run_long(req: Request, path: bytes, cfg: Config) -> tuple[socket.socket, Route]:
+    """:func:`routes` for a path longer than :data:`DIRECT_MAX`, with the
+    socket made to report ``path`` (decoded as the ``socket`` module decodes
+    a pathname) as the listener's address or the stream's peer's, rather than
+    the spelling the route handed to the kernel (DR-0003)."""
+    sock, route = routes(req, path, cfg)
+    if isinstance(sock, PathSocket):
+        sock.report_path(os.fsdecode(path), listening=req.op is Op.BIND)
+    return sock, route
+
+
+def routes(req: Request, path: bytes, cfg: Config) -> tuple[socket.socket, Route]:
     """The routes for a path longer than :data:`DIRECT_MAX`, with what they
     read from the environment given as ``cfg`` (the tests pass their own).
 
@@ -181,10 +193,15 @@ def run_long(req: Request, path: bytes, cfg: Config) -> tuple[socket.socket, Rou
     return posix_run(req, path, directory, name, None, cfg)
 
 
-def new_socket(req: Request) -> socket.socket:
+def new_socket(req: Request, *, standard: bool = False) -> socket.socket:
     """A fresh ``AF_UNIX`` / ``SOCK_STREAM`` socket made by the ``socket``
-    module (so set up exactly as its own), nonblocking when ``req`` asks."""
-    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    module (so set up exactly as its own), nonblocking when ``req`` asks: a
+    :class:`PathSocket` for the routes of a long path (:func:`run_long` makes
+    it report the path given), a plain :class:`socket.socket` when
+    ``standard`` (a path the ``socket`` module takes, which gets nothing
+    added)."""
+    cls = socket.socket if standard else PathSocket
+    sock = cls(socket.AF_UNIX, socket.SOCK_STREAM)
     if req.nonblocking:
         sock.setblocking(False)
     return sock
@@ -203,10 +220,11 @@ def _finish(req: Request, sock: socket.socket, call: Callable[[socket.socket], N
     return sock
 
 
-def plain_op(req: Request, spelling: str | bytes) -> socket.socket:
+def plain_op(req: Request, spelling: str | bytes, *, standard: bool = False) -> socket.socket:
     """Bind (and listen) or connect with ``spelling`` through the ``socket``
-    module, as a caller of the standard library would."""
-    sock = new_socket(req)
+    module, as a caller of the standard library would (on a plain
+    :class:`socket.socket` when ``standard``, see :func:`new_socket`)."""
+    sock = new_socket(req, standard=standard)
     if req.op is Op.BIND:
         return _finish(req, sock, lambda s: s.bind(spelling))
     return _finish(req, sock, lambda s: s.connect(spelling))
