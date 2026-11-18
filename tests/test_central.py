@@ -936,6 +936,26 @@ def test_a_missing_directory_is_enoent_before_anything_is_made(tmp: TmpDirs) -> 
     assert_untouched(d_place)
 
 
+# The realpath of the socket's directory is taken first, with the stat
+# (SPEC): when it cannot be resolved, that error is raised as it is, before
+# any length is judged or D is made, rather than the central route counting
+# as unusable and the call ending in ENAMETOOLONG. Stood in for by a realpath
+# that fails; nothing is made in the place for D.
+def test_a_realpath_that_cannot_be_taken_is_the_error_it_is(tmp: TmpDirs, monkeypatch: pytest.MonkeyPatch) -> None:
+    p = nest(tmp.new(), 600)
+    d_place = tmp.new()
+    mark_untouched(d_place)
+
+    def realpath(path: object, *, strict: bool = False) -> str:
+        raise PermissionError(errno.EACCES, os.strerror(errno.EACCES))
+
+    monkeypatch.setattr(_route.os.path, "realpath", realpath)
+    for req in (BIND, CONNECT, CONNECT_NONBLOCKING):
+        with pytest.raises(PermissionError):
+            _route.run_long(req, p, central_cfg((d_place,)))
+    assert_untouched(d_place)
+
+
 # The socket's directory is looked up by stat, not by opening it (SPEC): one
 # that cannot be opened (as a directory without read permission cannot be
 # where it is opened O_RDONLY, stood in for here by an open that fails) still

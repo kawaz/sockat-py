@@ -73,7 +73,9 @@ def remember(path: str | bytes) -> Callable[[], None]:
     def discard() -> None:
         try:
             now = os.lstat(real)
-        except FileNotFoundError:
+        except (FileNotFoundError, NotADirectoryError):
+            # Already gone (a directory on the way gone or replaced by a
+            # file counts too): success.
             return
         if (now.st_dev, now.st_ino) != made:
             return

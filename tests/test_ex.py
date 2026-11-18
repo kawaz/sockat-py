@@ -221,3 +221,22 @@ def test_a_file_that_cannot_be_remembered_fails_the_bind_and_closes_the_listener
     assert made
     assert all(s.fileno() == -1 for s in made)
     assert stat.S_ISSOCK(os.lstat(p).st_mode)
+
+
+# discard succeeds when the file is already gone, including when a directory
+# on its way was replaced by a file (lstat answers ENOTDIR): only a removal
+# that was tried and failed is an error (SPEC).
+@needs_long_bind
+def test_discard_succeeds_when_a_directory_on_the_way_is_gone(tmp: TmpDirs) -> None:
+    base = tmp.new()
+    p = nest(base, 300)
+    listener, discard = sockat.bind_ex(p)
+    listener.close()
+    top = base + b"/" + os.path.relpath(p, base).split(b"/")[0]
+    aside = tmp.new() + b"/aside"
+    os.rename(top, aside)
+    with open(top, "wb"):
+        pass
+    discard()
+    discard()
+    assert os.path.isfile(top)

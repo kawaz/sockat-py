@@ -235,6 +235,10 @@ def routes(req: Request, path: bytes, cfg: Config) -> tuple[socket.socket, Route
     st = os.stat(directory)
     if not stat.S_ISDIR(st.st_mode):
         raise NotADirectoryError(errno.ENOTDIR, os.strerror(errno.ENOTDIR), os.fsdecode(directory))
+    # The realpath R will point to, taken here so that a failure to resolve it
+    # is the error it is, before any length is judged (SPEC), rather than the
+    # central route quietly counting as unusable and ending in ENAMETOOLONG.
+    real_dir = os.fsencode(os.path.realpath(directory, strict=True))
     dirfd: int | None
     try:
         dirfd = open_dir(directory)
@@ -242,7 +246,7 @@ def routes(req: Request, path: bytes, cfg: Config) -> tuple[socket.socket, Route
         dirfd = None
     try:
         proc_ok = IS_LINUX and proc_usable(dirfd, cfg.proc_self_fd)
-        done = central_route(req, directory, name, dirfd, cfg, proc_ok=proc_ok)
+        done = central_route(req, real_dir, name, dirfd, cfg, proc_ok=proc_ok)
         if done is not None:
             return done
         if req.op is Op.BIND:
@@ -746,11 +750,12 @@ def central_means(name: bytes, dirfd: int | None, cfg: Config, *, proc_ok: bool)
 
 
 def central_route(
-    req: Request, directory: bytes, name: bytes, dirfd: int | None, cfg: Config, *, proc_ok: bool
+    req: Request, real_dir: bytes, name: bytes, dirfd: int | None, cfg: Config, *, proc_ok: bool
 ) -> tuple[socket.socket, Route] | None:
     """The central route (SPEC): D in the first of
     :attr:`Config.own_dir_places` where it can be made (:class:`OwnDir`),
-    holding R, a symlink to the realpath of the socket's directory, and the
+    holding R, a symlink to ``real_dir`` (the realpath of the socket's
+    directory, taken by :func:`routes`), and the
     bind / connect of ``R/<name>`` from D's fd by the first means that can be
     used (:func:`central_means`). D and R are removed again whatever the
     outcome, so the spelling the kernel keeps (``R/<name>``) names nothing
@@ -762,11 +767,7 @@ def central_route(
     means = central_means(name, dirfd, cfg, proc_ok=proc_ok)
     if not means:
         return None
-    try:
-        target = os.fsencode(os.path.realpath(directory, strict=True))
-    except OSError:
-        return None
-    own = OwnDir.make(cfg.own_dir_places, dirfd, target, proc_self_fd=cfg.proc_self_fd)
+    own = OwnDir.make(cfg.own_dir_places, dirfd, real_dir, proc_self_fd=cfg.proc_self_fd)
     if own is None:
         return None
     try:
