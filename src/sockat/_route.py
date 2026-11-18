@@ -297,10 +297,13 @@ def proc_spelling(dirfd: int, name: bytes, proc_self_fd: bytes) -> bytes | None:
 
 def at_op(req: Request, directory: bytes, name: bytes) -> socket.socket:
     """FreeBSD, for a path longer than :data:`DIRECT_MAX`: ``bindat(2)`` /
-    ``connectat(2)`` with the file name relative to the directory fd."""
-    addr = sockaddr(name)
+    ``connectat(2)`` with the file name relative to the directory fd.
+
+    The directory is opened first, so a missing directory is ``ENOENT`` before
+    the length of the file name is judged."""
     dirfd = open_dir(directory)
     try:
+        addr = sockaddr(name)
         sock = new_socket(req)
         return _finish(req, sock, lambda s: op_at(req.op, s, dirfd, addr))
     finally:
@@ -399,7 +402,9 @@ def thread_cwd_op(req: Request, dirfd: int, name: bytes, wide: bool) -> socket.s
     not fit a sockaddr (the widened one on Apple when ``wide``), the thread
     cannot be started, or the system refuses a cwd of the thread's own
     (``unshare`` refused, as docker's default seccomp does; no
-    ``pthread_fchdir_np``, or it failed). Any other failure is the outcome.
+    ``pthread_fchdir_np``, or it failed), or the kernel refuses the widened
+    sockaddr a file name over :data:`DIRECT_MAX` bytes needs (Apple:
+    :func:`refuses_wide`). Any other failure is the outcome.
     """
     limit = WIDE_PATH_MAX if wide else DIRECT_MAX
     if len(name) > limit:
@@ -407,8 +412,24 @@ def thread_cwd_op(req: Request, dirfd: int, name: bytes, wide: bool) -> socket.s
     addr = sockaddr(name, wide=True) if len(name) > DIRECT_MAX else None
     sock = new_socket(req)
     outcome: list[BaseException | Skip | None] = []
+    # Who closes `sock` when the caller stops waiting (an exception such as
+    # KeyboardInterrupt out of join): the thread may still be using it, so it
+    # is handed over to the thread, which closes it when it ends.
+    handover = threading.Lock()
+    ended = False
+    abandoned = False
 
     def in_thread() -> None:
+        nonlocal ended
+        try:
+            run_in_thread()
+        finally:
+            with handover:
+                ended = True
+                if abandoned:
+                    sock.close()
+
+    def run_in_thread() -> None:
         try:
             if not enter_dir_in_this_thread(dirfd):
                 outcome.append(Skip.UNUSABLE)
@@ -432,9 +453,17 @@ def thread_cwd_op(req: Request, dirfd: int, name: bytes, wide: bool) -> socket.s
     except RuntimeError:
         sock.close()
         return Skip.UNUSABLE
-    thread.join()
+    try:
+        thread.join()
+    except BaseException:
+        with handover:
+            if ended:
+                sock.close()
+            else:
+                abandoned = True
+        raise
     result = outcome[0] if outcome else RuntimeError("the thread-cwd thread ended without an outcome")
-    if result is Skip.UNUSABLE:
+    if result is Skip.UNUSABLE or (isinstance(result, OSError) and addr is not None and refuses_wide(result)):
         sock.close()
         return Skip.UNUSABLE
     if isinstance(result, BaseException):
