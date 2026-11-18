@@ -721,32 +721,52 @@ def fd_held_route(
     make_dir: Callable[[bytes, int], None] = os.mkdir,
 ) -> tuple[socket.socket, Route] | Skip:
     """Connect to ``path`` through a place ``base`` that is not safe (others
-    may rename or replace entries there), on Linux with /proc: make a private
-    directory ``<base>/sockat.XXXXXXXXXX`` (mode 0700), open it ``O_DIRECTORY
-    | O_NOFOLLOW`` and confirm by ``fstat`` that the fd is a directory owned
-    by the effective uid with mode 0700, create inside it, by the fd, a
-    symlink ``s`` to the socket file, and connect to
-    ``/proc/self/fd/<fd>/s``.
+    may rename or replace entries there), on Linux with /proc:
+
+    0. confirm that /proc can be used (``<proc_self_fd>/<fd>`` of the opened
+       ``base`` can be looked up) before making anything;
+    1. make a private directory ``<base>/sockat.XXXXXXXXXX`` (mode 0700);
+    2. open it ``O_PATH | O_DIRECTORY | O_NOFOLLOW`` (which needs no
+       permission on it), confirm by ``fstat`` that the fd is a directory
+       owned by the effective uid with no permission for group or others,
+       and set it to 0700 through ``<proc_self_fd>/<fd>`` (a umask may have
+       taken owner bits off the mode it was made with; an ``O_PATH`` fd
+       takes no ``fchmod``, and the /proc spelling reaches what the fd
+       holds, not whatever is at the name);
+    3. create inside it, by the fd, a symlink ``s`` to the socket file;
+    4. connect to ``/proc/self/fd/<fd>/s``.
 
     The directory is reached by its fd, not its name, so renaming or
     replacing the name in ``base`` afterwards changes nothing; a replacement
     between creating and opening it is caught by the ``fstat`` check.
 
-    :attr:`Skip.UNUSABLE`, after removing what was made, when the directory
-    cannot be made (a name free after :attr:`TempLink.ATTEMPTS` tries, a
-    writable base), the opened fd fails the check, or the symlink cannot be
-    created. The outcome of the connect is returned as it is. Whatever the
-    outcome, ``s`` is removed through the fd, and the directory only while
-    its name still refers to the fd's directory. ``make_dir`` is a parameter
-    so the tests can replace the directory between its creation and the
-    open.
+    :attr:`Skip.UNUSABLE`, after removing what was made, when /proc cannot
+    be used, the directory cannot be made (a name free after
+    :attr:`TempLink.ATTEMPTS` tries, a writable base), the opened fd fails
+    the check, or the symlink cannot be created. The outcome of the connect
+    is returned as it is. Whatever the outcome, the ``s`` it created is
+    removed through the fd, and the directory only while its name still
+    refers to the fd's directory. ``make_dir`` is a parameter so the tests
+    can replace the directory between its creation and the open.
     """
+    if sys.platform != "linux" and sys.platform != "android":
+        # Needs /proc and O_PATH (Linux, Android).
+        return Skip.UNUSABLE
     target = path
     if not target.startswith(b"/"):
         try:
             target = _join(os.getcwdb(), target)
         except OSError:
             return Skip.UNUSABLE
+    try:
+        base_fd = open_dir(base)
+    except OSError:
+        return Skip.UNUSABLE
+    try:
+        if proc_fd_dir(base_fd, proc_self_fd) is None:
+            return Skip.UNUSABLE
+    finally:
+        os.close(base_fd)
     held: bytes | None = None
     for _ in range(TempLink.ATTEMPTS):
         try:
@@ -764,25 +784,32 @@ def fd_held_route(
     if held is None:
         return Skip.UNUSABLE
     try:
-        dirfd = os.open(held, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        dirfd = os.open(held, os.O_PATH | os.O_DIRECTORY | os.O_NOFOLLOW)
     except OSError:
         # Whatever is at the name now cannot be told to be ours: left alone.
         return Skip.UNUSABLE
+    linked = False
     try:
         st = os.fstat(dirfd)
-        if not (stat.S_ISDIR(st.st_mode) and st.st_uid == os.geteuid() and stat.S_IMODE(st.st_mode) == 0o700):
-            return Skip.UNUSABLE
-        try:
-            os.symlink(target, b"s", dir_fd=dirfd)
-        except OSError:
+        if not (stat.S_ISDIR(st.st_mode) and st.st_uid == os.geteuid() and st.st_mode & 0o077 == 0):
             return Skip.UNUSABLE
         fd_dir = proc_fd_dir(dirfd, proc_self_fd)
         if fd_dir is None:
             return Skip.UNUSABLE
+        try:
+            os.chmod(fd_dir, 0o700)
+            os.symlink(target, b"s", dir_fd=dirfd)
+        except OSError:
+            return Skip.UNUSABLE
+        linked = True
         return plain_op(req, _join(fd_dir, b"s")), Route.FD_HELD
     finally:
-        with contextlib.suppress(OSError):
-            os.unlink(b"s", dir_fd=dirfd)
+        # Only the `s` this call created: a directory that failed the check
+        # (someone else's, put at the name before the open) may hold an `s`
+        # of its own.
+        if linked:
+            with contextlib.suppress(OSError):
+                os.unlink(b"s", dir_fd=dirfd)
         with contextlib.suppress(OSError):
             here = os.lstat(held)
             mine = os.fstat(dirfd)
