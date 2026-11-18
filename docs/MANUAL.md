@@ -212,6 +212,10 @@ The central route and the form without D resolve the socket's directory to a rea
 
 sockat itself never changes the cwd. If the cwd has changed after the connect, the result is discarded and an `OSError` without an errno is raised. A change that is undone in between is not visible.
 
+### The form without D in a socket's directory others can write to
+
+In a socket's directory that is not sticky and that others can write to, R of the form without D can be replaced between its creation and the bind, so the bind may go to another directory (a name already there gives `EADDRINUSE`; nothing is overwritten). R inside D cannot be replaced, D being 0700.
+
 ### Leftovers can remain
 
 If the process dies between creating and removing them, the following are left.

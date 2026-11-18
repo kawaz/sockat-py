@@ -84,6 +84,7 @@ pip install sockat
 - listener (と accept したソケット) の `getsockname()` と、connect したソケットの `getpeername()` は元のパスを返す。カーネルが返すのは `R/<ファイル名>` (/proc 版は `/proc/self/fd/<fd>/R/<ファイル名>`、D 無しの形は R が `.sockat.XXXXXXXXXX`。R はもう無いので何にも当たらない) だが、sockat が返すソケットはそれを元のパスに差し替える
 - 標準にそのまま渡せない長さのパスで、名前で終わらないもの (`dir/`、`dir/.`、`..` で終わるもの) は `ValueError` になる
 - 先頭以外に NUL を含むパスは、長さによらず `ValueError` になる (標準は NUL で黙って切り詰める)。Linux で先頭が NUL のパス (abstract namespace) は標準にそのまま渡す
+- sticky でなく他人も書けるソケットのディレクトリでは、D 無しの形の R を作ってから bind するまでの間に R を差し替えられ、別のディレクトリに bind しうる (同じ名前が既にあれば `EADDRINUSE` で、上書きはしない。D の中の R は D が 0700 なので差し替えられない)
 - 途中でプロセスが死ぬと、`TMPDIR` か `/tmp` に `sockat.XXXXXXXXXX`、ソケットのディレクトリに `.sockat.XXXXXXXXXX` が残ることがある
 - その他 (ディレクトリを先に引くこと等) は [docs/MANUAL-ja.md](./docs/MANUAL-ja.md#長いパスで標準と違う点)
 

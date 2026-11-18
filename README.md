@@ -84,6 +84,7 @@ A longer path is tried on the routes below, in this order per OS, and bound / co
 - `getsockname()` of a listener (and of an accepted socket) and `getpeername()` of a connected socket return the original path. What the kernel returns is `R/<file name>` (`/proc/self/fd/<fd>/R/<file name>` with the /proc variant, R being `.sockat.XXXXXXXXXX` in the form without D; R is gone, so it names nothing), but the sockets sockat returns replace it with the original path
 - A path too long for the standard library that does not end with a name (ending in `dir/`, `dir/.`, `..`) is a `ValueError`
 - A path containing a NUL anywhere but at its start is a `ValueError` at any length (the standard library silently truncates at the NUL). On Linux a path starting with a NUL (abstract namespace) is handed to the standard library unchanged
+- In a socket's directory that is not sticky and that others can write to, R of the form without D can be replaced between its creation and the bind, so the bind may go to another directory (a name already there gives `EADDRINUSE`; nothing is overwritten). R inside D cannot be replaced, D being 0700
 - If the process dies midway, `sockat.XXXXXXXXXX` may be left under `TMPDIR` or `/tmp`, and `.sockat.XXXXXXXXXX` in the socket's directory
 - The rest (the directory being looked up first, and the like) is in [docs/MANUAL.md](./docs/MANUAL.md#what-differs-from-the-standard-library-for-a-long-path)
 
