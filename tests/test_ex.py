@@ -240,3 +240,34 @@ def test_discard_succeeds_when_a_directory_on_the_way_is_gone(tmp: TmpDirs) -> N
     discard()
     discard()
     assert os.path.isfile(top)
+
+
+# bind_ex reads the path once and binds and remembers that one value: a
+# path-like object may answer differently each time it is asked, and taking
+# one answer to bind and another to remember would make discard remove an
+# unrelated file. Stood in for by a path-like object that names an unrelated
+# existing file first and the socket's path after; the unrelated file must
+# survive, whichever answer was used (read once, the bind of the existing file
+# fails).
+class _Shifting:
+    def __init__(self, first: bytes, then: bytes) -> None:
+        self.answers = [first, then]
+
+    def __fspath__(self) -> bytes:
+        return self.answers.pop(0) if len(self.answers) > 1 else self.answers[0]
+
+
+@pytest.mark.parametrize("total", LENGTHS)
+def test_a_path_like_object_is_read_once(tmp: TmpDirs, total: int) -> None:
+    p = nest(tmp.new(), total)
+    victim = tmp.new() + b"/victim"
+    with open(victim, "wb"):
+        pass
+    try:
+        listener, discard = sockat.bind_ex(_Shifting(victim, p))
+    except OSError:
+        pass  # the one answer read names the existing file: EADDRINUSE
+    else:
+        with listener:
+            discard()
+    assert os.path.exists(victim)

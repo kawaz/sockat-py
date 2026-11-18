@@ -19,6 +19,7 @@ import socket
 import stat
 import sys
 import threading
+import time
 import types
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -949,11 +950,27 @@ def test_a_realpath_that_cannot_be_taken_is_the_error_it_is(tmp: TmpDirs, monkey
     def realpath(path: object, *, strict: bool = False) -> str:
         raise PermissionError(errno.EACCES, os.strerror(errno.EACCES))
 
-    monkeypatch.setattr(_route.os.path, "realpath", realpath)
+    monkeypatch.setattr(os.path, "realpath", realpath)
     for req in (BIND, CONNECT, CONNECT_NONBLOCKING):
         with pytest.raises(PermissionError):
             _route.run_long(req, p, central_cfg((d_place,)))
     assert_untouched(d_place)
+
+
+# A removed cwd is not a directory to bind / connect in (SPEC: the realpath of
+# the socket's directory is taken first, and one that cannot be taken is the
+# error): with the cwd removed and $PWD unset, `./` + a long file name is
+# ENOENT for the bind and both connects, and nothing is made in the place for
+# D. macOS's getcwd still spells a removed cwd, so a realpath that took that
+# spelling without checking it would go on. Run in a child process (the cwd
+# is the process's).
+def test_a_removed_cwd_is_enoent_and_nothing_is_made(tmp: TmpDirs) -> None:
+    cwd = tmp.new() + b"/gone"
+    os.mkdir(cwd)
+    place = tmp.new()
+    got = run_child("deleted_cwd", cwd, args={"PLACE": place})
+    assert set(got.values()) == {str(errno.ENOENT)}, got
+    assert listing(place) == []
 
 
 # The socket's directory is looked up by stat, not by opening it (SPEC): one
@@ -1018,48 +1035,63 @@ def test_the_central_route_needs_no_read_permission_on_the_directory(tmp: TmpDir
             accept_ping(listener, client)
 
 
-# When the caller stops waiting for the thread-cwd thread (an exception such
-# as KeyboardInterrupt out of join), the socket may still be in use by the
-# thread, so the caller must not close it; the thread closes it when it ends.
-# The interruption is stood in for by a join that raises once. The test keeps
-# its own reference to the socket the route made (so garbage collection cannot
-# close it in the route's place) and checks it is closed once the thread has
-# ended.
+# When the wait for the thread-cwd thread is interrupted (an exception such
+# as KeyboardInterrupt out of join), the route still waits for the thread to
+# end before it returns, so the central route does not remove D and close its
+# fd while the thread is about to enter it (a closed fd, or one reused for an
+# unrelated directory, where the thread would then bind). The interruption is
+# raised after that, with the socket made closed and nothing left in the
+# place for D. The thread is slowed down before it enters D, and what it
+# enters is checked to be D, still there; the join raises once, then waits.
 @pytest.mark.skipif(not thread_cwd_usable(), reason="the system does not give a thread a cwd of its own here")
-def test_an_interrupted_wait_for_the_thread_leaves_no_fd_behind(tmp: TmpDirs, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_an_interrupted_wait_lets_the_thread_end_before_d_is_removed(
+    tmp: TmpDirs, monkeypatch: pytest.MonkeyPatch
+) -> None:
     p = far(tmp)
-    listener, r = _route.run_long(BIND, p, central_cfg(proc=NO_PROC))
-    with listener:
-        assert r is Route.THREAD_CWD
-        made: list[socket.socket] = []
-        threads: list[threading.Thread] = []
-        real_new_socket = _route.new_socket
-        real_join = threading.Thread.join
+    d_place = tmp.new()
+    made: list[socket.socket] = []
+    entered: list[bool] = []
+    alive_at_raise: list[bool] = []
+    threads: list[threading.Thread] = []
+    real_new_socket = _route.new_socket
+    real_join = threading.Thread.join
+    real_enter = _sys.enter_dir_in_this_thread
 
-        def new_socket(req: _route.Request) -> socket.socket:
-            sock = real_new_socket(req)
-            made.append(sock)
-            return sock
+    def new_socket(req: _route.Request, *, standard: bool = False) -> socket.socket:
+        sock = real_new_socket(req, standard=standard)
+        made.append(sock)
+        return sock
 
-        def interrupted_join(self: threading.Thread, timeout: float | None = None) -> None:
+    def slow_enter(fd: int) -> bool:
+        time.sleep(0.2)
+        st = os.fstat(fd)
+        entered.append(stat.S_ISDIR(st.st_mode) and len(listing(d_place)) == 1)
+        return real_enter(fd)
+
+    def join_interrupted_once(self: threading.Thread, timeout: float | None = None) -> None:
+        if not threads:
             threads.append(self)
             raise KeyboardInterrupt
+        real_join(self, timeout)
 
-        monkeypatch.setattr(_route, "new_socket", new_socket)
-        monkeypatch.setattr(threading.Thread, "join", interrupted_join)
-        dirfd = os.open(parent(p), os.O_RDONLY)
-        try:
-            with pytest.raises(KeyboardInterrupt):
-                _route.thread_cwd_op(CONNECT, dirfd, b"s.sock")
-            monkeypatch.setattr(threading.Thread, "join", real_join)
-            for t in threads:
-                t.join()
-            assert len(made) == 1
-            assert made[0].fileno() == -1
-        finally:
-            os.close(dirfd)
-            for sock in made:
-                sock.close()
+    monkeypatch.setattr(_route, "new_socket", new_socket)
+    monkeypatch.setattr(_route, "enter_dir_in_this_thread", slow_enter)
+    monkeypatch.setattr(threading.Thread, "join", join_interrupted_once)
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            _route.run_long(BIND, p, central_cfg((d_place,), proc=NO_PROC))
+        alive_at_raise.append(threads[0].is_alive())
+    finally:
+        monkeypatch.setattr(threading.Thread, "join", real_join)
+        for t in threads:
+            t.join()
+        for sock in made:
+            sock.close()
+    assert alive_at_raise == [False]
+    assert entered == [True]
+    assert made
+    assert all(sock.fileno() == -1 for sock in made)
+    assert listing(d_place) == []
 
 
 # The pre-check of the thread's own cwd (made before D) agrees with the

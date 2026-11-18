@@ -804,24 +804,8 @@ def thread_cwd_op(req: Request, dirfd: int, spelling: bytes) -> socket.socket | 
     """
     sock = new_socket(req)
     outcome: list[BaseException | Skip | None] = []
-    # Who closes `sock` when the caller stops waiting (an exception such as
-    # KeyboardInterrupt out of join): the thread may still be using it, so it
-    # is handed over to the thread, which closes it when it ends.
-    handover = threading.Lock()
-    ended = False
-    abandoned = False
 
     def in_thread() -> None:
-        nonlocal ended
-        try:
-            run_in_thread()
-        finally:
-            with handover:
-                ended = True
-                if abandoned:
-                    sock.close()
-
-    def run_in_thread() -> None:
         try:
             if not enter_dir_in_this_thread(dirfd):
                 outcome.append(Skip.UNUSABLE)
@@ -840,15 +824,22 @@ def thread_cwd_op(req: Request, dirfd: int, spelling: bytes) -> socket.socket | 
     except RuntimeError:
         sock.close()
         return Skip.UNUSABLE
-    try:
-        thread.join()
-    except BaseException:
-        with handover:
-            if ended:
-                sock.close()
-            else:
-                abandoned = True
-        raise
+    # The thread uses `dirfd` (D, which the caller removes and closes as soon
+    # as this returns) and `sock`: whatever interrupts the wait (an exception
+    # such as KeyboardInterrupt out of join), the thread is waited for to the
+    # end first, so it never enters a closed (or reused) fd. The interruption
+    # is raised then, with the socket closed.
+    interrupted: BaseException | None = None
+    while True:
+        try:
+            thread.join()
+            break
+        except BaseException as e:
+            if interrupted is None:
+                interrupted = e
+    if interrupted is not None:
+        sock.close()
+        raise interrupted
     result = outcome[0] if outcome else RuntimeError("the thread-cwd thread ended without an outcome")
     if result is Skip.UNUSABLE:
         sock.close()

@@ -83,8 +83,11 @@ def bind_ex(path: StrOrBytesPath) -> tuple[socket.socket, Callable[[], None]]:
     since the listener reports the path given; ``discard`` is the way that
     does not depend on the reader.
     """
-    with _socket_file.recording(os.fspath(path)) as recorder:
-        listener = bind(path)
+    # The path is read once (os.fspath), and that one value is what is bound
+    # and remembered: a path-like object may answer differently each time.
+    spelled = os.fspath(path)
+    with _socket_file.recording(spelled) as recorder:
+        listener = bind(spelled)
     discard = recorder.discard
     if discard is None:  # every route records right after its bind
         listener.close()

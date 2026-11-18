@@ -394,6 +394,34 @@ def default_backlog() -> None:
     report(std=str(std_count), sockat=str(sockat_count))
 
 
+def deleted_cwd() -> None:
+    """With the cwd removed and $PWD unset, bind and both connects of
+    ``./`` + a long file name are ENOENT, and nothing is made in the place
+    for D (PLACE). On macOS getcwd still spells a removed cwd, so a realpath
+    that did not check each component would take that spelling for a real
+    directory."""
+    place = arg("PLACE")
+    here = os.getcwd()
+    os.rmdir(here)
+    os.environ.pop("PWD", None)
+    cfg = central_cfg((place,))
+    results: dict[str, str] = {}
+    for n in (103, DIRECT_MAX):
+        path = b"./" + b"n" * n
+        for req, what in ((BIND, "bind"), (CONNECT, "connect"), (CONNECT_NONBLOCKING, "connect_nonblocking")):
+            try:
+                if len(path) > DIRECT_MAX:
+                    _route.run_long(req, path, cfg)
+                else:
+                    _route.run(req, path)
+            except OSError as e:
+                results[f"{n}-{what}"] = str(e.errno)
+            else:
+                raise AssertionError(f"{what} of {path!r} in a removed cwd went through")
+    assert os.listdir(place) == [], os.listdir(place)
+    report(**results)
+
+
 SCENARIOS: dict[str, Callable[[], None]] = {
     f.__name__: f
     for f in (
@@ -410,6 +438,7 @@ SCENARIOS: dict[str, Callable[[], None]] = {
         bind_with_umask,
         cwd_changed,
         default_backlog,
+        deleted_cwd,
     )
 }
 
