@@ -137,7 +137,7 @@ Linux / Android と macOS / iOS。使い捨ての `threading.Thread` の cwd だ
 |---|---|
 | /proc | `/proc/self/fd/<fd>/<ファイル名>` (fd はもう閉じている) |
 | 相対パス | 相対パス |
-| 広げた sockaddr | 途中で切れたパス。macOS の CPython では、切れた後ろに無関係なバイトが付くことがある (標準の `getsockname` / `getpeername` の振る舞い。3.11〜3.15 のどれでも起き、実行ごとに変わる)。取得で例外にはならない |
+| 広げた sockaddr | 途中で切れたパス。macOS の CPython では、切れた後ろに無関係なバイトが付くことがある (標準の `getsockname` / `getpeername` の振る舞い。3.11〜3.15 のどれでも起き、実行ごとに変わる)。取得で例外にはならない ([原因](./findings/2026-11-18-cpython-getsockname-widened-sockaddr.md)) |
 | symlink | もう無い symlink を通したパス |
 | スレッド cwd、bindat | ファイル名だけ |
 

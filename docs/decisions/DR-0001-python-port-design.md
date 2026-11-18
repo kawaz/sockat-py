@@ -1,6 +1,6 @@
 # DR-0001: Python 版の作り方 (作る経路、公開 API、標準に揃える点、配布)
 
-- Status: Accepted (決定 1 の fork の行だけ [PY-Q1](../QUESTIONS.md) の裁定待ち。他は統括の判断、NUL は統括の裁定 2026-11-18)
+- Status: Accepted (fork の経路を作らないことは kawaz 裁定 2026-11-18。NUL は統括の裁定 2026-11-18。他は統括の判断)
 - Date: 2026-11-18
 
 ## Context
@@ -21,14 +21,14 @@
 | 広げた sockaddr | ctypes で libc の `bind(2)` / `connect(2)` に手で組んだ sockaddr を渡す | macOS / iOS |
 | symlink | `os.symlink` で作り、標準に渡し、消す | FreeBSD 以外 |
 | スレッド cwd | sockat が作る使い捨ての `threading.Thread` で、ctypes の `unshare(CLONE_FS)` → `os.fchdir` (Linux。seccomp の filter が掛かっていれば `unshare` を呼ばずに使えないとみなす) / `pthread_fchdir_np` (Apple) をしてから、そのスレッドでファイル名で bind / connect し、スレッドを捨てる | Linux / Android、Apple の OS |
-| fork | 作らない (PY-Q1 の推奨 a) | — |
+| fork | 作らない (kawaz 裁定) | — |
 
 - 経路の順番、使える条件、失敗をやり直さない扱い、symlink の置き場と名前は SPEC のとおり
 - posix の順の最後 (スレッド cwd の前) でディレクトリを開く。開けなければその errno (無ければ `ENOENT`)。fork の経路の場所に来たら `ENAMETOOLONG` を返す
 - スレッド cwd の経路は CPython の 1 スレッド = 1 OS スレッドに頼る。他のスレッドの `os.getcwd()` が変わらないことを macOS と Linux で確かめた
 - ctypes を使う呼び出しは `src/sockat/_sys.py` にだけ置き、最初に要った時に import する (Linux は ctypes を読み込まない)
 
-理由: Python から `os.fork()` した子は Python を実行するので、SPEC の「子の区間は async-signal-safe」を満たせない。満たすには C 拡張が要り、配布が OS × arch の wheel になる (PY-Q1)。
+理由: Python から `os.fork()` した子は Python を実行するので、SPEC の「子の区間は async-signal-safe」を満たせない。満たすには C 拡張が要り、配布が OS × arch の wheel になる。fork の経路まで進むのは、スレッド cwd の経路が使えない環境で symlink も使えない時だけなので、純 Python で 1 つの wheel にする方を取る (kawaz 裁定)。
 
 ### 2. 公開 API
 
@@ -91,7 +91,7 @@
 ## Consequences
 
 - fork の経路でしか届かない所は、bind も connect も `ENAMETOOLONG` になる。そうなるのは、スレッド cwd の経路が使えず (NetBSD / OpenBSD / illumos、seccomp の filter の下の /proc の無い Linux)、bind でファイル名が symlink の綴りに収まらないか、symlink を置ける場所が無い時。README の OS × 経路の表に「fork の経路なし」と書く
-- PY-Q1 で C 拡張を入れることになったら、決定 1 の fork の行と決定 2 の `connect_any` 系、決定 6 の配布を書き換える。経路の本体は Python のまま。`connect_any` 系は既定で import されない別のモジュール (例: `sockat.any`) に置く (ハブの DR-0007: `connect_any` 系は使う人が選んで有効にする仕組みの後ろに置く)
+- `connect_any` 系が欲しくなったら、他の言語の実装と同じく使う人が選んで有効にする別のもの (ハブの DR-0007。例: C 拡張を含む別の配布物が `sockat.any` を足す) として出す。既定の `sockat` は純 Python のまま変えない (kawaz 裁定 2026-11-18)
 - SPEC が変わったら、この実装と README / MANUAL を追従させる
 
 ## 関連

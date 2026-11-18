@@ -137,7 +137,7 @@ When a path longer than the standard library accepts is `ENAMETOOLONG` (bytes).
 |---|---|
 | /proc | `/proc/self/fd/<fd>/<file name>` (the fd is closed by then) |
 | relative path | the relative path |
-| widened sockaddr | a truncated path. On CPython for macOS, unrelated bytes may follow the cut (the behaviour of the standard library's `getsockname` / `getpeername`; seen on every version from 3.11 to 3.15, varying from run to run). Getting it never raises |
+| widened sockaddr | a truncated path. On CPython for macOS, unrelated bytes may follow the cut (the behaviour of the standard library's `getsockname` / `getpeername`; seen on every version from 3.11 to 3.15, varying from run to run). Getting it never raises ([cause, in Japanese](./findings/2026-11-18-cpython-getsockname-widened-sockaddr.md)) |
 | symlink | a path through a symlink that no longer exists |
 | thread cwd, bindat | the file name alone |
 

@@ -17,16 +17,3 @@
 </details>
 
 ## 裁定待ち
-
-### 👺PY-Q1: fork の経路のために C 拡張を入れるか
-
-- [ ] a (推奨): 入れない。純 Python + ctypes、fork の経路なし、`connect_any` 系を出さない。wheel は `py3-none-any` 1 つ
-- [ ] b: 小さな C 拡張で fork の経路を作り、`connect_any` 系も既定で import されない別のモジュール (例: `sockat.any`) に出す。OS × arch ごとの wheel (cibuildwheel)、他の Unix と PyPy は sdist からコンパイル
-
-fork の経路まで進むのは、スレッド cwd の経路 (Linux / macOS) が使えない環境 (NetBSD / OpenBSD / illumos、seccomp の filter の下の /proc の無い Linux) で、symlink も使えない時だけ。a から b への移行は機能の追加で済む (経路の本体は Python のまま)。
-
-#### 背景説明
-
-- `os.fork()` を Python から呼ぶ形は、子が Python を実行するので SPEC の「子の区間は async-signal-safe」を満たせない
-- `sys.executable` を fork+exec して子に bind させる形は、SPEC の仕組みから外れ、PyInstaller 等で固めたアプリでは `sys.executable` がアプリ本体を指す
-- PyO3 で sockat-rs を包む形は、Rust 標準のソケット設定 (`SO_NOSIGPIPE`、backlog) になり Python 標準と揃わず、経路を Python 側の試験から強制できない
