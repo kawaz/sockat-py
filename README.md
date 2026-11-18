@@ -64,6 +64,7 @@ A longer path is tried on the routes below, in this order per OS, and bound / co
 | thread cwd | a means of the central route. Only a throwaway thread moves its cwd into D (Linux / Android, macOS / iOS) |
 | bindat / connectat | a means of the central route. D's fd is passed to `bindat(2)` / `connectat(2)` (FreeBSD) |
 | /proc variant | a means of the central route. Pass `/proc/self/fd/<fd of D>/R/<file name>` (Linux / Android) |
+| form without D | binds only. When D can be created nowhere, create R (`.sockat.XXXXXXXXXX`) in the socket's directory, pass `.sockat.XXXXXXXXXX/<file name>` relative to the socket's directory with the same means, then remove R |
 | /proc | connects only. Pass `/proc/self/fd/<fd of the socket's directory>/<file name>` |
 | fd-held form | connects only. Create a symlink `s` to the socket file inside D, and pass `/proc/self/fd/<fd of D>/s` |
 | relative path | connects only. Pass the path relative to the cwd. Only the string is rewritten; the cwd is never changed |
@@ -73,14 +74,14 @@ A longer path is tried on the routes below, in this order per OS, and bound / co
 | fork | **none** (the specification's fork route is not built. Neither are the specification's `connect_any` variants) |
 
 - None of the routes changes the cwd of the calling process or thread, so they can be used from multi-threaded programs
-- A bind reaches a path at any directory depth as long as the file name is within 96 bytes (92 on macOS / FreeBSD, about 79 with the /proc variant), shorter than the standard library's limit by `R/`
+- A bind reaches a path at any directory depth as long as the file name is within 96 bytes (92 on macOS / FreeBSD, about 79 with the /proc variant), shorter than the standard library's limit by `R/`. When D can be created nowhere, the form without D reaches up to 88 bytes (84 on macOS / FreeBSD, about 72 with the /proc variant)
 - On NetBSD / OpenBSD / illumos, and where no means of the central route can be used (Linux without `/proc` under a seccomp filter, and the like), a bind of a long path gets `ENAMETOOLONG` (where the specification reaches it through the fork route; awaiting a ruling in the hub's D12-Q3)
 - A path that fits no route gets `ENAMETOOLONG` (an `OSError` with errno), as a path too long for the standard library does
 - The conditions of each route, and where a path stops being reached, are in [docs/MANUAL.md](./docs/MANUAL.md#how-a-long-path-is-reached)
 
 ## What differs from the standard library for a long path
 
-- `getsockname()` of a listener (and of an accepted socket) and `getpeername()` of a connected socket return the original path. What the kernel returns is `R/<file name>` (`/proc/self/fd/<fd>/R/<file name>` with the /proc variant; R is gone, so it names nothing), but the sockets sockat returns replace it with the original path
+- `getsockname()` of a listener (and of an accepted socket) and `getpeername()` of a connected socket return the original path. What the kernel returns is `R/<file name>` (`/proc/self/fd/<fd>/R/<file name>` with the /proc variant, R being `.sockat.XXXXXXXXXX` in the form without D; R is gone, so it names nothing), but the sockets sockat returns replace it with the original path
 - A path too long for the standard library that does not end with a name (ending in `dir/`, `dir/.`, `..`) is a `ValueError`
 - A path containing a NUL anywhere but at its start is a `ValueError` at any length (the standard library silently truncates at the NUL). On Linux a path starting with a NUL (abstract namespace) is handed to the standard library unchanged
 - If the process dies midway, `sockat.XXXXXXXXXX` may be left under `TMPDIR` or `/tmp`, and `.sockat.XXXXXXXXXX` in the socket's directory

@@ -75,7 +75,7 @@ finally:
 | macOS / iOS | [スレッド cwd](#手段) | [スレッド cwd](#手段) → [相対パス](#予備の経路) → [広げた sockaddr](#予備の経路) → [symlink](#予備の経路) |
 | NetBSD / OpenBSD / illumos / その他の Unix | なし (`ENAMETOOLONG`) | [相対パス](#予備の経路) → [symlink](#予備の経路) |
 
-- スレッド cwd・/proc 版・bindat / connectat は[中心の経路](#中心の経路)の手段
+- スレッド cwd・/proc 版・bindat / connectat は[中心の経路](#中心の経路)の手段。D をどこにも作れない時、bind は同じ手段を [D 無しの形](#d-無しの形)で試す
 - 仕様の fork の経路は作っていない。Python から fork した子は Python を実行するので、仕様が求める「子の区間は async-signal-safe」を満たせないため ([DR-0001](./decisions/DR-0001-python-port-design.md))。仕様で bind が fork に進む所は `ENAMETOOLONG` になる (ハブの D12-Q3 で裁定待ち)
 - 順番の最後まで届かなかったパスは `ENAMETOOLONG` になる
 
@@ -101,6 +101,7 @@ finally:
 
 - 置き場の安全 (sticky 等) と長さは問わない。D を fd で掴み、綴りに置き場が出ないため
 - D の開き方は、Linux が `O_PATH`、macOS が `O_SEARCH` (umask が持ち主の読み取りを削っても開ける)、他は `O_RDONLY`
+- どこにも作れない時、bind は [D 無しの形](#d-無しの形)、connect は[予備の経路](#予備の経路)に進む
 
 #### 手段
 
@@ -113,6 +114,18 @@ finally:
 
 - スレッド cwd では、プロセスの cwd も他のスレッドの cwd も変わらない。connect した相手から見える peer の pid も呼び出し元のまま
 - Linux でスレッド cwd が使えない時は、同じ D で /proc 版を試す
+
+#### D 無しの形
+
+bind だけが、D をどこにも作れない時に試す。
+
+1. ソケットのディレクトリの中に、ソケットのディレクトリの realpath を指す symlink R を、ソケットのディレクトリの fd を基準に作る。名前は `.sockat.` + 乱数 10 文字
+2. ソケットのディレクトリの fd を基準に、[手段](#手段)を同じ順 (スレッド cwd、FreeBSD は bindat → /proc 版) に使って `.sockat.XXXXXXXXXX/<ファイル名>` で bind する。スレッド cwd は使い捨てのスレッドの cwd をソケットのディレクトリに移し、/proc 版は `/proc/self/fd/<ソケットのディレクトリの fd>/.sockat.XXXXXXXXXX/<ファイル名>` を渡す
+3. 成功でも失敗でも R を消す
+
+- 綴りは 19 バイト + ファイル名。ファイル名は Linux 88、macOS / FreeBSD 84 バイトまで (/proc 版はおよそ 72)
+- ソケットのディレクトリを開けない、手段を使えない、綴りが収まらない時は、何も作らずに `ENAMETOOLONG`。R を作れない時 (名前の衝突が 16 回続いた等) も `ENAMETOOLONG`
+- D を作れて手段が全部使えなかった時は、この形を試さずに `ENAMETOOLONG`
 
 ### 予備の経路
 
@@ -133,7 +146,7 @@ connect 系だけが、中心の経路を使えない時 (手段が無い、D �
 - symlink の**安全な置き場**はディレクトリで、次のどちらか。満たさない候補には何も作らず次へ進む
   - sticky bit が立っていて、持ち主が root か自分 (`/tmp` がこれ)
   - 持ち主が自分で、group と other に書き込み権限が無い (macOS の `$TMPDIR` がこれ)
-- bind は /proc (D を通さない形)・相対パス・広げた sockaddr・置き場の symlink を使わない。綴りが後で無関係なファイルに当たるか (/proc は閉じた fd の番号の使い回し、相対パスは cwd の変化)、listener のアドレスが途中で切れて標準の `getsockname` が読み過ぎるか (広げた sockaddr)、中心の経路で足りる (symlink) ため ([DR-0004](./decisions/DR-0004-own-directory-route.md))
+- bind は /proc (R を通さない `/proc/self/fd/<fd>/<ファイル名>`)・相対パス・広げた sockaddr・置き場の symlink を使わない。綴りが後で無関係なファイルに当たるか (/proc は閉じた fd の番号の使い回し、相対パスは cwd の変化)、listener のアドレスが途中で切れて標準の `getsockname` が読み過ぎるか (広げた sockaddr)、中心の経路で足りる (symlink) ため ([DR-0004](./decisions/DR-0004-own-directory-route.md))
 
 ### 経路の失敗の扱い
 
@@ -152,7 +165,7 @@ connect 系だけが、中心の経路を使えない時 (手段が無い、D �
 | NetBSD / OpenBSD | 長いパス全部 | 相対パス > 103、symlink も使えない |
 | illumos | 長いパス全部 | 相対パス > 107、symlink も使えない |
 
-- D をどこにも作れない時、bind は長いパス全部が `ENAMETOOLONG`。connect は予備の経路の分だけ届く (fd で掴む形は使えない)
+- D をどこにも作れない時、bind は [D 無しの形](#d-無しの形)でファイル名 88 (macOS / FreeBSD 84、/proc 版だけならおよそ 72) まで届く (ソケットのディレクトリを開けて R を作れる時。手段を使えない環境は上の表と同じく届かない)。connect は予備の経路の分だけ届く (fd で掴む形は使えない)
 - symlink を使えないのは、symlink を作れる安全な置き場が無い時 (`TMPDIR` も `/tmp` も使えないサンドボックス等)
 - パス全体が `PATH_MAX` (macOS 1024、Linux 4096 バイト) を超えるパスは、どの経路でも `ENAMETOOLONG` になる (他のシステムコールでも開けないパスで、sockat の対象外)
 
@@ -178,6 +191,8 @@ connect 系だけが、中心の経路を使えない時 (手段が無い、D �
 |---|---|
 | スレッド cwd、bindat | `R/<ファイル名>` |
 | /proc 版 | `/proc/self/fd/<fd>/R/<ファイル名>` |
+| D 無しの形のスレッド cwd、bindat | `.sockat.XXXXXXXXXX/<ファイル名>` |
+| D 無しの形の /proc 版 | `/proc/self/fd/<fd>/.sockat.XXXXXXXXXX/<ファイル名>` |
 
 他のプログラムが広げた sockaddr で bind した listener (macOS の Node.js 等) に connect した時の `getpeername()` は途中で切れたパスで、macOS の CPython では切れた後ろに無関係なバイトが付くことがある (標準の `getpeername` の振る舞い。取得で例外にはならない。[原因](./findings/2026-11-18-cpython-getsockname-widened-sockaddr.md))。
 
@@ -191,7 +206,7 @@ connect 系だけが、中心の経路を使えない時 (手段が無い、D �
 
 ### ディレクトリは呼ぶ少し前に引かれる
 
-中心の経路は R を作る時にソケットのディレクトリを実パスにし、予備の経路の /proc・相対パス・connectat はディレクトリを先に引いて (開く、または実パスにする) から、ファイル名で bind / connect する。その間に途中のディレクトリが rename されたり symlink が張り替えられたりすると、引いた時点のディレクトリにソケットができる。広げた sockaddr・symlink・fd で掴む形は標準と同じに振る舞う。
+中心の経路と D 無しの形は R を作る時にソケットのディレクトリを実パスにし、予備の経路の /proc・相対パス・connectat はディレクトリを先に引いて (開く、または実パスにする) から、ファイル名で bind / connect する。その間に途中のディレクトリが rename されたり symlink が張り替えられたりすると、引いた時点のディレクトリにソケットができる。広げた sockaddr・symlink・fd で掴む形は標準と同じに振る舞う。
 
 ### 相対パスの経路は、他のスレッドの chdir に弱い
 
@@ -204,7 +219,7 @@ sockat 自身は cwd を変えない。connect の後に cwd が変わってい�
 | 場所 | 残るもの |
 |---|---|
 | 置き場 (`TMPDIR` か `/tmp`) | `sockat.XXXXXXXXXX` (D か、connect の symlink) |
-| ソケットのディレクトリ | `.sockat.XXXXXXXXXX` (D) |
+| ソケットのディレクトリ | `.sockat.XXXXXXXXXX` (D か、D 無しの形の R) |
 
 - macOS で umask が持ち主の検索権限を削っている (root 以外で 0777 / 0177 等) と、作った D を開けず、自分の物か確かめられないので消さずに残す。`O_RDONLY` で開く OS では読み取り権限で同じ
 

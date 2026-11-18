@@ -17,6 +17,6 @@ Status は各 DR ファイルの `Status:` 行が正本。
 | [DR-0001](DR-0001-python-port-design.md) | ✅ 実装済 | Python 版の作り方。純 Python + ctypes で fork 以外の経路を作る、`bind` / `bind_ex` / `connect` / `connect_nonblocking` が `socket.socket` を返す、標準に揃える点、NUL、エラーの型、Python 3.11 以上 |
 | [DR-0002](DR-0002-unsafe-base-held-by-fd.md) | ✅ 実装済 | fd で掴む形 (/proc を使える Linux の connect の予備の経路)。D の中のソケットのファイルを指す `s` を `/proc/self/fd/<D>/s` で connect する |
 | [DR-0003](DR-0003-report-the-given-path.md) | ✅ 実装済 | 長いパスのソケットはアドレスを元のパスで返す (`socket.socket` の subclass)。asyncio の後始末が短いパスと同じに動く |
-| [DR-0004](DR-0004-own-directory-route.md) | ✅ 実装済 | 中心の経路 (D を fd で掴み R を通す `R/<ファイル名>`) の Python での作り方。D の置き場と開き方、手段 (スレッド cwd / bindat / /proc 版)、中心の経路が使えない bind は `ENAMETOOLONG`、connect の予備の経路、`bind_ex` |
+| [DR-0004](DR-0004-own-directory-route.md) | ✅ 実装済 | 中心の経路 (D を fd で掴み R を通す `R/<ファイル名>`) の Python での作り方。D の置き場と開き方、手段 (スレッド cwd / bindat / /proc 版)、D をどこにも作れない bind の D 無しの形 (ソケットのディレクトリに R)、それでも届かない bind は `ENAMETOOLONG`、connect の予備の経路、`bind_ex` |
 
 振る舞いの正本はハブの [SPEC](https://github.com/kawaz/sockat/blob/main/docs/SPEC-ja.md)、経路の設計の判断はハブの [DR-0012](https://github.com/kawaz/sockat/blob/main/docs/decisions/DR-0012-own-directory-and-thread-cwd.md) にある。

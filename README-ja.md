@@ -64,6 +64,7 @@ pip install sockat
 | スレッド cwd | 中心の経路の手段。使い捨てのスレッドだけ cwd を D に移す (Linux / Android、macOS / iOS) |
 | bindat / connectat | 中心の経路の手段。`bindat(2)` / `connectat(2)` に D の fd を渡す (FreeBSD) |
 | /proc 版 | 中心の経路の手段。`/proc/self/fd/<D の fd>/R/<ファイル名>` で渡す (Linux / Android) |
+| D 無しの形 | bind だけ。D をどこにも作れない時、ソケットのディレクトリに R (`.sockat.XXXXXXXXXX`) を作り、ソケットのディレクトリを基準に同じ手段で `.sockat.XXXXXXXXXX/<ファイル名>` を渡して、R を消す |
 | /proc | connect だけ。`/proc/self/fd/<ソケットのディレクトリの fd>/<ファイル名>` で渡す |
 | fd で掴む形 | connect だけ。D の中にソケットのファイルを指す symlink `s` を作り、`/proc/self/fd/<D の fd>/s` で渡す |
 | 相対パス | connect だけ。cwd からの相対パスで渡す。文字列を書き直すだけで cwd は変えない |
@@ -73,14 +74,14 @@ pip install sockat
 | fork | **無い** (仕様の fork の経路は作っていない。仕様の `connect_any` 系も無い) |
 
 - どの経路も呼び出し元のプロセスとスレッドの cwd を変えないので、マルチスレッドのプログラムから使える
-- bind はディレクトリの深さによらず、ファイル名が 96 バイト (macOS / FreeBSD は 92、/proc 版はおよそ 79) まで届く (`R/` の分、標準より短い)
+- bind はディレクトリの深さによらず、ファイル名が 96 バイト (macOS / FreeBSD は 92、/proc 版はおよそ 79) まで届く (`R/` の分、標準より短い)。D をどこにも作れない時は D 無しの形で 88 バイト (macOS / FreeBSD は 84、/proc 版はおよそ 72) まで
 - NetBSD / OpenBSD / illumos と、中心の経路の手段を使えない環境 (seccomp の filter の下で `/proc` の無い Linux 等) では、長いパスの bind は `ENAMETOOLONG` になる (仕様では fork の経路で届く所。ハブの D12-Q3 で裁定待ち)
 - どの経路にも収まらないパスは、標準で長すぎるパスと同じく `ENAMETOOLONG` (errno 付きの `OSError`) になる
 - 各経路の条件と、どこから届かなくなるかは [docs/MANUAL-ja.md](./docs/MANUAL-ja.md#長いパスへの届き方) にある
 
 ## 長いパスで標準と違う点
 
-- listener (と accept したソケット) の `getsockname()` と、connect したソケットの `getpeername()` は元のパスを返す。カーネルが返すのは `R/<ファイル名>` (/proc 版は `/proc/self/fd/<fd>/R/<ファイル名>`。R はもう無いので何にも当たらない) だが、sockat が返すソケットはそれを元のパスに差し替える
+- listener (と accept したソケット) の `getsockname()` と、connect したソケットの `getpeername()` は元のパスを返す。カーネルが返すのは `R/<ファイル名>` (/proc 版は `/proc/self/fd/<fd>/R/<ファイル名>`、D 無しの形は R が `.sockat.XXXXXXXXXX`。R はもう無いので何にも当たらない) だが、sockat が返すソケットはそれを元のパスに差し替える
 - 標準にそのまま渡せない長さのパスで、名前で終わらないもの (`dir/`、`dir/.`、`..` で終わるもの) は `ValueError` になる
 - 先頭以外に NUL を含むパスは、長さによらず `ValueError` になる (標準は NUL で黙って切り詰める)。Linux で先頭が NUL のパス (abstract namespace) は標準にそのまま渡す
 - 途中でプロセスが死ぬと、`TMPDIR` か `/tmp` に `sockat.XXXXXXXXXX`、ソケットのディレクトリに `.sockat.XXXXXXXXXX` が残ることがある

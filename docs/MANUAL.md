@@ -75,7 +75,7 @@ For a longer path, the socket's directory is looked up first (`ENOENT` if it doe
 | macOS / iOS | [thread cwd](#means) | [thread cwd](#means) → [relative path](#fallback-routes) → [widened sockaddr](#fallback-routes) → [symlink](#fallback-routes) |
 | NetBSD / OpenBSD / illumos / other Unix | none (`ENAMETOOLONG`) | [relative path](#fallback-routes) → [symlink](#fallback-routes) |
 
-- Thread cwd, the /proc variant and bindat / connectat are the means of [the central route](#the-central-route)
+- Thread cwd, the /proc variant and bindat / connectat are the means of [the central route](#the-central-route). When D can be created nowhere, a bind tries the same means in [the form without D](#the-form-without-d)
 - The specification's fork route is not built. A child forked from Python runs Python, so it cannot satisfy the specification's requirement that the child's span be async-signal-safe ([DR-0001](./decisions/DR-0001-python-port-design.md)). Where the specification has a bind go on to fork, the bind gets `ENAMETOOLONG` (awaiting a ruling in the hub's D12-Q3)
 - A path that no route in the order reaches gets `ENAMETOOLONG`
 
@@ -101,6 +101,7 @@ For a longer path, the socket's directory is looked up first (`ENOENT` if it doe
 
 - Whether the place is safe (sticky and the like) and how long it is do not matter. D is held by its fd, and the place does not appear in the spelling
 - D is opened `O_PATH` on Linux, `O_SEARCH` on macOS (both open even when a umask took the owner's read bit off), `O_RDONLY` elsewhere
+- When D can be created nowhere, a bind goes on to [the form without D](#the-form-without-d), a connect to [the fallback routes](#fallback-routes)
 
 #### Means
 
@@ -113,6 +114,18 @@ For a longer path, the socket's directory is looked up first (`ENOENT` if it doe
 
 - With thread cwd, neither the process's cwd nor any other thread's cwd changes. The peer pid seen by the party connected to is still the caller's
 - On Linux, when thread cwd cannot be used, the /proc variant is tried with the same D
+
+#### The form without D
+
+Only a bind tries it, when D can be created nowhere.
+
+1. Inside the socket's directory, create R, a symlink pointing to the realpath of the socket's directory, relative to the fd of the socket's directory. Its name is `.sockat.` and 10 random characters
+2. Relative to the fd of the socket's directory, bind to `.sockat.XXXXXXXXXX/<file name>` with the [means](#means) in the same order (thread cwd, bindat on FreeBSD → the /proc variant). Thread cwd moves a throwaway thread's cwd into the socket's directory; the /proc variant passes `/proc/self/fd/<fd of the socket's directory>/.sockat.XXXXXXXXXX/<file name>`
+3. Remove R, on success and on failure alike
+
+- The spelling is 19 bytes plus the file name. A file name fits up to 88 bytes on Linux, 84 on macOS / FreeBSD (about 72 with the /proc variant)
+- When the socket's directory cannot be opened, no means can be used, or the spelling does not fit, nothing is created and the bind gets `ENAMETOOLONG`. So does a bind for which R cannot be created (16 name collisions in a row, and the like)
+- When D could be created but no means could be used, this form is not tried and the bind gets `ENAMETOOLONG`
 
 ### Fallback routes
 
@@ -133,7 +146,7 @@ Only connects try these, in the order per OS, when the central route cannot be u
 - **A safe place** for the symlink is a directory that is one of the following. Nothing is created in a place that is not; the next one is tried
   - sticky and owned by root or by the calling user (as `/tmp` is)
   - owned by the calling user with no write permission for group and others (as macOS's `$TMPDIR` is)
-- A bind does not use /proc (the form without D), the relative path, the widened sockaddr or a symlink in a place. Their spelling later hits an unrelated file (/proc through a reused fd number, the relative path through a changed cwd), or the listener's address is cut short and the standard library's `getsockname` reads past it (the widened sockaddr), or the central route is enough (the symlink) ([DR-0004](./decisions/DR-0004-own-directory-route.md), in Japanese)
+- A bind does not use /proc (`/proc/self/fd/<fd>/<file name>`, not through R), the relative path, the widened sockaddr or a symlink in a place. Their spelling later hits an unrelated file (/proc through a reused fd number, the relative path through a changed cwd), or the listener's address is cut short and the standard library's `getsockname` reads past it (the widened sockaddr), or the central route is enough (the symlink) ([DR-0004](./decisions/DR-0004-own-directory-route.md), in Japanese)
 
 ### How a failing route is treated
 
@@ -152,7 +165,7 @@ When a path longer than the standard library accepts is `ENAMETOOLONG` (given th
 | NetBSD / OpenBSD | every long path | relative path > 103, and the symlink route cannot be used |
 | illumos | every long path | relative path > 107, and the symlink route cannot be used |
 
-- When D can be created nowhere, a bind gets `ENAMETOOLONG` for every long path. A connect gets as far as the fallback routes reach (the fd-held form cannot be used)
+- When D can be created nowhere, a bind reaches a file name of up to 88 bytes (84 on macOS / FreeBSD, about 72 with the /proc variant alone) through [the form without D](#the-form-without-d) (when the socket's directory can be opened and R created in it; where no means can be used, nothing is reached, as in the table above). A connect gets as far as the fallback routes reach (the fd-held form cannot be used)
 - The symlink route cannot be used when there is no safe place where the symlink can be created (a sandbox where neither `TMPDIR` nor `/tmp` can be used, and the like)
 - A path longer than `PATH_MAX` as a whole (1024 bytes on macOS, 4096 on Linux) is `ENAMETOOLONG` on every route (no other system call opens it either; it is outside what sockat handles)
 
@@ -178,6 +191,8 @@ The spellings the kernel reports are as follows (visible by calling the standard
 |---|---|
 | thread cwd, bindat | `R/<file name>` |
 | /proc variant | `/proc/self/fd/<fd>/R/<file name>` |
+| thread cwd, bindat in the form without D | `.sockat.XXXXXXXXXX/<file name>` |
+| /proc variant in the form without D | `/proc/self/fd/<fd>/.sockat.XXXXXXXXXX/<file name>` |
 
 The `getpeername()` of a connect to a listener that another program bound with a widened sockaddr (Node.js on macOS, for example) is a truncated path, and on CPython for macOS unrelated bytes may follow the cut (the behaviour of the standard library's `getpeername`; getting it never raises; [cause, in Japanese](./findings/2026-11-18-cpython-getsockname-widened-sockaddr.md)).
 
@@ -191,7 +206,7 @@ A path containing a NUL anywhere but at its start gets a `ValueError` at any len
 
 ### The directory is looked up slightly before the call
 
-The central route resolves the socket's directory to a real path when it creates R, and the /proc, relative path and connectat fallback routes look the directory up first (open it, or resolve it to a real path), then bind / connect by the file name. If a directory along the path is renamed, or a symlink along it repointed, in between, the socket is created in the directory as it was when looked up. The widened sockaddr, symlink and fd-held routes behave as the standard library does.
+The central route and the form without D resolve the socket's directory to a real path when they create R, and the /proc, relative path and connectat fallback routes look the directory up first (open it, or resolve it to a real path), then bind / connect by the file name. If a directory along the path is renamed, or a symlink along it repointed, in between, the socket is created in the directory as it was when looked up. The widened sockaddr, symlink and fd-held routes behave as the standard library does.
 
 ### The relative route is exposed to another thread's chdir
 
@@ -204,7 +219,7 @@ If the process dies between creating and removing them, the following are left.
 | Where | What is left |
 |---|---|
 | the place (`TMPDIR` or `/tmp`) | `sockat.XXXXXXXXXX` (D, or a connect's symlink) |
-| the socket's directory | `.sockat.XXXXXXXXXX` (D) |
+| the socket's directory | `.sockat.XXXXXXXXXX` (D, or R of the form without D) |
 
 - On macOS, when a umask takes the owner's search bit off (0777 / 0177 and the like, for a user other than root), the D just created cannot be opened and cannot be told to be ours, so it is left in place. On the OSes that open it `O_RDONLY`, the same happens with the read bit
 
