@@ -69,8 +69,6 @@ class Route(Enum):
     """The relative spelling in a widened ``sockaddr_un`` (Apple)."""
     SYMLINK_TO_DIR = "symlink-to-dir"
     """Through a short temporary symlink to the socket's directory (bind)."""
-    SYMLINK_TO_DIR_WIDE = "symlink-to-dir-wide"
-    """:attr:`SYMLINK_TO_DIR` in a widened ``sockaddr_un`` (Apple)."""
     SYMLINK_TO_FILE = "symlink-to-file"
     """Through a short temporary symlink to the socket file itself (connect)."""
     SYMLINK_TO_FILE_WIDE = "symlink-to-file-wide"
@@ -352,8 +350,12 @@ def posix_run(
 
     1. the path spelled relative to the cwd, when that is at most
        :data:`DIRECT_MAX` bytes;
-    2. (Apple) a widened ``sockaddr_un`` with the path itself, or failing that
-       with the relative spelling, when one of them is at most 253 bytes;
+    2. (Apple, connects only) a widened ``sockaddr_un`` with the path itself,
+       or failing that with the relative spelling, when one of them is at most
+       253 bytes. A bind never takes the widened form, on this or any later
+       route (hub DR-0009): it would leave an address over 104 bytes on the
+       listener, which the socket module's ``getsockname`` reads past the end
+       of (unrelated bytes follow) and asyncio's server cleanup stats;
     3. a short symlink (:func:`symlink_route`: to the socket's directory for a
        bind, to the socket file for a connect) under the first of
        :attr:`Config.tmp_bases` where the path through it fits and the symlink
@@ -379,7 +381,10 @@ def posix_run(
     if rel is not None and len(rel.path) <= DIRECT_MAX:
         return rel.run(lambda p: plain_op(req, p)), Route.RELATIVE
 
-    wide = IS_APPLE and cfg.wide
+    # Apple: a bind never takes the widened sockaddr (hub DR-0009): the address
+    # it leaves on the listener would be over 104 bytes, which the socket
+    # module reads past the end of sun_path (getsockname), and asyncio stats.
+    wide = IS_APPLE and cfg.wide and req.op is Op.CONNECT
     if wide:
         try:
             if len(path) <= WIDE_PATH_MAX:
@@ -678,7 +683,7 @@ def symlink_route(
     against the cwd), so the kernel resolves them as it resolves ``path``.
 
     Used when the spelling is at most ``limit`` bytes (:data:`DIRECT_MAX` for
-    the plain sockaddr, or on Apple the widened form's 253) and ``base`` is a
+    the plain sockaddr, or for a connect on Apple the widened form's 253) and ``base`` is a
     place where nobody else can replace the symlink (:func:`safe_base`). Both
     are checked before anything is created. Nothing is left under ``base``:
     the symlink is removed when this returns, whatever the outcome.
@@ -700,12 +705,14 @@ def symlink_route(
         return Skip.UNUSABLE
     with link:
         if to_file:
-            via, plain_route, wide_route = link.path, Route.SYMLINK_TO_FILE, Route.SYMLINK_TO_FILE_WIDE
+            via, plain_route = link.path, Route.SYMLINK_TO_FILE
         else:
-            via, plain_route, wide_route = _join(link.path, name), Route.SYMLINK_TO_DIR, Route.SYMLINK_TO_DIR_WIDE
+            via, plain_route = _join(link.path, name), Route.SYMLINK_TO_DIR
+        # Only a connect gets a ``limit`` over DIRECT_MAX (posix_run): a bind
+        # never takes the widened sockaddr.
         if IS_APPLE and len(via) > DIRECT_MAX:
             try:
-                return wide_op(req, via), wide_route
+                return wide_op(req, via), Route.SYMLINK_TO_FILE_WIDE
             except OSError as e:
                 if refuses_wide(e):
                     return Skip.WIDE_REFUSED
