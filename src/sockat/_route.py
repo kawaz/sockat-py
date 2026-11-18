@@ -16,8 +16,8 @@ import sys
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from enum import Enum
-from typing import Literal, TypeAlias
+from enum import Enum, StrEnum
+from typing import Literal, NamedTuple, TypeAlias
 
 from . import _path, _socket_file
 from ._sockets import PathSocket
@@ -50,62 +50,109 @@ class Request:
     once: Linux answers ``EAGAIN``, macOS ``ECONNREFUSED``. A Unix-domain
     connect completes or fails within the call even on a nonblocking socket
     (neither Linux nor XNU answers ``EINPROGRESS``)."""
+    at_any_cost: bool = False
+    """Reach the path even by losing something (``bind_any``, the SPEC's any
+    operations): where every route of the default bind is unusable (and it
+    would answer ``ENAMETOOLONG``), the bind goes on to the symlink route
+    (:func:`bind_symlink_route`)."""
 
 
 BIND = Request(Op.BIND)
+BIND_ANY = Request(Op.BIND, at_any_cost=True)
 CONNECT = Request(Op.CONNECT)
 CONNECT_NONBLOCKING = Request(Op.CONNECT, nonblocking=True)
 
 
 class Route(Enum):
-    """Which way a bind / connect went. The public API does not show it."""
+    """Which route a bind / connect went by, named as the SPEC names it (its
+    "route names"; the value is that name). For diagnosis only: the routes
+    may be added to or changed. Only ``bind_any`` shows it (the value)."""
 
-    DIRECT = "direct"
+    STANDARD = "standard"
     """The path itself, through the ``socket`` module."""
     THREAD_CWD = "thread-cwd"
-    """The central route: ``R/<name>`` from a throwaway thread whose own cwd
-    is the private directory D (Linux, Apple)."""
+    """``R/<name>`` from a throwaway thread whose own cwd is the private
+    directory D (Linux, Apple)."""
     AT = "at"
-    """The central route: ``bindat(2)`` / ``connectat(2)`` of ``R/<name>`` on
-    the fd of D (FreeBSD)."""
-    PROC_OWN_DIR = "proc-own-dir"
-    """The central route through /proc: ``/proc/self/fd/<fd of D>/R/<name>``,
+    """``bindat(2)`` / ``connectat(2)`` of ``R/<name>`` on the fd of D
+    (FreeBSD)."""
+    PROC = "proc"
+    """``/proc/self/fd/<fd of D>/R/<name>``, through the ``socket`` module
+    (Linux)."""
+    FORK = "fork"
+    """The SPEC's fork route of a bind, which this implementation does not
+    have (DR-0001): only ever noted as skipped."""
+    THREAD_CWD_SOCKDIR = "thread-cwd-sockdir"
+    """A bind's form without D, where D could be made nowhere:
+    ``.sockat.XXXXXXXXXX/<name>`` (R in the socket's directory) from a
+    throwaway thread whose own cwd is the socket's directory (Linux,
+    Apple)."""
+    AT_SOCKDIR = "at-sockdir"
+    """A bind's form without D: ``bindat(2)`` of
+    ``.sockat.XXXXXXXXXX/<name>`` on the fd of the socket's directory
+    (FreeBSD)."""
+    PROC_SOCKDIR = "proc-sockdir"
+    """A bind's form without D through /proc:
+    ``/proc/self/fd/<fd of the socket's directory>/.sockat.XXXXXXXXXX/<name>``,
     through the ``socket`` module (Linux)."""
-    PROC_FD = "proc-fd"
+    FORK_SOCKDIR = "fork-sockdir"
+    """The SPEC's fork route in the form without D, which this
+    implementation does not have: only ever noted as skipped."""
+    PROC_DIRECT = "proc-direct"
     """A connect's fallback: ``/proc/self/fd/<fd of the socket's
     directory>/<name>``, through the ``socket`` module (Linux)."""
-    FD_HELD = "fd-held"
+    PROC_HELD = "proc-held"
     """A connect's fallback: ``/proc/self/fd/<fd of D>/s``, ``s`` a symlink
     to the socket file (Linux)."""
     RELATIVE = "relative"
     """A connect's fallback: the path spelled relative to the cwd, through
     the ``socket`` module."""
-    WIDE = "wide"
-    """A connect's fallback: the path itself in a widened ``sockaddr_un``
-    (Apple)."""
-    WIDE_RELATIVE = "wide-relative"
-    """A connect's fallback: the relative spelling in a widened
-    ``sockaddr_un`` (Apple)."""
-    SYMLINK_TO_FILE = "symlink-to-file"
-    """A connect's fallback: a short temporary symlink to the socket file."""
-    SYMLINK_TO_FILE_WIDE = "symlink-to-file-wide"
-    """:attr:`SYMLINK_TO_FILE` in a widened ``sockaddr_un`` (Apple)."""
-    AT_DIR = "at-dir"
+    WIDENED = "widened"
+    """A connect's fallback: the path itself, or else its relative spelling,
+    in a widened ``sockaddr_un`` (Apple)."""
+    SYMLINK = "symlink"
+    """A short temporary symlink in a place for it: a connect's fallback
+    through ``<place>/sockat.XXXXXXXXXX`` pointing to the socket file (in a
+    widened ``sockaddr_un`` on Apple when the spelling needs it), or the
+    last route of ``bind_any`` through ``<place>/sockat.XXXXXXXXXX/<name>``
+    pointing to the socket's directory."""
+    AT_DIRECT = "at-direct"
     """A connect's fallback: ``connectat(2)`` of the file name on the fd of
     the socket's directory (FreeBSD)."""
-    THREAD_CWD_WITHOUT_D = "thread-cwd-without-d"
-    """A bind's form without D, where D could be made nowhere:
-    ``.sockat.XXXXXXXXXX/<name>`` (R in the socket's directory) from a
-    throwaway thread whose own cwd is the socket's directory (Linux,
-    Apple)."""
-    AT_WITHOUT_D = "at-without-d"
-    """A bind's form without D: ``bindat(2)`` of
-    ``.sockat.XXXXXXXXXX/<name>`` on the fd of the socket's directory
-    (FreeBSD)."""
-    PROC_WITHOUT_D = "proc-without-d"
-    """A bind's form without D through /proc:
-    ``/proc/self/fd/<fd of the socket's directory>/.sockat.XXXXXXXXXX/<name>``,
-    through the ``socket`` module (Linux)."""
+
+
+class Loss(StrEnum):
+    """One thing a route loses compared with the standard (the SPEC's "what
+    is lost"); a call reports every one its route loses, in no order of
+    size. The string of a value (``str()``, ``.value``) is the SPEC's name.
+
+    The names are promised and only ever added to: read a name you do not
+    know as "something was lost"."""
+
+    RESPELLED = "respelled"
+    """The address the kernel reports is not the path given (sockat's
+    listener reports the path all the same), so whatever removes the socket
+    file by the kernel's address does not remove it: remove it by the path
+    given. The spelling's random part is gone, so it names nothing as a
+    rule, but the spelling may be seen by other users (Linux's
+    ``/proc/net/unix``): where the process's cwd is a place others can write
+    to, one of them can recreate it, and removing a file by it may then
+    remove a file of the same name in a directory of their choosing."""
+    FORKED = "forked"
+    """The side effects of a fork (the SPEC's fork routes). This
+    implementation has no fork route, so it never reports this."""
+    CWD_RELATIVE = "cwd-relative"
+    """The spelling the kernel keeps is relative to the cwd (a relative path
+    went to the ``socket`` module as it is): once the cwd changes, removing
+    or looking up a file by it reaches another place. A danger of the
+    standard's own rather than one a route brings, reported all the same.
+    Remove the socket file by the path given made absolute."""
+    RECREATABLE_SPELLING = "recreatable-spelling"
+    """The spelling the kernel reports goes through a shared place (a sticky
+    one such as ``/tmp``): its name is random, but other users can see it
+    once bound (Linux's ``/proc/net/unix``) and recreate it, and removing a
+    file by it may then remove a file of the same name in a directory of
+    their choosing. Remove the socket file by the path given."""
 
 
 class SocketDir(Enum):
@@ -148,6 +195,11 @@ class Config:
     link_places: tuple[bytes, ...]
     """Where a connect's temporary symlink may go, in the order tried:
     ``TMPDIR`` when it is set to an absolute path, then ``/tmp``."""
+    bind_link_places: tuple[bytes, ...] = ()
+    """Where ``bind_any``'s temporary symlink may go, the candidates in the
+    order given: ``XDG_RUNTIME_DIR`` and ``TMPDIR`` when they are set to an
+    absolute path, then ``/tmp``, each spelling once. Which of them are
+    tried first is decided by what they are (:func:`bind_symlink_route`)."""
     wide: bool = IS_APPLE
     """Whether a connect tries the widened ``sockaddr_un`` at all (Apple).
     The tests turn it off to stand in for a kernel that refuses the widened
@@ -156,17 +208,18 @@ class Config:
     """Where the kernel lists the fds of the process (Linux). The tests point
     it elsewhere to stand in for a system without /proc."""
     thread_cwd: bool = HAS_THREAD_CWD
-    """Whether the central route tries a thread's own cwd at all (Linux,
+    """Whether the routes through D try a thread's own cwd at all (Linux,
     Apple). The tests turn it off to stand in for a system where it cannot be
     used."""
 
     @classmethod
     def from_env(cls) -> Config:
-        return cls.from_tmpdir(os.environb.get(b"TMPDIR"))
+        return cls.from_tmpdir(os.environb.get(b"TMPDIR"), os.environb.get(b"XDG_RUNTIME_DIR"))
 
     @classmethod
-    def from_tmpdir(cls, tmpdir: bytes | None) -> Config:
-        """The configuration for a ``TMPDIR`` of ``tmpdir``.
+    def from_tmpdir(cls, tmpdir: bytes | None, xdg_runtime_dir: bytes | None = None) -> Config:
+        """The configuration for a ``TMPDIR`` of ``tmpdir`` (and an
+        ``XDG_RUNTIME_DIR`` of ``xdg_runtime_dir``).
 
         Places for D: ``${TMPDIR:-/tmp}`` (unset or empty: ``/tmp``; a
         relative one is opened against the cwd once and held by its fd),
@@ -175,22 +228,78 @@ class Config:
 
         Places for a connect's symlink: ``TMPDIR`` when it is absolute and
         not ``/tmp`` itself (a relative one would make the link's place
-        depend on the cwd), then ``/tmp``."""
+        depend on the cwd), then ``/tmp``.
+
+        Places for ``bind_any``'s symlink: ``XDG_RUNTIME_DIR``, then
+        ``TMPDIR``, when absolute, then ``/tmp``; a place spelled as an
+        earlier one is left out."""
         first = tmpdir or b"/tmp"
         own: list[OwnDirPlace] = [first]
         if not _same_spelling(first, b"/tmp"):
             own.append(b"/tmp")
         own.append(SOCKET_DIR)
-        links: list[bytes] = []
-        if tmpdir and tmpdir.startswith(b"/") and not _same_spelling(tmpdir, b"/tmp"):
-            links.append(tmpdir)
-        links.append(b"/tmp")
-        return cls(own_dir_places=tuple(own), link_places=tuple(links))
+        return cls(
+            own_dir_places=tuple(own),
+            link_places=_link_places(tmpdir),
+            bind_link_places=_link_places(xdg_runtime_dir, tmpdir),
+        )
+
+
+def _link_places(*env: bytes | None) -> tuple[bytes, ...]:
+    """The places for a temporary symlink: each of ``env`` that is an
+    absolute path (a relative one would make the link's place depend on the
+    cwd), in order, then ``/tmp``, leaving out one spelled as ``/tmp`` or as
+    an earlier one."""
+    places: list[bytes] = []
+    for place in env:
+        if place and place.startswith(b"/") and not any(_same_spelling(place, p) for p in (*places, b"/tmp")):
+            places.append(place)
+    places.append(b"/tmp")
+    return tuple(places)
+
+
+class Trail:
+    """The routes tried and found unusable, in order, each with why (a short
+    phrase, for diagnosis), and the route being tried now: the one whose
+    bind / connect failed when the call raises."""
+
+    def __init__(self) -> None:
+        self.skipped: list[tuple[Route, str]] = []
+        self.trying: Route | None = None
+
+    def skip(self, route: Route, why: str) -> None:
+        """Note ``route`` as unusable for ``why``."""
+        self.skipped.append((route, why))
+        self.trying = None
+
+    def attempt(self, route: Route) -> None:
+        """Note that ``route`` is being tried (its bind / connect runs)."""
+        self.trying = route
+
+
+class Reached(NamedTuple):
+    """How a bind / connect went through: the socket, the route it went by,
+    what that route lost (the bind's; a connect loses nothing on these
+    routes), and the routes tried before it that could not be used, in
+    order, each with why. The connect's fallbacks are not noted (there is no
+    ``connect_any`` here to report them)."""
+
+    sock: socket.socket
+    route: Route
+    losses: tuple[Loss, ...]
+    skipped: tuple[tuple[Route, str], ...]
 
 
 def run(req: Request, path: StrOrBytesPath) -> tuple[socket.socket, Route]:
+    """:func:`reach`'s socket and route."""
+    sock, route, _, _ = reach(req, path, Trail())
+    return sock, route
+
+
+def reach(req: Request, path: StrOrBytesPath, trail: Trail) -> Reached:
     """Bind (and listen) or connect a stream socket to ``path``, trying the
-    routes in order.
+    routes in order, noting them in ``trail`` (which tells, when this raises,
+    what was skipped and which route failed).
 
     A path the ``socket`` module takes (at most :data:`DIRECT_MAX` bytes) goes
     to it as is, before anything else is looked at (the environment included).
@@ -202,12 +311,15 @@ def run(req: Request, path: StrOrBytesPath) -> tuple[socket.socket, Route]:
     """
     spelled = os.fspath(path)
     raw = os.fsencode(spelled)
-    if IS_LINUX and raw.startswith(b"\0"):
-        return plain_op(req, spelled, standard=True), Route.DIRECT
-    check_no_nul(raw)
-    if len(raw) <= DIRECT_MAX:
-        return plain_op(req, spelled, standard=True), Route.DIRECT
-    return run_long(req, raw, Config.from_env())
+    abstract = IS_LINUX and raw.startswith(b"\0")
+    if not abstract:
+        check_no_nul(raw)
+    if abstract or len(raw) <= DIRECT_MAX:
+        trail.attempt(Route.STANDARD)
+        sock = plain_op(req, spelled, standard=True)
+        relative = req.op is Op.BIND and not abstract and not raw.startswith(b"/")
+        return Reached(sock, Route.STANDARD, (Loss.CWD_RELATIVE,) if relative else (), ())
+    return reach_long(req, raw, Config.from_env(), trail)
 
 
 def check_no_nul(path: bytes) -> None:
@@ -217,17 +329,23 @@ def check_no_nul(path: bytes) -> None:
 
 
 def run_long(req: Request, path: bytes, cfg: Config) -> tuple[socket.socket, Route]:
+    """:func:`reach_long`'s socket and route."""
+    sock, route, _, _ = reach_long(req, path, cfg, Trail())
+    return sock, route
+
+
+def reach_long(req: Request, path: bytes, cfg: Config, trail: Trail) -> Reached:
     """:func:`routes` for a path longer than :data:`DIRECT_MAX`, with the
     socket made to report ``path`` (decoded as the ``socket`` module decodes
     a pathname) as the listener's address or the stream's peer's, rather than
     the spelling the route handed to the kernel (DR-0003)."""
-    sock, route = routes(req, path, cfg)
-    if isinstance(sock, PathSocket):
-        sock.report_path(os.fsdecode(path), listening=req.op is Op.BIND)
-    return sock, route
+    done = routes(req, path, cfg, trail)
+    if isinstance(done.sock, PathSocket):
+        done.sock.report_path(os.fsdecode(path), listening=req.op is Op.BIND)
+    return done
 
 
-def routes(req: Request, path: bytes, cfg: Config) -> tuple[socket.socket, Route]:
+def routes(req: Request, path: bytes, cfg: Config, trail: Trail) -> Reached:
     """The routes for a path longer than :data:`DIRECT_MAX`, with what they
     read from the environment given as ``cfg`` (the tests pass their own):
 
@@ -237,13 +355,20 @@ def routes(req: Request, path: bytes, cfg: Config) -> tuple[socket.socket, Route
        ``connectat``, D in the socket's directory); when it cannot be opened
        (no read permission where it is opened ``O_RDONLY``), those routes
        cannot be used and the others are tried;
-    2. the central route (:func:`central_route`): a private directory D,
+    2. the routes through D (:func:`through_d`): a private directory D,
        reached by its fd through a thread's own cwd (Linux, Apple) or
        ``bindat`` / ``connectat`` (FreeBSD), then through /proc (Linux);
-    3. where it cannot be used: a bind goes on to :func:`bind_without_central`
-       (the form without D where D could be made nowhere), a connect takes
-       its fallbacks (:func:`connect_fallbacks`).
+    3. where they cannot be used: a bind goes on to :func:`bind_past_d`
+       (the form without D where D could be made nowhere, and for
+       ``bind_any`` the symlink route), a connect takes its fallbacks
+       (:func:`connect_fallbacks`).
+
+    A bind through any of them loses :attr:`Loss.RESPELLED` (``bind_any``'s
+    symlink in a shared place :attr:`Loss.RECREATABLE_SPELLING` too); a
+    connect loses nothing. The routes are noted in ``trail`` from the
+    standard on (it takes no path this long).
     """
+    trail.skip(Route.STANDARD, "path too long")
     check_no_nul(path)
     directory, name = _path.split(path)
     st = os.stat(directory)
@@ -251,7 +376,7 @@ def routes(req: Request, path: bytes, cfg: Config) -> tuple[socket.socket, Route
         raise NotADirectoryError(errno.ENOTDIR, os.strerror(errno.ENOTDIR), os.fsdecode(directory))
     # The realpath R will point to, taken here so that a failure to resolve it
     # is the error it is, before any length is judged (SPEC), rather than the
-    # central route quietly counting as unusable and ending in ENAMETOOLONG.
+    # routes through D quietly counting as unusable and ending in ENAMETOOLONG.
     real_dir = os.fsencode(os.path.realpath(directory, strict=True))
     dirfd: int | None
     try:
@@ -260,12 +385,14 @@ def routes(req: Request, path: bytes, cfg: Config) -> tuple[socket.socket, Route
         dirfd = None
     try:
         proc_ok = IS_LINUX and proc_usable(dirfd, cfg.proc_self_fd)
-        done = central_route(req, real_dir, name, dirfd, cfg, proc_ok=proc_ok)
+        done = through_d(req, real_dir, name, dirfd, cfg, proc_ok=proc_ok, trail=trail)
         if isinstance(done, tuple):
-            return done
+            losses = (Loss.RESPELLED,) if req.op is Op.BIND else ()
+            return Reached(*done, losses, tuple(trail.skipped))
         if req.op is Op.BIND:
-            return bind_without_central(req, real_dir, name, dirfd, cfg, proc_ok=proc_ok, why=done)
-        return connect_fallbacks(req, path, directory, name, dirfd, cfg, proc_ok=proc_ok)
+            return bind_past_d(req, real_dir, name, dirfd, cfg, proc_ok=proc_ok, why=done, trail=trail)
+        sock, route = connect_fallbacks(req, path, directory, name, dirfd, cfg, proc_ok=proc_ok)
+        return Reached(sock, route, (), tuple(trail.skipped))
     finally:
         if dirfd is not None:
             os.close(dirfd)
@@ -287,23 +414,40 @@ def proc_usable(dirfd: int | None, proc_self_fd: bytes) -> bool:
         os.close(probe)
 
 
-def bind_without_central(
-    req: Request, real_dir: bytes, name: bytes, dirfd: int | None, cfg: Config, *, proc_ok: bool, why: Skip
-) -> tuple[socket.socket, Route]:
-    """A bind the central route did not carry (``why``, from
-    :func:`central_route`). Where D could be made nowhere
+def bind_past_d(
+    req: Request,
+    real_dir: bytes,
+    name: bytes,
+    dirfd: int | None,
+    cfg: Config,
+    *,
+    proc_ok: bool,
+    why: Skip,
+    trail: Trail,
+) -> Reached:
+    """A bind the routes through D did not carry (``why``, from
+    :func:`through_d`). Where D could be made nowhere
     (:attr:`Skip.NO_OWN_DIR`), the SPEC's form without D is tried first
-    (:func:`bind_without_own_dir`). Past that, and where D could be made but
-    no means carried the bind, the SPEC tries the fork route, which this
-    implementation does not have (DR-0001): what a plain bind of a path longer
-    than ``sun_path`` answers, ``ENAMETOOLONG``.
-
-    Kept as one function so that what Python does in the fork route's place
-    can be decided in one spot (hub QUESTIONS D12-Q3)."""
+    (:func:`bind_sockdir`). Past that, and where D could be made but no means
+    carried the bind, the SPEC tries the fork routes, which this
+    implementation does not have (DR-0001): the default bind answers what a
+    plain bind of a path longer than ``sun_path`` answers, ``ENAMETOOLONG``
+    (hub QUESTIONS D12-Q3), and ``bind_any`` (``req.at_any_cost``) goes on to
+    the symlink route (:func:`bind_symlink_route`), whose ``ENAMETOOLONG``
+    ends it where no place carries it either."""
+    trail.skip(Route.FORK, NO_FORK)
     if why is Skip.NO_OWN_DIR:
-        done = bind_without_own_dir(req, real_dir, name, dirfd, cfg, proc_ok=proc_ok)
+        done = bind_sockdir(req, real_dir, name, dirfd, cfg, proc_ok=proc_ok, trail=trail)
         if done is not None:
-            return done
+            return Reached(*done, (Loss.RESPELLED,), tuple(trail.skipped))
+        trail.skip(Route.FORK_SOCKDIR, NO_FORK)
+    if req.at_any_cost:
+        trail.attempt(Route.SYMLINK)
+        done_any = bind_symlink_route(req, real_dir, name, cfg.bind_link_places)
+        if done_any is not None:
+            sock, losses = done_any
+            return Reached(sock, Route.SYMLINK, losses, tuple(trail.skipped))
+        trail.trying = None
     raise _enametoolong()
 
 
@@ -470,7 +614,7 @@ random name from 62^10 possibilities, so exhausting this means something
 other than bad luck (for example a place that refuses every name)."""
 
 IN_OWN_DIR_LEN = RANDOM_LEN + 1
-"""What ``R/`` adds in front of the file name in the central route's
+"""What ``R/`` adds in front of the file name in the D routes'
 spelling (``R/<name>``)."""
 
 WITHOUT_OWN_DIR_LEN = len(OWN_DIR_PREFIX_IN_SOCKET_DIR) + RANDOM_LEN + 1
@@ -551,7 +695,7 @@ class OwnDir:
         proc_self_fd: bytes,
         link_name: bytes | None,
     ) -> OwnDir | None:
-        """The SPEC's steps 1 to 3 of the central route in one place, with
+        """The SPEC's steps 1 to 3 of the routes through D in one place, with
         step 5 for whatever was made when a later step fails:
 
         1. open the place (or use the socket's directory's fd) and make D in
@@ -562,10 +706,12 @@ class OwnDir:
            owner bits off; :func:`set_own_dir_mode`);
         3. create the symlink in D, by its fd.
 
-        ``None`` when any step fails. A D that could not be opened or failed
-        the check may be someone else's (put at the name before the open), so
-        it is left alone, contents and all; one that passed the check but
-        could not be set to 0700 or given the symlink is removed again."""
+        ``None`` when any step fails. A D that failed the check may be
+        someone else's (put at the name before the open), so it is left
+        alone, contents and all; one that passed the check but could not be
+        set to 0700 or given the symlink is removed again. One that could not
+        be opened is removed when its name passes the same check
+        (:func:`_remove_unopened_own_dir`)."""
         if place is SOCKET_DIR:
             if socket_dirfd is None:
                 # The socket's directory could not be opened: no place.
@@ -585,6 +731,7 @@ class OwnDir:
             try:
                 fd = open_own_dir(base_fd, name)
             except OSError:
+                _remove_unopened_own_dir(base_fd, name)
                 return None
             verified = False
             try:
@@ -671,6 +818,20 @@ def _remove_own_dir(base_fd: int, name: bytes, fd: int, *, verified: bool) -> No
     os.close(fd)
 
 
+def _remove_unopened_own_dir(base_fd: int, name: bytes) -> None:
+    """Remove D (``name`` in ``base_fd``) just made but not opened (a umask
+    took the owner's search bit off where D is opened ``O_SEARCH``, or the
+    read bit where it is opened ``O_RDONLY``) when what is at the name passes
+    the check of an opened D (:func:`_owner_only`, looked up without
+    following a symlink): otherwise one D would be left in the place per
+    call. Something put at the name between the check and the removal is
+    removed only when it is an empty directory (``rmdir``). Failures to
+    remove are ignored."""
+    with contextlib.suppress(OSError):
+        if _owner_only(os.stat(name, dir_fd=base_fd, follow_symlinks=False)):
+            os.rmdir(name, dir_fd=base_fd)
+
+
 def open_own_dir(base_fd: int, name: bytes) -> int:
     """Open D (``name`` in ``base_fd``), not following a symlink at the name,
     in a way that needs no read permission on D where the system has one (so
@@ -724,7 +885,7 @@ def set_own_dir_mode(fd: int, base_fd: int, name: bytes, proc_self_fd: bytes) ->
         os.close(again)
 
 
-# ---------- the central route ----------
+# ---------- the routes through D ----------
 
 
 class Skip(Enum):
@@ -734,7 +895,7 @@ class Skip(Enum):
     """The route could not be used (too long, nothing to hold, the means
     refused)."""
     NO_OWN_DIR = "no-own-dir"
-    """The central route had a means to try, but D could be made in none of
+    """The routes through D had a means to try, but D could be made in none of
     the places (a bind then tries the form without D)."""
     WIDE_REFUSED = "wide-refused"
     """The spelling needed the widened form and the kernel refused it
@@ -749,94 +910,158 @@ class Means(Enum):
     PROC = "proc"
 
 
-def central_means(name: bytes, dirfd: int | None, cfg: Config, *, proc_ok: bool) -> list[Means]:
-    """The means of the central route that can be tried for ``name``
-    (:func:`means_for` of ``R/<name>``), in order, judged as far as they can
-    be before D is made (SPEC: nothing is made for means that cannot be
-    used)."""
+THROUGH_D = {Means.THREAD_CWD: Route.THREAD_CWD, Means.AT: Route.AT, Means.PROC: Route.PROC}
+"""The route each means makes with D."""
+
+SOCKDIR = {Means.THREAD_CWD: Route.THREAD_CWD_SOCKDIR, Means.AT: Route.AT_SOCKDIR, Means.PROC: Route.PROC_SOCKDIR}
+"""The route each means makes in the form without D."""
+
+TOO_LONG = "spelling too long"
+NO_PLACE_FOR_D = "no place for D"
+NO_FORK = "no fork route in sockat-py"
+
+
+def means_through_d(name: bytes, dirfd: int | None, cfg: Config, *, proc_ok: bool) -> list[tuple[Means, str | None]]:
+    """The means of the routes through D for ``name`` (:func:`judge_means`
+    of ``R/<name>``), judged as far as they can be before D is made (SPEC:
+    nothing is made for means that cannot be used)."""
     # D's fd is not known before D is opened; the socket directory's (or a
     # two-digit one when that is not open) stands in for /proc, and the exact
     # length is checked again with D's own fd.
-    return means_for(b"R" * RANDOM_LEN + b"/" + name, dirfd if dirfd is not None else 10, cfg, proc_ok=proc_ok)
+    return judge_means(b"R" * RANDOM_LEN + b"/" + name, dirfd if dirfd is not None else 10, cfg, proc_ok=proc_ok)
 
 
-def means_for(spelling: bytes, fd: int, cfg: Config, *, proc_ok: bool) -> list[Means]:
-    """The means that can be tried for ``spelling`` handed over relative to
-    a directory held by the fd numbered ``fd``, in order:
+def judge_means(spelling: bytes, fd: int, cfg: Config, *, proc_ok: bool) -> list[tuple[Means, str | None]]:
+    """Every means this system has, in order, each with ``None`` when it can
+    be tried for ``spelling`` handed over relative to a directory held by the
+    fd numbered ``fd``, or else why not (a short phrase, for diagnosis):
 
     * FreeBSD: ``bindat`` / ``connectat``, when ``spelling`` fits a sockaddr;
-    * Linux, Apple: a thread's own cwd, when it is not turned off, the
-      system may give one (:func:`._sys.thread_cwd_possible`) and
-      ``spelling`` fits a sockaddr;
+    * Linux, Apple: a thread's own cwd, when ``spelling`` fits a sockaddr,
+      it is not turned off and the system may give one
+      (:func:`._sys.thread_cwd_possible`);
     * Linux: /proc, when it can be used and ``/proc/self/fd/<fd>/<spelling>``
       fits a sockaddr.
     """
     fits = len(spelling) <= DIRECT_MAX
-    means: list[Means] = []
     if IS_FREEBSD:
-        if fits:
-            means.append(Means.AT)
-        return means
-    if fits and cfg.thread_cwd and HAS_THREAD_CWD and thread_cwd_possible():
-        means.append(Means.THREAD_CWD)
-    if proc_ok and len(_join(_join(cfg.proc_self_fd, str(fd).encode()), spelling)) <= DIRECT_MAX:
-        means.append(Means.PROC)
-    return means
+        return [(Means.AT, None if fits else TOO_LONG)]
+    judged: list[tuple[Means, str | None]] = []
+    if HAS_THREAD_CWD:
+        why: str | None = None
+        if not fits:
+            why = TOO_LONG
+        elif not cfg.thread_cwd:
+            why = "thread cwd turned off"
+        elif not thread_cwd_possible():
+            why = "seccomp filter" if IS_LINUX else "no pthread_fchdir_np"
+        judged.append((Means.THREAD_CWD, why))
+    if IS_LINUX:
+        if not proc_ok:
+            judged.append((Means.PROC, "/proc unusable"))
+        elif len(_join(_join(cfg.proc_self_fd, str(fd).encode()), spelling)) > DIRECT_MAX:
+            judged.append((Means.PROC, TOO_LONG))
+        else:
+            judged.append((Means.PROC, None))
+    return judged
 
 
-def central_route(
-    req: Request, real_dir: bytes, name: bytes, dirfd: int | None, cfg: Config, *, proc_ok: bool
+def means_for(spelling: bytes, fd: int, cfg: Config, *, proc_ok: bool) -> list[Means]:
+    """The means of :func:`judge_means` that can be tried, in order."""
+    return [m for m, why in judge_means(spelling, fd, cfg, proc_ok=proc_ok) if why is None]
+
+
+def _note_all(judged: list[tuple[Means, str | None]], routes_of: dict[Means, Route], why: str, trail: Trail) -> None:
+    """Note every judged means as skipped: an unusable one for its own
+    reason, a usable one for ``why`` (what stopped it before it was
+    tried)."""
+    for m, own in judged:
+        trail.skip(routes_of[m], own if own is not None else why)
+
+
+def _by_means(
+    req: Request,
+    judged: list[tuple[Means, str | None]],
+    routes_of: dict[Means, Route],
+    base_fd: int,
+    spelling: bytes,
+    cfg: Config,
+    trail: Trail,
+) -> tuple[socket.socket, Route] | None:
+    """Bind / connect ``spelling`` relative to the directory ``base_fd`` by
+    the first of the ``judged`` means that carries it, in order (each makes
+    the route ``routes_of`` names); every means before it is noted in
+    ``trail`` with why it was skipped. ``None`` when none carries it. A
+    failure of the bind / connect itself is the outcome and is raised."""
+    for m, why in judged:
+        route = routes_of[m]
+        if why is not None:
+            trail.skip(route, why)
+        elif m is Means.AT:
+            trail.attempt(route)
+            return at_op(req, base_fd, spelling), route
+        elif m is Means.THREAD_CWD:
+            trail.attempt(route)
+            done = thread_cwd_op(req, base_fd, spelling)
+            if isinstance(done, socket.socket):
+                return done, route
+            trail.skip(route, "thread cwd refused")
+        else:
+            via = proc_spelling(base_fd, spelling, cfg.proc_self_fd)
+            if via is None:
+                trail.skip(route, TOO_LONG if proc_fd_dir(base_fd, cfg.proc_self_fd) is not None else "/proc unusable")
+                continue
+            trail.attempt(route)
+            return plain_op(req, via), route
+    return None
+
+
+def through_d(
+    req: Request, real_dir: bytes, name: bytes, dirfd: int | None, cfg: Config, *, proc_ok: bool, trail: Trail
 ) -> tuple[socket.socket, Route] | Skip:
-    """The central route (SPEC): D in the first of
+    """The routes through D (SPEC): D in the first of
     :attr:`Config.own_dir_places` where it can be made (:class:`OwnDir`),
     holding R, a symlink to ``real_dir`` (the realpath of the socket's
     directory, taken by :func:`routes`), and the
     bind / connect of ``R/<name>`` from D's fd by the first means that can be
-    used (:func:`central_means`). D and R are removed again whatever the
+    used (:func:`means_through_d`). D and R are removed again whatever the
     outcome, so the spelling the kernel keeps (``R/<name>``) names nothing
-    afterwards, from any cwd.
+    afterwards, from any cwd. Each route that did not carry it is noted in
+    ``trail``.
 
     Nothing is left behind when it does not carry the call:
     :attr:`Skip.NO_OWN_DIR` when D can be made nowhere,
     :attr:`Skip.UNUSABLE` when no means can be used (nothing is made) or
     every means turned out unusable once tried. A failure of the bind /
     connect itself is the outcome and is raised."""
-    means = central_means(name, dirfd, cfg, proc_ok=proc_ok)
-    if not means:
+    judged = means_through_d(name, dirfd, cfg, proc_ok=proc_ok)
+    if all(why is not None for _, why in judged):
+        _note_all(judged, THROUGH_D, "", trail)
         return Skip.UNUSABLE
     own = OwnDir.make(cfg.own_dir_places, dirfd, real_dir, proc_self_fd=cfg.proc_self_fd)
     if own is None:
+        _note_all(judged, THROUGH_D, NO_PLACE_FOR_D, trail)
         return Skip.NO_OWN_DIR
     try:
-        spelling = own.link + b"/" + name
-        for m in means:
-            if m is Means.AT:
-                return at_op(req, own.fd, spelling), Route.AT
-            if m is Means.THREAD_CWD:
-                done = thread_cwd_op(req, own.fd, spelling)
-                if isinstance(done, socket.socket):
-                    return done, Route.THREAD_CWD
-            else:
-                via = proc_spelling(own.fd, spelling, cfg.proc_self_fd)
-                if via is not None:
-                    return plain_op(req, via), Route.PROC_OWN_DIR
-        return Skip.UNUSABLE
+        done = _by_means(req, judged, THROUGH_D, own.fd, own.link + b"/" + name, cfg, trail)
+        return Skip.UNUSABLE if done is None else done
     finally:
         own.remove()
 
 
-def bind_without_own_dir(
-    req: Request, real_dir: bytes, name: bytes, dirfd: int | None, cfg: Config, *, proc_ok: bool
+def bind_sockdir(
+    req: Request, real_dir: bytes, name: bytes, dirfd: int | None, cfg: Config, *, proc_ok: bool, trail: Trail
 ) -> tuple[socket.socket, Route] | None:
     """The SPEC's form without D, for a bind where D could be made nowhere:
     R (``.sockat.`` and :data:`RANDOM_LEN` letters or digits, a symlink to
     ``real_dir``, the realpath of the socket's directory) made in the
     socket's directory itself through its fd ``dirfd`` (``EEXIST``: another
     name, up to :data:`ATTEMPTS`), and the bind of ``R/<name>`` from that fd
-    by the central route's means in their order: a thread's own cwd (Linux,
-    Apple) or ``bindat`` (FreeBSD), then
+    by the means of the routes through D in their order: a thread's own cwd
+    (Linux, Apple) or ``bindat`` (FreeBSD), then
     ``/proc/self/fd/<dirfd>/R/<name>`` (Linux). R is removed again whatever
     the outcome, so the spelling the kernel keeps names nothing afterwards.
+    Each route that did not carry it is noted in ``trail``.
 
     ``None`` when the form cannot be used: the socket's directory could not
     be opened, no means can be used for the spelling (19 bytes and the file
@@ -844,29 +1069,21 @@ def bind_without_own_dir(
     through /proc), both checked before anything is made; R cannot be
     created; or every means turned out unusable once tried. A failure of the
     bind itself is the outcome and is raised."""
-    if dirfd is None:
-        return None
     sample = OWN_DIR_PREFIX_IN_SOCKET_DIR + b"R" * RANDOM_LEN + b"/" + name
-    means = means_for(sample, dirfd, cfg, proc_ok=proc_ok)
-    if not means:
+    if dirfd is None:
+        judged = judge_means(sample, 10, cfg, proc_ok=proc_ok)
+        _note_all([(m, None) for m, _ in judged], SOCKDIR, "socket directory not opened", trail)
+        return None
+    judged = judge_means(sample, dirfd, cfg, proc_ok=proc_ok)
+    if all(why is not None for _, why in judged):
+        _note_all(judged, SOCKDIR, "", trail)
         return None
     link = _make_link(dirfd, real_dir, lambda: random_name(OWN_DIR_PREFIX_IN_SOCKET_DIR))
     if link is None:
+        _note_all(judged, SOCKDIR, "R not created", trail)
         return None
     try:
-        spelling = link + b"/" + name
-        for m in means:
-            if m is Means.AT:
-                return at_op(req, dirfd, spelling), Route.AT_WITHOUT_D
-            if m is Means.THREAD_CWD:
-                done = thread_cwd_op(req, dirfd, spelling)
-                if isinstance(done, socket.socket):
-                    return done, Route.THREAD_CWD_WITHOUT_D
-            else:
-                via = proc_spelling(dirfd, spelling, cfg.proc_self_fd)
-                if via is not None:
-                    return plain_op(req, via), Route.PROC_WITHOUT_D
-        return None
+        return _by_means(req, judged, SOCKDIR, dirfd, link + b"/" + name, cfg, trail)
     finally:
         with contextlib.suppress(OSError):
             os.unlink(link, dir_fd=dirfd)
@@ -952,14 +1169,14 @@ def connect_fallbacks(
     *,
     proc_ok: bool,
 ) -> tuple[socket.socket, Route]:
-    """A connect the central route did not carry, by the SPEC's fallbacks
+    """A connect the routes through D did not carry, by the SPEC's fallbacks
     for this system, in order:
 
     ================================ =========================================
     system                           order
     ================================ =========================================
     FreeBSD                          connectat of the file name on ``dirfd``
-    Linux with /proc (``proc_ok``)   /proc → fd-held → symlink
+    Linux with /proc (``proc_ok``)   /proc → proc-held → symlink
     Apple                            relative → widened sockaddr → symlink
     every other system               relative → symlink
     ================================ =========================================
@@ -973,13 +1190,13 @@ def connect_fallbacks(
     if IS_FREEBSD:
         if dirfd is None:
             raise _enametoolong()
-        return at_op(req, dirfd, name), Route.AT_DIR
+        return at_op(req, dirfd, name), Route.AT_DIRECT
     wide = IS_APPLE and cfg.wide
     if proc_ok:
         via = proc_spelling(dirfd, name, cfg.proc_self_fd) if dirfd is not None else None
         if via is not None:
-            return plain_op(req, via), Route.PROC_FD
-        held = fd_held_route(req, path, dirfd, cfg)
+            return plain_op(req, via), Route.PROC_DIRECT
+        held = proc_held_route(req, path, dirfd, cfg)
         if isinstance(held, tuple):
             return held
     else:
@@ -989,9 +1206,9 @@ def connect_fallbacks(
         if wide:
             try:
                 if len(path) <= WIDE_PATH_MAX:
-                    return wide_op(req, path), Route.WIDE
+                    return wide_op(req, path), Route.WIDENED
                 if rel is not None and len(rel.path) <= WIDE_PATH_MAX:
-                    return rel.run(lambda p: wide_op(req, p)), Route.WIDE_RELATIVE
+                    return rel.run(lambda p: wide_op(req, p)), Route.WIDENED
             except OSError as e:
                 if not refuses_wide(e):
                     raise
@@ -1016,8 +1233,8 @@ def _absolute(path: bytes) -> bytes | None:
         return None
 
 
-def fd_held_route(req: Request, path: bytes, dirfd: int | None, cfg: Config) -> tuple[socket.socket, Route] | Skip:
-    """Connect to ``path`` through D (made as the central route makes it, in
+def proc_held_route(req: Request, path: bytes, dirfd: int | None, cfg: Config) -> tuple[socket.socket, Route] | Skip:
+    """Connect to ``path`` through D (made as the routes through D make it, in
     the first of :attr:`Config.own_dir_places` where it can be, steps 1, 2
     and 5) holding ``s``, a symlink to the socket file (``path`` made
     absolute), by ``/proc/self/fd/<fd of D>/s`` (Linux with /proc).
@@ -1037,7 +1254,7 @@ def fd_held_route(req: Request, path: bytes, dirfd: int | None, cfg: Config) -> 
         via = proc_spelling(own.fd, own.link, cfg.proc_self_fd)
         if via is None:
             return Skip.UNUSABLE
-        return plain_op(req, via), Route.FD_HELD
+        return plain_op(req, via), Route.PROC_HELD
     finally:
         own.remove()
 
@@ -1164,15 +1381,15 @@ class Relative:
         return result
 
 
-# ---------- the symlink fallback ----------
+# ---------- the symlink route ----------
 
 
 def symlink_route(req: Request, base: bytes, path: bytes, limit: int) -> tuple[socket.socket, Route] | Skip:
-    """Connect to ``path`` through a symlink ``<base>/sockat.XXXXXXXXXX`` to
-    the socket file (``path`` made absolute against the cwd, so the kernel
-    resolves the link as it resolves ``path``). A connect follows a symlink
-    in the last component, so the spelling's length depends on neither the
-    directory nor the file name.
+    """A connect's symlink route: connect to ``path`` through a symlink
+    ``<base>/sockat.XXXXXXXXXX`` to the socket file (``path`` made absolute
+    against the cwd, so the kernel resolves the link as it resolves
+    ``path``). A connect follows a symlink in the last component, so the
+    spelling's length depends on neither the directory nor the file name.
 
     Used when the spelling is at most ``limit`` bytes (:data:`DIRECT_MAX` for
     the plain sockaddr, on Apple the widened form's 253) and ``base`` is a
@@ -1192,42 +1409,100 @@ def symlink_route(req: Request, base: bytes, path: bytes, limit: int) -> tuple[s
     with link:
         if IS_APPLE and len(link.path) > DIRECT_MAX:
             try:
-                return wide_op(req, link.path), Route.SYMLINK_TO_FILE_WIDE
+                return wide_op(req, link.path), Route.SYMLINK
             except OSError as e:
                 if refuses_wide(e):
                     return Skip.WIDE_REFUSED
                 raise
-        return plain_op(req, link.path), Route.SYMLINK_TO_FILE
+        return plain_op(req, link.path), Route.SYMLINK
 
 
-def safe_base(base: bytes) -> bool:
-    """Whether ``base``, followed through symlinks (macOS's ``/tmp`` is one to
-    ``/private/tmp``), is a directory where no other user (root aside) can
-    remove or rename an entry, so the symlink cannot be replaced between its
-    creation and the connect through it (:func:`only_we_can_replace`).
-    ``False`` when it cannot be looked up or is not a directory."""
+def bind_symlink_route(
+    req: Request, real_dir: bytes, name: bytes, places: tuple[bytes, ...]
+) -> tuple[socket.socket, tuple[Loss, ...]] | None:
+    """``bind_any``'s symlink route, its last: bind ``<place>/sockat.XXXXXXXXXX/<name>``
+    through a symlink to ``real_dir`` (the realpath of the socket's
+    directory) made in one of ``places`` and removed again whatever the
+    outcome.
+
+    Every place only we can write to (:attr:`PlaceKind.OWN`) is tried
+    before any shared one (:attr:`PlaceKind.SHARED`), each kind in the order
+    of ``places``; a place of neither kind is not used. Before anything is
+    made in a place, the spelling is checked to fit the plain sockaddr (a
+    bind never takes the widened one); a place where the symlink cannot be
+    created is passed over. A failure of the bind itself is the outcome and
+    is raised.
+
+    Returns the listener and what was lost: :attr:`Loss.RESPELLED` through a
+    place of our own (nobody else can make the spelling name anything once
+    the symlink is gone), and :attr:`Loss.RECREATABLE_SPELLING` too through
+    a shared one. ``None`` when no place carries the bind."""
+    own_only: tuple[Loss, ...] = (Loss.RESPELLED,)
+    shared: tuple[Loss, ...] = (Loss.RESPELLED, Loss.RECREATABLE_SPELLING)
+    kinds = [(place, place_kind(place)) for place in places]
+    ordered = [(place, own_only) for place, kind in kinds if kind is PlaceKind.OWN]
+    ordered += [(place, shared) for place, kind in kinds if kind is PlaceKind.SHARED]
+    for place, losses in ordered:
+        if len(_join(_join(place, OWN_DIR_PREFIX + b"X" * RANDOM_LEN), name)) > DIRECT_MAX:
+            continue
+        try:
+            link = TempLink.create(place, real_dir)
+        except (OSError, NotImplementedError):
+            continue
+        with link:
+            return plain_op(req, _join(link.path, name)), losses
+    return None
+
+
+class PlaceKind(Enum):
+    """What a place for a temporary symlink is, for who can replace the
+    entries made there (:func:`place_kind_of`)."""
+
+    OWN = "own"
+    """Owned by us with no write permission for group and others
+    (``mode & 0o022 == 0``, as a private ``TMPDIR`` or ``XDG_RUNTIME_DIR``
+    is): nobody else can create, remove or rename entries there at all."""
+    SHARED = "shared"
+    """Sticky (``S_ISVTX``, as ``/tmp`` is) and owned by root or us: an entry
+    can then be removed or renamed only by its owner, the directory's owner
+    and root, but anyone may create one at a name not taken."""
+
+
+def place_kind(base: bytes) -> PlaceKind | None:
+    """What ``base`` is as a place for a temporary symlink, followed through
+    symlinks (macOS's ``/tmp`` is one to ``/private/tmp``); ``None`` when it
+    is of neither kind, cannot be looked up or is not a directory."""
     try:
         st = os.stat(base)
     except OSError:
-        return False
-    return stat.S_ISDIR(st.st_mode) and only_we_can_replace(st.st_mode, st.st_uid, os.geteuid())
+        return None
+    if not stat.S_ISDIR(st.st_mode):
+        return None
+    return place_kind_of(st.st_mode, st.st_uid, os.geteuid())
+
+
+def place_kind_of(mode: int, owner: int, us: int) -> PlaceKind | None:
+    """What a directory of ``mode`` owned by ``owner`` is to the user ``us``
+    (:class:`PlaceKind`): :attr:`PlaceKind.OWN` where it is both."""
+    if owner == us and mode & 0o022 == 0:
+        return PlaceKind.OWN
+    if mode & stat.S_ISVTX and owner in (us, 0):
+        return PlaceKind.SHARED
+    return None
+
+
+def safe_base(base: bytes) -> bool:
+    """Whether ``base`` is a place where no other user (root aside) can
+    remove or rename an entry (:func:`place_kind`), so the connect's symlink
+    cannot be replaced between its creation and the connect through it."""
+    return place_kind(base) is not None
 
 
 def only_we_can_replace(mode: int, owner: int, us: int) -> bool:
     """Whether, in a directory of ``mode`` owned by ``owner``, only the user
-    ``us`` and root can remove or rename the entries ``us`` creates:
-
-    * **sticky** (``S_ISVTX``, as ``/tmp`` is) **and owned by root or us**: an
-      entry can then be removed or renamed only by its owner, the directory's
-      owner and root;
-    * **owned by us with no write permission for group and others**
-      (``mode & 0o022 == 0``, as a private ``TMPDIR`` is): nobody else can
-      create, remove or rename entries there at all.
-    """
-    sticky = 0o1000
-    group_or_other_write = 0o022
-    ours = owner in (us, 0)
-    return (bool(mode & sticky) and ours) or (owner == us and mode & group_or_other_write == 0)
+    ``us`` and root can remove or rename the entries ``us`` creates (either
+    :class:`PlaceKind`)."""
+    return place_kind_of(mode, owner, us) is not None
 
 
 class TempLink:
