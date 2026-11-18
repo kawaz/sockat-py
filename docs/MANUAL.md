@@ -93,7 +93,7 @@ A symlink `sockat.XXXXXXXXXX` (10 random characters) is created in a temporary d
 - **A safe place** is one of the following. Nothing is created in a place that is not safe; the next one is tried (except for the fd-held form below)
   - sticky and owned by root or by the calling user (as `/tmp` is)
   - owned by the calling user with no write permission for group and others (as macOS's `$TMPDIR` is)
-- **The fd-held form** (connects on Linux with `/proc` only): in a place that is not safe, a directory `sockat.XXXXXXXXXX` of mode 0700 is created, opened `O_DIRECTORY | O_NOFOLLOW` and checked for its owner and mode; inside it, through that fd, a symlink `s` to the socket file is created, and the connect goes to `/proc/self/fd/<fd>/s`. The directory is reached by its fd, not its name, so another user replacing it changes nothing. `s` and the directory are removed afterwards
+- **The fd-held form** (connects on Linux with `/proc` only): in a place that is not safe, a directory `sockat.XXXXXXXXXX` of mode 0700 is created, opened `O_PATH | O_DIRECTORY | O_NOFOLLOW` and checked to be owned by the calling user with no permission for group and others; inside it, through that fd, a symlink `s` to the socket file is created, and the connect goes to `/proc/self/fd/<fd>/s`. The directory is reached by its fd, not its name, so another user replacing it changes nothing. `s` and the directory are removed afterwards
 - The places are tried in the order `TMPDIR` (a symlink if it is safe, the fd-held form if not), then `/tmp` (the same)
 
 #### thread cwd

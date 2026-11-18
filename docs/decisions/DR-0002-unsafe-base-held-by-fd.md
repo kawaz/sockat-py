@@ -12,21 +12,24 @@
 
 | 手順 | Python での作り方 |
 |---|---|
+| /proc を確かめる | 何かを作る前に、置き場を `O_PATH \| O_DIRECTORY` で開いた fd の `/proc/self/fd/<fd>` を引けるか確かめる。引けなければ何も作らず次の候補へ |
 | ディレクトリを作る | `os.mkdir(<置き場>/sockat.XXXXXXXXXX, 0o700)`。名前と衝突の扱いは symlink と同じ (`FileExistsError` で引き直し、16 回で打ち切り) |
-| 開いて確かめる | `os.open(..., O_RDONLY \| O_DIRECTORY \| O_NOFOLLOW)` の fd を `os.fstat` し、ディレクトリ・持ち主が `os.geteuid()`・`S_IMODE == 0o700` を確かめる |
+| 開いて確かめる | `os.open(..., O_PATH \| O_DIRECTORY \| O_NOFOLLOW)` の fd を `os.fstat` し、ディレクトリ・持ち主が `os.geteuid()`・group と other に権限が無い (`mode & 0o077 == 0`) を確かめ、通ったら `os.chmod("/proc/self/fd/<fd>", 0o700)` で持ち主のビットをそろえる |
 | symlink | `os.symlink(<元のパス>, "s", dir_fd=fd)` |
 | connect | `/proc/self/fd/<fd>/s` を標準の `connect` に渡す |
-| 片付け | `os.unlink("s", dir_fd=fd)`。名前を `os.lstat` した `(st_dev, st_ino)` が fd と一致する時だけ `os.rmdir`。fd を閉じる |
+| 片付け | 自分が作った `s` だけ `os.unlink("s", dir_fd=fd)` (差し替えられた他人のディレクトリの `s` は消さない)。名前を `os.lstat` した `(st_dev, st_ino)` が fd と一致する時だけ `os.rmdir`。fd を閉じる |
 
 - 使うのは `/proc` を使える (ディレクトリの fd の `/proc/self/fd/<fd>` を引ける) Linux の connect 系だけ。`run_long` が /proc の経路のために開いたディレクトリの fd でこれを確かめ、`posix_run` に渡す
 - 置き場の候補ごとに、安全なら symlink の経路、安全でなければこの形を試す (`TMPDIR` → `/tmp`)
 - 開けなかった時は、名前の先が自分の作ったものか分からないので消さずに残す
-- umask が持ち主の権限を落とすと mode が 0700 にならず、確かめが通らないので使えないとみなす (作ったディレクトリは消す)
+- umask が持ち主の権限を削っても (0477 等で読み取りまで削っても)、`O_PATH` は読み取り権限なしで開け、確かめるのは group と other だけなので通り、0700 に戻す (umask の環境で毎回使えずに残骸が溜まらないように)。`O_PATH` の fd には `fchmod` ができないので、fd が指す実体に効く `/proc/self/fd/<fd>` の綴りで `chmod` する。`os.symlink` / `os.unlink` の `dir_fd` は `O_PATH` の fd で使える
 
 ## Alternatives Considered
 
-- 案 A: 作った後に `os.chmod` で 0700 にしてから確かめる
-  - 不採用理由: 作ってから chmod するまでの間に名前が差し替えられうる。確かめは開いた fd の `fstat` で行い、umask の影響は使えない時として扱う
+- 案 A: 作った後に名前で `os.chmod` してから確かめる
+  - 不採用理由: 作ってから chmod するまでの間に名前が差し替えられうる。mode を直すのは確かめた後の fd が指す実体に対して (`/proc/self/fd/<fd>`) 行う
+- 案 B: `O_RDONLY` で開いて `fchmod` する
+  - 不採用理由: umask が持ち主の読み取りまで削ると、非 root では開けず (`EACCES`)、作ったディレクトリが残る
 
 ## Consequences
 

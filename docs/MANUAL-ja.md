@@ -93,7 +93,7 @@ macOS / iOS。XNU は `sun_path` が 104 バイトを超えるアドレスも、
 - **安全な置き場**は次のどちらか。満たさない候補には何も作らず次へ進む (下の fd で掴む形を除く)
   - sticky bit が立っていて、持ち主が root か自分 (`/tmp` がこれ)
   - 持ち主が自分で、group と other に書き込み権限が無い (macOS の `$TMPDIR` がこれ)
-- **fd で掴む形** (`/proc` を使える Linux の connect だけ): 安全でない候補には、mode 0700 のディレクトリ `sockat.XXXXXXXXXX` を作り、`O_DIRECTORY | O_NOFOLLOW` で開いて持ち主と mode を確かめ、その fd の中にソケットのファイルを指す symlink `s` を作って `/proc/self/fd/<fd>/s` で connect する。名前でなく fd で辿るので、他人がディレクトリを差し替えても影響しない。終わったら `s` とディレクトリを消す
+- **fd で掴む形** (`/proc` を使える Linux の connect だけ): 安全でない候補には、mode 0700 のディレクトリ `sockat.XXXXXXXXXX` を作り、`O_PATH | O_DIRECTORY | O_NOFOLLOW` で開いて持ち主が自分で group と other に権限が無いことを確かめ、その fd の中にソケットのファイルを指す symlink `s` を作って `/proc/self/fd/<fd>/s` で connect する。名前でなく fd で辿るので、他人がディレクトリを差し替えても影響しない。終わったら `s` とディレクトリを消す
 - 試す順は `TMPDIR` (安全なら symlink、安全でなければ fd で掴む形)、`/tmp` (同じ)
 
 #### スレッド cwd
