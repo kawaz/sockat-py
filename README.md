@@ -63,7 +63,7 @@ A longer path is tried on the routes below, in this order per OS, and bound / co
 | bindat | `bindat(2)` / `connectat(2)`, by the file name relative to the directory fd |
 | relative path | pass the path relative to the cwd. Only the string is rewritten; the cwd is never changed |
 | widened sockaddr | pass a sockaddr carrying up to 253 bytes, which the macOS kernel accepts |
-| symlink | create a short symlink under `TMPDIR` or `/tmp`, go through it, and remove it at once. It is created only in a place where no other user can replace it |
+| symlink | create a short symlink under `TMPDIR` or `/tmp`, go through it, and remove it at once. It is created only in a place where no other user can replace it. A connect on Linux with `/proc` also uses a place that is not safe, through a private directory created there and held by its fd |
 | thread cwd | move the cwd of a throwaway thread alone into the directory and pass the file name. The process's cwd is never changed |
 | fork | **none** (the specification's fork route is not built. Neither are the specification's `connect_any` variants) |
 

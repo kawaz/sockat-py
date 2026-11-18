@@ -23,7 +23,7 @@
 | スレッド cwd | sockat が作る使い捨ての `threading.Thread` で、ctypes の `unshare(CLONE_FS)` → `os.fchdir` (Linux。seccomp の filter が掛かっていれば `unshare` を呼ばずに使えないとみなす) / `pthread_fchdir_np` (Apple) をしてから、そのスレッドでファイル名で bind / connect し、スレッドを捨てる | Linux / Android、Apple の OS |
 | fork | 作らない (kawaz 裁定) | — |
 
-- 経路の順番、使える条件、失敗をやり直さない扱い、symlink の置き場と名前は SPEC のとおり
+- 経路の順番、使える条件、失敗をやり直さない扱い、symlink の置き場と名前は SPEC のとおり。安全でない置き場を fd で掴む形 (Linux の connect) は [DR-0002](DR-0002-unsafe-base-held-by-fd.md)
 - posix の順の最後 (スレッド cwd の前) でディレクトリを開く。開けなければその errno (無ければ `ENOENT`)。fork の経路の場所に来たら `ENAMETOOLONG` を返す
 - スレッド cwd の経路は CPython の 1 スレッド = 1 OS スレッドに頼る。他のスレッドの `os.getcwd()` が変わらないことを macOS と Linux で確かめた
 - ctypes を使う呼び出しは `src/sockat/_sys.py` にだけ置き、最初に要った時に import する (Linux は ctypes を読み込まない)

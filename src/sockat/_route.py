@@ -10,6 +10,7 @@ import errno
 import os
 import secrets
 import socket
+import stat
 import sys
 import threading
 from collections.abc import Callable
@@ -76,6 +77,10 @@ class Route(Enum):
     """:attr:`SYMLINK_TO_FILE` in a widened ``sockaddr_un`` (Apple)."""
     AT = "at"
     """``bindat(2)`` / ``connectat(2)`` on the directory fd (FreeBSD)."""
+    FD_HELD = "fd-held"
+    """Through a symlink to the socket file inside a private directory made
+    under an unsafe place and reached by its fd,
+    ``/proc/self/fd/<fd>/s`` (Linux, connect)."""
     THREAD_CWD = "thread-cwd"
     """The file name, from a throwaway thread whose own cwd is the directory
     (Linux, Apple)."""
@@ -168,10 +173,11 @@ def run_long(req: Request, path: bytes, cfg: Config) -> tuple[socket.socket, Rou
     if IS_LINUX:
         dirfd = open_dir(directory)
         try:
+            proc_ok = proc_fd_dir(dirfd, cfg.proc_self_fd) is not None
             via = proc_spelling(dirfd, name, cfg.proc_self_fd)
             if via is not None:
                 return plain_op(req, via), Route.PROC_FD
-            return posix_run(req, path, directory, name, dirfd, cfg)
+            return posix_run(req, path, directory, name, dirfd, cfg, proc_ok=proc_ok)
         finally:
             os.close(dirfd)
     return posix_run(req, path, directory, name, None, cfg)
@@ -281,6 +287,17 @@ def search_or_read_only(directory: bytes, search: Callable[[], int]) -> int:
         raise
 
 
+def proc_fd_dir(fd: int, proc_self_fd: bytes) -> bytes | None:
+    """``<proc_self_fd>/<fd>``, or ``None`` when it cannot be looked up (no
+    /proc mounted, as in some chroots and minimal containers)."""
+    fd_dir = _join(proc_self_fd, str(fd).encode())
+    try:
+        os.stat(fd_dir)
+    except OSError:
+        return None
+    return fd_dir
+
+
 def proc_spelling(dirfd: int, name: bytes, proc_self_fd: bytes) -> bytes | None:
     """``<proc_self_fd>/<dirfd>/<name>``, or ``None`` when the /proc route
     cannot be used (Linux):
@@ -291,10 +308,8 @@ def proc_spelling(dirfd: int, name: bytes, proc_self_fd: bytes) -> bytes | None:
     * the spelling does not fit ``sun_path`` (a file name of about 90 bytes or
       more).
     """
-    fd_dir = _join(proc_self_fd, str(dirfd).encode())
-    try:
-        os.stat(fd_dir)
-    except OSError:
+    fd_dir = proc_fd_dir(dirfd, proc_self_fd)
+    if fd_dir is None:
         return None
     via = _join(fd_dir, name)
     return via if len(via) <= DIRECT_MAX else None
@@ -329,6 +344,8 @@ def posix_run(
     name: bytes,
     opened: int | None,
     cfg: Config,
+    *,
+    proc_ok: bool = False,
 ) -> tuple[socket.socket, Route]:
     """Try, in order, for a path longer than :data:`DIRECT_MAX` whose
     directory part is ``directory`` and file name ``name``:
@@ -340,7 +357,9 @@ def posix_run(
     3. a short symlink (:func:`symlink_route`: to the socket's directory for a
        bind, to the socket file for a connect) under the first of
        :attr:`Config.tmp_bases` where the path through it fits and the symlink
-       can be created;
+       can be created. A place that is not safe is skipped, except for a
+       connect on Linux with /proc (``proc_ok``), which holds a private
+       directory made there by its fd (:func:`fd_held_route`);
     4. (Linux, Apple) the file name from a throwaway thread whose own cwd is
        the directory (:func:`thread_cwd_op`);
     5. the place of the fork route, which this implementation does not have
@@ -374,7 +393,11 @@ def posix_run(
 
     for base in cfg.tmp_bases:
         limit = WIDE_PATH_MAX if wide else DIRECT_MAX
-        outcome = symlink_route(req, base, path, directory, name, limit)
+        outcome: tuple[socket.socket, Route] | Skip
+        if proc_ok and req.op is Op.CONNECT and not safe_base(base):
+            outcome = fd_held_route(req, base, path, cfg.proc_self_fd)
+        else:
+            outcome = symlink_route(req, base, path, directory, name, limit)
         if isinstance(outcome, tuple):
             return outcome
         if outcome is Skip.WIDE_REFUSED:
@@ -688,6 +711,84 @@ def symlink_route(
                     return Skip.WIDE_REFUSED
                 raise
         return plain_op(req, via), plain_route
+
+
+def fd_held_route(
+    req: Request,
+    base: bytes,
+    path: bytes,
+    proc_self_fd: bytes,
+    make_dir: Callable[[bytes, int], None] = os.mkdir,
+) -> tuple[socket.socket, Route] | Skip:
+    """Connect to ``path`` through a place ``base`` that is not safe (others
+    may rename or replace entries there), on Linux with /proc: make a private
+    directory ``<base>/sockat.XXXXXXXXXX`` (mode 0700), open it ``O_DIRECTORY
+    | O_NOFOLLOW`` and confirm by ``fstat`` that the fd is a directory owned
+    by the effective uid with mode 0700, create inside it, by the fd, a
+    symlink ``s`` to the socket file, and connect to
+    ``/proc/self/fd/<fd>/s``.
+
+    The directory is reached by its fd, not its name, so renaming or
+    replacing the name in ``base`` afterwards changes nothing; a replacement
+    between creating and opening it is caught by the ``fstat`` check.
+
+    :attr:`Skip.UNUSABLE`, after removing what was made, when the directory
+    cannot be made (a name free after :attr:`TempLink.ATTEMPTS` tries, a
+    writable base), the opened fd fails the check, or the symlink cannot be
+    created. The outcome of the connect is returned as it is. Whatever the
+    outcome, ``s`` is removed through the fd, and the directory only while
+    its name still refers to the fd's directory. ``make_dir`` is a parameter
+    so the tests can replace the directory between its creation and the
+    open.
+    """
+    target = path
+    if not target.startswith(b"/"):
+        try:
+            target = _join(os.getcwdb(), target)
+        except OSError:
+            return Skip.UNUSABLE
+    held: bytes | None = None
+    for _ in range(TempLink.ATTEMPTS):
+        try:
+            candidate = _join(base, random_name())
+        except NotImplementedError:
+            return Skip.UNUSABLE
+        try:
+            make_dir(candidate, 0o700)
+        except FileExistsError:
+            continue
+        except OSError:
+            return Skip.UNUSABLE
+        held = candidate
+        break
+    if held is None:
+        return Skip.UNUSABLE
+    try:
+        dirfd = os.open(held, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError:
+        # Whatever is at the name now cannot be told to be ours: left alone.
+        return Skip.UNUSABLE
+    try:
+        st = os.fstat(dirfd)
+        if not (stat.S_ISDIR(st.st_mode) and st.st_uid == os.geteuid() and stat.S_IMODE(st.st_mode) == 0o700):
+            return Skip.UNUSABLE
+        try:
+            os.symlink(target, b"s", dir_fd=dirfd)
+        except OSError:
+            return Skip.UNUSABLE
+        fd_dir = proc_fd_dir(dirfd, proc_self_fd)
+        if fd_dir is None:
+            return Skip.UNUSABLE
+        return plain_op(req, _join(fd_dir, b"s")), Route.FD_HELD
+    finally:
+        with contextlib.suppress(OSError):
+            os.unlink(b"s", dir_fd=dirfd)
+        with contextlib.suppress(OSError):
+            here = os.lstat(held)
+            mine = os.fstat(dirfd)
+            if (here.st_dev, here.st_ino) == (mine.st_dev, mine.st_ino):
+                os.rmdir(held)
+        os.close(dirfd)
 
 
 def safe_base(base: bytes) -> bool:

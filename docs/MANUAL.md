@@ -90,9 +90,11 @@ A symlink `sockat.XXXXXXXXXX` (10 random characters) is created in a temporary d
 | connect | the socket file | `<place>/sockat.XXXXXXXXXX` | whatever the directory depth and the file name length |
 
 - The places tried are `TMPDIR` (when it is a non-empty absolute path), then `/tmp`. The first one where the spelling fits, that is safe, and where the symlink can be created is used
-- **A safe place** is one of the following. Nothing is created in a place that is not safe; the next one is tried
+- **A safe place** is one of the following. Nothing is created in a place that is not safe; the next one is tried (except for the fd-held form below)
   - sticky and owned by root or by the calling user (as `/tmp` is)
   - owned by the calling user with no write permission for group and others (as macOS's `$TMPDIR` is)
+- **The fd-held form** (connects on Linux with `/proc` only): in a place that is not safe, a directory `sockat.XXXXXXXXXX` of mode 0700 is created, opened `O_DIRECTORY | O_NOFOLLOW` and checked for its owner and mode; inside it, through that fd, a symlink `s` to the socket file is created, and the connect goes to `/proc/self/fd/<fd>/s`. The directory is reached by its fd, not its name, so another user replacing it changes nothing. `s` and the directory are removed afterwards
+- The places are tried in the order `TMPDIR` (a symlink if it is safe, the fd-held form if not), then `/tmp` (the same)
 
 #### thread cwd
 
@@ -125,7 +127,7 @@ When a path longer than the standard library accepts is `ENAMETOOLONG` (bytes).
 | illumos | relative path > 107, and either file name > 84 or the symlink route cannot be used | relative path > 107, and the symlink route cannot be used |
 
 - On Linux without `/proc`, the condition "does not fit the `/proc` spelling" drops out
-- The symlink route cannot be used when there is no safe place where the symlink can be created (a sandbox where neither `TMPDIR` nor `/tmp` can be used, and the like)
+- The symlink route cannot be used when there is no safe place where the symlink can be created (a sandbox where neither `TMPDIR` nor `/tmp` can be used, and the like). A connect on Linux with `/proc` still gets through a place that is not safe, through the fd-held form, as long as a directory can be created there
 
 ## What differs from the standard library for a long path
 
@@ -161,7 +163,7 @@ sockat itself never changes the cwd. If the cwd has changed after the bind / con
 
 ### A symlink can be left behind
 
-If the process dies between creating and removing the symlink, `sockat.XXXXXXXXXX` is left under `TMPDIR` or `/tmp`.
+If the process dies between creating and removing the symlink (the directory, for the fd-held form), `sockat.XXXXXXXXXX` is left under `TMPDIR` or `/tmp`.
 
 ## Errors
 

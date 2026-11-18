@@ -63,7 +63,7 @@ pip install sockat
 | bindat | `bindat(2)` / `connectat(2)` で、ディレクトリの fd を基準にファイル名で渡す |
 | 相対パス | cwd からの相対パスで渡す。文字列を書き直すだけで cwd は変えない |
 | 広げた sockaddr | macOS のカーネルが受け付ける、253 バイトまで入る sockaddr で渡す |
-| symlink | `TMPDIR` か `/tmp` に短い symlink を作って通し、すぐ消す。他人が差し替えられない置き場にだけ作る |
+| symlink | `TMPDIR` か `/tmp` に短い symlink を作って通し、すぐ消す。他人が差し替えられない置き場にだけ作る。`/proc` を使える Linux の connect は、安全でない置き場でも自分専用のディレクトリを作って fd で掴んで使う |
 | スレッド cwd | 使い捨てのスレッドだけ cwd をディレクトリに移し、ファイル名で渡す。プロセスの cwd は変えない |
 | fork | **無い** (仕様の fork の経路は作っていない。仕様の `connect_any` 系も無い) |
 

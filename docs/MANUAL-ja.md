@@ -90,9 +90,11 @@ macOS / iOS。XNU は `sun_path` が 104 バイトを超えるアドレスも、
 | connect | ソケットのファイル | `<置き場>/sockat.XXXXXXXXXX` | ディレクトリの深さにもファイル名の長さにもよらない |
 
 - 置き場の候補は `TMPDIR` (空でない絶対パスの時)、`/tmp` の順。綴りが収まり、安全で、symlink を作れた最初の候補を使う
-- **安全な置き場**は次のどちらか。満たさない候補には何も作らず次へ進む
+- **安全な置き場**は次のどちらか。満たさない候補には何も作らず次へ進む (下の fd で掴む形を除く)
   - sticky bit が立っていて、持ち主が root か自分 (`/tmp` がこれ)
   - 持ち主が自分で、group と other に書き込み権限が無い (macOS の `$TMPDIR` がこれ)
+- **fd で掴む形** (`/proc` を使える Linux の connect だけ): 安全でない候補には、mode 0700 のディレクトリ `sockat.XXXXXXXXXX` を作り、`O_DIRECTORY | O_NOFOLLOW` で開いて持ち主と mode を確かめ、その fd の中にソケットのファイルを指す symlink `s` を作って `/proc/self/fd/<fd>/s` で connect する。名前でなく fd で辿るので、他人がディレクトリを差し替えても影響しない。終わったら `s` とディレクトリを消す
+- 試す順は `TMPDIR` (安全なら symlink、安全でなければ fd で掴む形)、`/tmp` (同じ)
 
 #### スレッド cwd
 
@@ -125,7 +127,7 @@ Linux / Android と macOS / iOS。使い捨ての `threading.Thread` の cwd だ
 | illumos | 相対パス > 107、ファイル名 > 84 か symlink を使えない | 相対パス > 107、symlink も使えない |
 
 - `/proc` を使えない Linux では「`/proc` の綴りに収まらず」の条件が外れる
-- symlink を使えないのは、安全で symlink を作れる置き場が無い時 (`TMPDIR` も `/tmp` も使えないサンドボックス等)
+- symlink を使えないのは、symlink を作れる安全な置き場が無い時 (`TMPDIR` も `/tmp` も使えないサンドボックス等)。`/proc` を使える Linux の connect は、置き場が安全でなくてもディレクトリを作れれば fd で掴む形で届く
 
 ## 長いパスで標準と違う点
 
@@ -161,7 +163,7 @@ sockat 自身は cwd を変えない。bind / connect の後に cwd が変わっ
 
 ### symlink が残ることがある
 
-symlink を作ってから消すまでの間にプロセスが死ぬと、`TMPDIR` か `/tmp` の下に `sockat.XXXXXXXXXX` が残る。
+symlink (fd で掴む形ではディレクトリ) を作ってから消すまでの間にプロセスが死ぬと、`TMPDIR` か `/tmp` の下に `sockat.XXXXXXXXXX` が残る。
 
 ## エラー
 
