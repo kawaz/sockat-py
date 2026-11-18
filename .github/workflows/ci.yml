@@ -1,0 +1,97 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  # release.yml runs the whole suite before it publishes.
+  workflow_call:
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }}, Python ${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        # The routes differ per OS (Linux: /proc, then relative / symlink /
+        # thread cwd; macOS: relative / widened sockaddr / symlink / thread
+        # cwd), so each OS runs the whole suite, on the oldest and the newest
+        # Python supported.
+        os: [ubuntu-latest, macos-latest]
+        python: ["3.11", "3.15"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: extractions/setup-just@v4
+      # just ci = check (ruff + mypy for each platform) + test.
+      # The same entry point as locally, so the checks match.
+      - run: just ci
+
+  linux-docker:
+    name: Test (Linux in docker, seccomp default / unconfined)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: extractions/setup-just@v4
+      # docker's default seccomp refuses unshare(2), so the thread-cwd route
+      # cannot be used there; unconfined, it can. Both sides of the order run.
+      - run: just test-linux
+
+  # FreeBSD reaches long paths with bindat(2) / connectat(2), which only a
+  # FreeBSD kernel can exercise.
+  freebsd:
+    name: Test (FreeBSD VM)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: vmactions/freebsd-vm@v1
+        with:
+          usesh: true
+          prepare: pkg install -y py311-pytest
+          run: PYTHONPATH=src python3.11 -m pytest -q -p no:cacheprovider
+
+  # The Unix systems without a dirfd-relative bind / connect or a thread cwd.
+  # They run the whole suite in a VM so the routes they share with macOS
+  # (relative path, symlink) are exercised on their own kernels.
+  netbsd:
+    name: Test (NetBSD VM)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+      - uses: vmactions/netbsd-vm@v1
+        with:
+          usesh: true
+          prepare: /usr/sbin/pkg_add py311-test
+          run: PYTHONPATH=src python3.11 -m pytest -q -p no:cacheprovider
+
+  openbsd:
+    name: Test (OpenBSD VM)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+      - uses: vmactions/openbsd-vm@v1
+        with:
+          usesh: true
+          prepare: pkg_add py3-test
+          run: PYTHONPATH=src python3 -m pytest -q -p no:cacheprovider
+
+  illumos:
+    name: Test (illumos / OmniOS VM)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+      - uses: vmactions/omnios-vm@v1
+        with:
+          usesh: true
+          prepare: python3 -m ensurepip --user && python3 -m pip install --user pytest
+          run: PYTHONPATH=src python3 -m pytest -q -p no:cacheprovider
