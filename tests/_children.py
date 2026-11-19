@@ -20,6 +20,7 @@ import re
 import resource
 import socket
 import sys
+import tempfile
 from collections.abc import Callable
 
 from _support import (
@@ -65,9 +66,21 @@ def report(**values: str) -> None:
 
 
 def make_stale_socket() -> None:
-    """Bind a socket at PATH and exit without anyone listening on it any
-    more."""
-    _route.run(BIND, arg("PATH"))[0].close()
+    """Leave a socket file at PATH that nobody listens on and exit. The
+    standard binds it under a short name in a fresh directory under ``/tmp``
+    and it is renamed to PATH (on the same file system, as every test path
+    under ``/tmp`` is), so any length of PATH works, on systems where no
+    route binds a long path too."""
+    short_dir = tempfile.mkdtemp(prefix="sockat-st-", dir="/tmp")
+    short = os.path.join(short_dir, "st.sock")
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+            s.bind(short)
+            os.rename(os.fsencode(short), arg("PATH"))
+    finally:
+        with contextlib.suppress(OSError):
+            os.unlink(short)
+        os.rmdir(short_dir)
     report()
 
 

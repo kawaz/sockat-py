@@ -110,8 +110,10 @@ def test_where_the_bind_follows_the_link_it_carries_a_long_path(tmp: TmpDirs) ->
         assert is_socket(p)
     os.unlink(p)
     assert_empty(links)
-    connect_route = far_connect_here()
-    assert connect_route is not None
+    # The connects take the connect order with the same configuration: its
+    # first route that carries a path far from the cwd, or else (NetBSD:
+    # relative, then symlink-file) symlink-file through the place given.
+    connect_route = far_connect_here() or Route.SYMLINK_FILE
     check_route(forced("symlink-file", p, c, routes(Route.SYMLINK_FILE, connect_route)), [links, d_place])
 
 

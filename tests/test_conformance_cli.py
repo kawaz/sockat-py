@@ -17,9 +17,18 @@ import sys
 from pathlib import Path
 
 import pytest
-from _support import HAS_PROC, TmpDirs, is_socket, nest, thread_cwd_usable
+from _support import (
+    HAS_PROC,
+    SRC_DIR,
+    TmpDirs,
+    is_socket,
+    listener_at,
+    needs_long_bind,
+    nest,
+    stale_socket,
+    thread_cwd_usable,
+)
 
-import sockat
 from sockat import _route
 from sockat._sys import DIRECT_MAX, IS_APPLE, IS_FREEBSD, IS_LINUX
 
@@ -29,11 +38,20 @@ LONG = DIRECT_MAX + 40
 """A socket path length past what the ``socket`` module takes."""
 
 
+def cli_env() -> dict[str, str]:
+    """The environment to start the CLI with: this one, with the source put
+    first on ``PYTHONPATH``, made absolute. The CI's VMs set
+    ``PYTHONPATH=src``, relative to the project, which the CLI started in
+    another cwd would not find."""
+    paths = [str(SRC_DIR), *filter(None, [os.environ.get("PYTHONPATH")])]
+    return {**os.environ, "PYTHONPATH": os.pathsep.join(paths)}
+
+
 def cli(case: object, *, cwd: bytes, tmpdir: bytes) -> dict[str, object]:
     """Run the CLI on ``case`` (as JSON on stdin) in ``cwd`` with ``$TMPDIR``
     set to ``tmpdir``, and give its output object (it must exit 0 and write
     exactly the five keys)."""
-    env = {**os.environ, "TMPDIR": os.fsdecode(tmpdir)}
+    env = {**cli_env(), "TMPDIR": os.fsdecode(tmpdir)}
     done = subprocess.run(
         [sys.executable, str(CLI)],
         input=json.dumps(case),
@@ -72,6 +90,12 @@ def test_short_relative_bind(tmp: TmpDirs) -> None:
     assert is_socket(root + b"/s.sock")
 
 
+# Where no route of the default bind reaches a long path (OpenBSD and
+# illumos, whose bind does not follow symlink-file's link and which have no
+# means of the routes through D), the long bind is ENAMETOOLONG, which the
+# routes' own tests check; the shape of a long bind's output is checked
+# where one goes through.
+@needs_long_bind
 def test_long_absolute_bind(tmp: TmpDirs) -> None:
     root, places = tmp.new(), tmp.new()
     path = nest(root, LONG)
@@ -91,7 +115,7 @@ def test_long_absolute_bind(tmp: TmpDirs) -> None:
 def test_connect_sends_x(tmp: TmpDirs, length: int) -> None:
     root, places = tmp.new(), tmp.new()
     path = nest(root, length) if length > DIRECT_MAX else root + b"/s.sock"
-    with sockat.bind(path) as listener:
+    with listener_at(path) as listener:
         out = cli({"op": "connect", "path": os.fsdecode(path)}, cwd=root, tmpdir=places)
         assert out["ok"] is True
         assert out["error"] is None
@@ -154,7 +178,7 @@ def test_long_bind_onto_a_file(tmp: TmpDirs) -> None:
 def test_long_connect_without_listener(tmp: TmpDirs) -> None:
     root, places = tmp.new(), tmp.new()
     path = nest(root, LONG)
-    sockat.bind(path).close()
+    stale_socket(path)
     out = cli({"op": "connect", "path": os.fsdecode(path)}, cwd=root, tmpdir=places)
     assert out["ok"] is False
     assert out["error"] == "ECONNREFUSED"
@@ -193,7 +217,14 @@ def test_long_invalid_argument(tmp: TmpDirs, tail: bytes) -> None:
 def test_bad_input(tmp: TmpDirs, case: str) -> None:
     root = tmp.new()
     done = subprocess.run(
-        [sys.executable, str(CLI)], input=case, capture_output=True, text=True, cwd=root, check=False, timeout=60
+        [sys.executable, str(CLI)],
+        input=case,
+        capture_output=True,
+        text=True,
+        cwd=root,
+        env=cli_env(),
+        check=False,
+        timeout=60,
     )
     assert done.returncode == 2
     assert done.stdout == ""

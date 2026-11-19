@@ -536,6 +536,16 @@ needs_long_bind = pytest.mark.skipif(
 )
 """For the tests that bind long paths through the public API."""
 
+needs_route_through_d = pytest.mark.skipif(
+    d_route_here() is None,
+    reason="no means of the routes through D here (no thread cwd, bindat or /proc)",
+)
+"""For the tests that bind long paths through the routes through D (a
+configuration without a place for symlink-file, as :func:`d_cfg` gives by
+default): where the bind follows symlink-file's link but has no means of
+the routes through D (NetBSD), :data:`needs_long_bind` holds and this does
+not."""
+
 NAME_MAX_THROUGH_D = DIRECT_MAX - _route.IN_OWN_DIR_LEN
 """The longest file name the routes through D bind by a thread's own cwd or
 bindat (``R/<name>`` in a sockaddr): 96 on Linux, 92 on Apple and the
@@ -932,6 +942,8 @@ def stale_socket(path: bytes) -> None:
     """Leave a socket file at ``path`` that no process listens on, made by a
     child process that binds and exits (the SPEC asks for another process: a
     listener closed in this one could still be held open by a copy of the fd
-    in some other child of this process)."""
+    in some other child of this process). The child binds a short name and
+    renames it to ``path``, so any length works, where no route binds a long
+    path too."""
     run_child("make_stale_socket", b"/", {"PATH": path})
     assert is_socket(path)

@@ -30,7 +30,7 @@ from _support import (
     listener_at,
     listing,
     mark_untouched,
-    needs_long_bind,
+    needs_route_through_d,
     nest,
     nest_tail,
     parent,
@@ -66,7 +66,7 @@ no_relative = pytest.mark.skipif(FREEBSD, reason="FreeBSD's connect falls back t
 # (a path over 253 bytes whose relative spelling is over DIRECT_MAX and at
 # most 253) and get the same checks.
 @no_relative
-@needs_long_bind
+@needs_route_through_d
 def test_a_path_short_relative_to_the_cwd_takes_the_relative_fallback(tmp: TmpDirs) -> None:
     t = tmp.new()
     args = {"PATH": nest_tail(t, DIRECT_MAX, b"rel.sock")}
@@ -256,7 +256,7 @@ def test_where_only_the_fork_route_reaches_everything_is_enametoolong(tmp: TmpDi
 # The counterpart of the test above: the same kind of path, with the
 # socket's directory as the place for D, is bound and connected to (where the
 # routes through D have a means).
-@needs_long_bind
+@needs_route_through_d
 def test_with_a_place_for_d_the_same_path_is_bound(tmp: TmpDirs) -> None:
     p = nest(tmp.new(), 600)
     listener, r = _route.run_long(BIND, p, d_cfg())
@@ -356,7 +356,7 @@ def test_the_o_rdonly_fallback_needs_read_permission(tmp: TmpDirs) -> None:
 # next to the socket, and the bind's routes through D leave only the socket
 # file there (D and R in the socket's directory are removed). Checked with the
 # socket's directory as the only place for D.
-@needs_long_bind
+@needs_route_through_d
 def test_nothing_but_the_socket_file_is_left_in_its_directory(tmp: TmpDirs) -> None:
     p = nest(tmp.new(), 600)
     listener, _ = _route.run_long(BIND, p, d_cfg())

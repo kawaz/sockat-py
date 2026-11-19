@@ -29,7 +29,7 @@ from _support import (
     fallback_cfg,
     listener_at,
     mark_untouched,
-    needs_long_bind,
+    needs_route_through_d,
     nest,
     parent,
     place,
@@ -423,7 +423,7 @@ def test_a_tmpdir_too_long_for_the_symlink_falls_back_to_tmp(tmp: TmpDirs) -> No
 # relative path too). Runs in a child process with the cwd at a temporary
 # directory: the relative spelling is longer than the plain sockaddr, so no
 # relative fallback; the symlink under a short place carries it.
-@needs_long_bind
+@needs_route_through_d
 def test_a_long_relative_path_is_reached_through_a_link_to_its_absolute_target(tmp: TmpDirs) -> None:
     t = tmp.new()
     base = tmp.new()
