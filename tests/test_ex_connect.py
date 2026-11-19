@@ -1,5 +1,5 @@
 """``sockat.ex.connect`` / ``sockat.ex.connect_nonblocking`` (hub SPEC "_ex",
-DR-0015): the stream of the plain connect, and what the connect went
+DR-0015): the socket of the plain connect (``sock``), and what the connect went
 through (``losses``, ``route``, ``skipped``), on success and on the errors.
 With ``last_resort`` the SPEC goes on to fork-cwd-direct, which this
 implementation does not have: it is noted as skipped, and the connect
@@ -66,9 +66,9 @@ def nothing_reaches() -> Config:
     return d_cfg((), (), thread_cwd=False, proc=NO_PROC)
 
 
-# What the calls return: stream, losses, route, skipped, by name or by
+# What the calls return: sock, losses, route, skipped, by name or by
 # position. A path the socket module takes goes to the standard: nothing lost
-# or skipped. The stream is the plain call's (blocking for connect,
+# or skipped. The socket is the plain call's (blocking for connect,
 # nonblocking for connect_nonblocking), connected, and talks.
 @pytest.mark.parametrize(("call", "blocking"), CALLS)
 @pytest.mark.parametrize("last_resort", [False, True])
@@ -78,19 +78,19 @@ def test_what_the_calls_return(tmp: TmpDirs, call: object, blocking: bool, last_
     with listener_at(p) as listener:
         done = call(p, last_resort=last_resort)
         assert isinstance(done, Connected)
-        stream, losses, route, skipped = done
-        with stream:
-            assert (done.stream, done.losses, done.route, done.skipped) == (stream, losses, route, skipped)
+        sock, losses, route, skipped = done
+        with sock:
+            assert (done.sock, done.losses, done.route, done.skipped) == (sock, losses, route, skipped)
             assert (losses, route, skipped) == ((), "standard", ())
-            assert stream.getblocking() is blocking
-            accept_ping(listener, stream)
+            assert sock.getblocking() is blocking
+            accept_ping(listener, sock)
 
 
 # A long path goes the way the plain connect goes (through the public API,
 # from the environment), losing nothing: the route and the routes skipped
 # before it are those the connect order notes for the same call, and the
 # last resort changes nothing where a route carries it. The nonblocking
-# stream is adopted by asyncio and reports the path as its peer.
+# socket is adopted by asyncio and reports the path as its peer.
 @pytest.mark.parametrize("last_resort", [False, True])
 def test_a_long_path_goes_the_plain_connects_way(tmp: TmpDirs, last_resort: bool) -> None:
     want = far_connect_here()
@@ -101,16 +101,16 @@ def test_a_long_path_goes_the_plain_connects_way(tmp: TmpDirs, last_resort: bool
         plain = _route.reach(CONNECT, p, Trail())
         with plain.sock as client:
             accept_ping(listener, client)
-        stream, losses, route, skipped = sockat.ex.connect(p, last_resort=last_resort)
-        with stream:
+        sock, losses, route, skipped = sockat.ex.connect(p, last_resort=last_resort)
+        with sock:
             assert (losses, route) == ((), want.value)
             assert names(skipped) == [r.value for r, _ in plain.skipped]
-            assert stream.getpeername() == os.fsdecode(p)
-            accept_ping(listener, stream)
+            assert sock.getpeername() == os.fsdecode(p)
+            accept_ping(listener, sock)
 
         async def adopt() -> None:
-            stream, _, _, _ = sockat.ex.connect_nonblocking(p, last_resort=last_resort)
-            _, writer = await asyncio.open_unix_connection(sock=stream)
+            sock, _, _, _ = sockat.ex.connect_nonblocking(p, last_resort=last_resort)
+            _, writer = await asyncio.open_unix_connection(sock=sock)
             assert writer.get_extra_info("peername") == os.fsdecode(p)
             writer.close()
             await writer.wait_closed()

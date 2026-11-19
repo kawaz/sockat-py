@@ -50,17 +50,17 @@ finally:
     listener.close()
     discard()
 
-stream, losses, route, skipped = sockat.ex.connect(path)
+sock, losses, route, skipped = sockat.ex.connect(path)
 ```
 
 | 関数 | 既定の呼び出し | 戻り値 |
 |---|---|---|
 | `sockat.ex.bind(path, *, last_resort=False)` | `sockat.bind(path)` | `Bound` (`listener`、`discard`、`losses`、`route`、`skipped`) |
-| `sockat.ex.connect(path, *, last_resort=False)` | `sockat.connect(path)` | `Connected` (`stream`、`losses`、`route`、`skipped`) |
+| `sockat.ex.connect(path, *, last_resort=False)` | `sockat.connect(path)` | `Connected` (`sock`、`losses`、`route`、`skipped`) |
 | `sockat.ex.connect_nonblocking(path, *, last_resort=False)` | `sockat.connect_nonblocking(path)` | `Connected` |
 
 - `sockat.ex.connect(...)` のようにモジュールを通して呼ぶ。`from sockat.ex import connect` と取り込むと、既定の `sockat.connect` と紛れる
-- `last_resort` を渡さない時は、既定の呼び出しと同じ経路を同じ順に試し、同じ所に届く。`listener` / `stream` も既定の呼び出しが返すものと同じ
+- `last_resort` を渡さない時は、既定の呼び出しと同じ経路を同じ順に試し、同じ所に届く。`listener` / `sock` も既定の呼び出しが返すものと同じ
 - 戻り値は `NamedTuple` で、名前でも位置でも取り出せる
 
 ### discard
@@ -130,7 +130,7 @@ if sockat.ex.Loss.RECREATABLE_SPELLING in losses:
 
 ```python
 try:
-    stream, losses, route, skipped = sockat.ex.connect(path)
+    sock, losses, route, skipped = sockat.ex.connect(path)
 except OSError as e:
     print(e.errno, getattr(e, "route", None), getattr(e, "skipped", ()))
 ```
@@ -366,7 +366,7 @@ reader, writer = await asyncio.open_unix_connection(sock=sockat.connect_nonblock
 
 - 引数を足さずに、短いパスと同じに動く。Python 3.13 以降の asyncio は、server を閉じる時に元のパスのソケットファイルを消す (`cleanup_socket`。listener の `getsockname()` が元のパスを返すので、それで消す)。3.11 / 3.12 の asyncio は消さない (標準と同じ)
 - transport の `get_extra_info('sockname')` (server 側) / `get_extra_info('peername')` (client 側) も元のパス
-- `sockat.ex` の `listener` / `stream` も同じに渡せる。`discard()` は server の動作中に呼んでも、閉じた後に呼んでもよい
+- `sockat.ex` の `listener` / `sock` も同じに渡せる。`discard()` は server の動作中に呼んでも、閉じた後に呼んでもよい
 
 `connect_nonblocking` は相手を待たないので、イベントループから直接呼べる。`bind` も相手を待たない (thread-cwd ではスレッドの終わりを待つが、bind してすぐ終わる)。
 

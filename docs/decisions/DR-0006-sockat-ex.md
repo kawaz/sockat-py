@@ -25,7 +25,6 @@
 | 公開する名前 | `bind`、`connect`、`connect_nonblocking`、`Bound`、`Connected`、`Skipped`、`Loss` |
 | 推奨コード | README・MANUAL の例は `sockat.ex.connect(...)` とモジュールを通して書く。`from sockat.ex import connect` と取り込む書き方は勧めない (既定の `sockat.connect` と紛れる) |
 
-- トップレベルの `sockat.bind_ex` と、`sockat.any` / `bind_any` は置かない
 
 ### 2. 戻り値
 
@@ -44,7 +43,7 @@ class Bound(NamedTuple):
 
 
 class Connected(NamedTuple):
-    stream: socket.socket
+    sock: socket.socket
     losses: tuple[Loss, ...]
     route: str
     skipped: tuple[Skipped, ...]
@@ -52,8 +51,8 @@ class Connected(NamedTuple):
 
 | 項目 | 決定 |
 |---|---|
-| 型 | `NamedTuple`。`listener, discard, losses, route, skipped = sockat.ex.bind(path)`、`stream, losses, route, skipped = sockat.ex.connect(path)` と分解できる。`listener, discard, *_ = sockat.ex.bind(path)` とも書ける |
-| `listener` / `stream` | 既定の `sockat.bind` / `sockat.connect` / `sockat.connect_nonblocking` が返すものと同じ |
+| 型 | `NamedTuple`。`listener, discard, losses, route, skipped = sockat.ex.bind(path)`、`sock, losses, route, skipped = sockat.ex.connect(path)` と分解できる。`listener, discard, *_ = sockat.ex.bind(path)` とも書ける |
+| `listener` / `sock` | 既定の `sockat.bind` / `sockat.connect` / `sockat.connect_nonblocking` が返すものと同じ |
 | `discard` | [DR-0004](DR-0004-own-directory-route.md) の決定 7 |
 | `losses` | `Loss` の並び。`Loss` は `enum.StrEnum` で、`str()` と `.value` が SPEC の名前。SPEC の名前を全部持つ (`FORKED` は sockat-py では付かないが、SPEC の語彙として置く) |
 | `route` | `_route.Route` の値 (SPEC の経路の名前の文字列)。`Route` の enum は公開しない |
@@ -130,7 +129,7 @@ symlink-dir:
 
 ## Consequences
 
-- `sockat.any` / `bind_any` / `AnyBinding` と、トップレベルの `sockat.bind_ex` は無くなった ([DR-0005](DR-0005-bind-any.md) を置き換える)。`sockat.bind_ex(path)` の `(listener, discard)` は `listener, discard, *_ = sockat.ex.bind(path)` になる
+- [DR-0005](DR-0005-bind-any.md) を置き換える
 - NetBSD / OpenBSD / illumos と、D を通す経路の手段を使えない Linux / Apple の OS でも、置き場に収まる長さのファイル名なら最終手段を使う `sockat.ex.bind` で届く
 - 試験は `tests/test_ex.py` (`discard`)、`tests/test_ex_bind.py` (bind の診断と最終手段)、`tests/test_ex_connect.py` (connect の診断と最終手段)。symlink-dir を通す試験は、環境から読む設定 (`_route.Config.from_env`) を、既定の bind の経路を全部使えなくする設定 (symlink-file の置き場なし・D の置き場なし・スレッド cwd を切る・`/proc` を無いことにする) に差し替えて行う。FreeBSD では at を使えなくできないので行わない
 

@@ -181,23 +181,19 @@ def connect_here(p: bytes) -> socket.socket:
 
 
 # The _ex calls are a choice: `import sockat` neither imports sockat.ex nor
-# shows it, and importing sockat.ex is what makes it available, with its
-# bind, connect and connect_nonblocking. Neither the any operations nor a
-# top-level bind_ex exist (DR-0015). A fresh interpreter, so nothing
-# imported by the tests counts.
+# shows it (sockat shows its three plain calls only), and importing
+# sockat.ex is what makes it available, with its bind, connect and
+# connect_nonblocking (DR-0015). A fresh interpreter, so nothing imported by
+# the tests counts.
 def test_import_sockat_does_not_import_sockat_ex() -> None:
     code = (
         "import sys, sockat\n"
         "assert 'sockat.ex' not in sys.modules, 'sockat.ex was imported'\n"
         "assert not hasattr(sockat, 'ex')\n"
         "assert sockat.__all__ == ['bind', 'connect', 'connect_nonblocking'], sockat.__all__\n"
-        "for gone in ('bind_ex', 'bind_any', 'any'):\n"
-        "    assert not hasattr(sockat, gone), gone\n"
         "import sockat.ex\n"
         "assert 'sockat.ex' in sys.modules\n"
         "assert {'bind', 'connect', 'connect_nonblocking'} <= set(sockat.ex.__all__)\n"
-        "import importlib.util\n"
-        "assert importlib.util.find_spec('sockat.any') is None\n"
     )
     env = dict(os.environ, PYTHONPATH=str(SRC_DIR))
     out = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True, check=False)

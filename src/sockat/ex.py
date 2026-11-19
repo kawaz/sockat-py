@@ -17,7 +17,7 @@ the plain calls of :mod:`sockat`::
     ...
     discard()
 
-    stream, losses, route, skipped = sockat.ex.connect(path)
+    sock, losses, route, skipped = sockat.ex.connect(path)
 
 Without ``last_resort`` each call takes the routes of its plain counterpart
 in the same order, and reaches what that reaches. With ``last_resort=True``:
@@ -84,9 +84,9 @@ class Bound(NamedTuple):
 
 class Connected(NamedTuple):
     """What :func:`connect` / :func:`connect_nonblocking` return:
-    ``stream, losses, route, skipped = sockat.ex.connect(path)``."""
+    ``sock, losses, route, skipped = sockat.ex.connect(path)``."""
 
-    stream: socket.socket
+    sock: socket.socket
     """The connected socket, as :func:`sockat.connect` /
     :func:`sockat.connect_nonblocking` return it."""
     losses: tuple[Loss, ...]

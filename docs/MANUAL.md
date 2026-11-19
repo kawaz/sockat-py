@@ -50,17 +50,17 @@ finally:
     listener.close()
     discard()
 
-stream, losses, route, skipped = sockat.ex.connect(path)
+sock, losses, route, skipped = sockat.ex.connect(path)
 ```
 
 | Function | Plain call | Returns |
 |---|---|---|
 | `sockat.ex.bind(path, *, last_resort=False)` | `sockat.bind(path)` | a `Bound` (`listener`, `discard`, `losses`, `route`, `skipped`) |
-| `sockat.ex.connect(path, *, last_resort=False)` | `sockat.connect(path)` | a `Connected` (`stream`, `losses`, `route`, `skipped`) |
+| `sockat.ex.connect(path, *, last_resort=False)` | `sockat.connect(path)` | a `Connected` (`sock`, `losses`, `route`, `skipped`) |
 | `sockat.ex.connect_nonblocking(path, *, last_resort=False)` | `sockat.connect_nonblocking(path)` | a `Connected` |
 
 - Call them through the module, as `sockat.ex.connect(...)`. Imported as `from sockat.ex import connect`, they are easily mistaken for the plain `sockat.connect`
-- Without `last_resort`, each tries the same routes in the same order as its plain call, and reaches what it reaches. The `listener` / `stream` is what the plain call returns
+- Without `last_resort`, each tries the same routes in the same order as its plain call, and reaches what it reaches. The `listener` / `sock` is what the plain call returns
 - The results are `NamedTuple`s, read by name or by position
 
 ### discard
@@ -130,7 +130,7 @@ When a call fails, it raises the same error as its plain counterpart (its type a
 
 ```python
 try:
-    stream, losses, route, skipped = sockat.ex.connect(path)
+    sock, losses, route, skipped = sockat.ex.connect(path)
 except OSError as e:
     print(e.errno, getattr(e, "route", None), getattr(e, "skipped", ()))
 ```
@@ -366,7 +366,7 @@ reader, writer = await asyncio.open_unix_connection(sock=sockat.connect_nonblock
 
 - It works as with a short path, with no extra arguments. The asyncio of Python 3.13 and later removes the socket file at the original path when the server is closed (`cleanup_socket`; the listener's `getsockname()` returns the original path, and that is what it removes). The asyncio of 3.11 / 3.12 does not remove it (as with the standard library)
 - The transport's `get_extra_info('sockname')` (server side) / `get_extra_info('peername')` (client side) are also the original path
-- The `listener` / `stream` from `sockat.ex` can be passed the same way. `discard()` may be called while the server runs or after it has closed
+- The `listener` / `sock` from `sockat.ex` can be passed the same way. `discard()` may be called while the server runs or after it has closed
 
 `connect_nonblocking` does not wait for the peer, so it can be called directly from the event loop. `bind` does not wait for a peer either (with thread-cwd it waits for the thread to end, but the bind returns at once).
 

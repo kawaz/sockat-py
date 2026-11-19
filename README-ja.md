@@ -101,7 +101,7 @@ listener, discard, losses, route, skipped = sockat.ex.bind(path)
 listener.close()
 discard()
 
-stream, losses, route, skipped = sockat.ex.connect(path)
+sock, losses, route, skipped = sockat.ex.connect(path)
 ```
 
 - `sockat.ex.bind` / `sockat.ex.connect` / `sockat.ex.connect_nonblocking` は、既定の `sockat.bind` / `sockat.connect` / `sockat.connect_nonblocking` と同じ経路を試し、通った経路の名前 (`route`)、試して使えなかった経路 (`skipped`、`name` と `reason`)、失ったもの (`losses`) を一緒に返す
@@ -123,7 +123,7 @@ reader, writer = await asyncio.open_unix_connection(sock=sockat.connect_nonblock
 ```
 
 - 引数を足さずに短いパスと同じに動く (Python 3.13 以降は server を閉じる時に元のパスのソケットファイルを消す)
-- `sockat.ex` の listener / stream も同じに渡せる
+- `sockat.ex` の `listener` / `sock` も同じに渡せる
 
 ## ドキュメント
 

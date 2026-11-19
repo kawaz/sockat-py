@@ -101,7 +101,7 @@ listener, discard, losses, route, skipped = sockat.ex.bind(path)
 listener.close()
 discard()
 
-stream, losses, route, skipped = sockat.ex.connect(path)
+sock, losses, route, skipped = sockat.ex.connect(path)
 ```
 
 - `sockat.ex.bind` / `sockat.ex.connect` / `sockat.ex.connect_nonblocking` try the same routes as the plain `sockat.bind` / `sockat.connect` / `sockat.connect_nonblocking`, and also return the name of the route taken (`route`), the routes tried and found unusable (`skipped`, with `name` and `reason`), and what was lost (`losses`)
@@ -123,7 +123,7 @@ reader, writer = await asyncio.open_unix_connection(sock=sockat.connect_nonblock
 ```
 
 - It works as with a short path, with no extra arguments (from Python 3.13, the socket file at the original path is removed when the server is closed)
-- The listener / stream from `sockat.ex` can be passed the same way
+- The `listener` / `sock` from `sockat.ex` can be passed the same way
 
 ## Documentation
 
