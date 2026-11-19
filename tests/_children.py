@@ -76,11 +76,11 @@ def means_cfg(means: str, own: tuple[OwnDirPlace, ...]) -> tuple[Config, Route]:
     ``test_through_d.means_here`` names them and forces them, the connects
     included), with ``own`` as the places for D, and the route it takes."""
     if means == "thread-cwd":
-        return d_cfg(own, proc=NO_PROC), Route.THREAD_CWD
+        return d_cfg(own, proc=NO_PROC, bind_symlink_file=False), Route.THREAD_CWD
     if means == "proc":
         return d_cfg(own, thread_cwd=False, connect_order=PROC_ORDER_THROUGH_D), Route.PROC
     assert means == "at", means
-    return d_cfg(own, connect_order=FREEBSD_ORDER_THROUGH_D), Route.AT
+    return d_cfg(own, connect_order=FREEBSD_ORDER_THROUGH_D, bind_symlink_file=False), Route.AT
 
 
 def connect_report() -> None:
@@ -292,7 +292,9 @@ def asyncio_namesakes() -> None:
 
 def own_dir_where() -> None:
     """Bind PATH with the configuration read from the environment
-    (``Config.from_env``) and report the route and the places D was made in
+    (``Config.from_env``), symlink-file turned off so that the bind goes
+    through D (it would carry the bind first where the bind follows the
+    link, as on macOS), and report the route and the places D was made in
     (``st_dev:st_ino`` of each, comma-separated)."""
     made: list[str] = []
     real = _route.mkdir_at
@@ -303,7 +305,8 @@ def own_dir_where() -> None:
         made.append(f"{st.st_dev}:{st.st_ino}")
 
     _route.mkdir_at = mkdir_at
-    listener, route = _route.run_long(BIND, arg("PATH"), Config.from_env())
+    cfg = dataclasses.replace(Config.from_env(), bind_symlink_file=False)
+    listener, route = _route.run_long(BIND, arg("PATH"), cfg)
     listener.close()
     report(route=route.value, places=",".join(made))
 

@@ -169,7 +169,7 @@ def test_long_connect_without_listener(tmp: TmpDirs) -> None:
     elif IS_LINUX and thread_cwd_usable():
         failed = "thread-cwd"
     else:
-        failed = "symlink"
+        failed = "symlink-file"
     assert out["route"] == failed
     assert out["skipped"] == ["standard", *order[: order.index(failed)]]
     assert leftovers(places, os.path.dirname(path)) == []

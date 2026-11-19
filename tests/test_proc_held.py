@@ -261,7 +261,7 @@ def test_d_goes_in_the_first_place_where_it_can_be_made(tmp: TmpDirs) -> None:
     with listener_at(p) as listener:
         client, r = _route.run_long(CONNECT, p, fd_cfg([NO_PLACE, file], [links]))
         with client:
-            assert r is Route.SYMLINK
+            assert r is Route.SYMLINK_FILE
             accept_ping(listener, client)
     os.unlink(p)
     assert_empty(links)
@@ -285,7 +285,7 @@ def test_without_proc_there_is_no_proc_held_form(tmp: TmpDirs, empty: bool) -> N
         for req in (CONNECT, CONNECT_NONBLOCKING):
             client, r = _route.run_long(req, p, fd_cfg([d_place], [links], proc=none))
             with client:
-                assert r is Route.SYMLINK, req
+                assert r is Route.SYMLINK_FILE, req
                 accept_ping(listener, client)
     assert_untouched(d_place)
     assert_empty(links)

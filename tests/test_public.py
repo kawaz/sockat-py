@@ -22,6 +22,7 @@ from _support import (
     SO_NOSIGPIPE,
     TmpDirs,
     accept_ping,
+    bind_route_here,
     d_route_here,
     dir_id,
     is_cloexec,
@@ -186,24 +187,36 @@ def test_paths_are_str_bytes_or_path_like(tmp: TmpDirs, total: int) -> None:
 # short directory.
 #
 # * bind: the routes through D carry the file name in a sockaddr behind `R/`
-#   (or behind /proc/self/fd/<n>/R/, shorter still), and no other bind route
-#   is left (no fork route in Python; the bind never takes the widened
-#   sockaddr, macOS included), so ENAMETOOLONG, and nothing is created.
-# * connect: the fallbacks reach it: the link to the socket file is spelled
-#   without the file name, /proc and the proc-held route on Linux, the widened
-#   sockaddr on macOS. A socket bound under a short name and renamed to the
-#   long one is reached and talks; with nothing there the error is the
-#   kernel's ENOENT, not ENAMETOOLONG. FreeBSD falls back to connectat of the
-#   file name, which a sockaddr carries up to DIRECT_MAX bytes: past that,
-#   ENAMETOOLONG for the connect too.
+#   (or behind /proc/self/fd/<n>/R/, shorter still), and the bind never takes
+#   the widened sockaddr (macOS included), so the only bind route left is
+#   symlink-file (SPEC, DR-0016: tried right after the standard on every
+#   system but Linux), whose spelling holds no file name. Where the bind
+#   follows its link (macOS) the bind goes through it: the socket file is at
+#   the path, which the listener reports. Elsewhere ENAMETOOLONG (no fork
+#   route in Python), and nothing is created.
+# * connect: the routes of the connect order reach it: the link to the
+#   socket file is spelled without the file name, /proc and the proc-held
+#   route on Linux, the widened sockaddr on macOS. A socket bound under a
+#   short name and renamed to the long one is reached and talks; with
+#   nothing there the error is the kernel's ENOENT, not ENAMETOOLONG.
+#   FreeBSD connects by connectat of the file name, which a sockaddr carries
+#   up to DIRECT_MAX bytes: past that, ENAMETOOLONG for the connect too.
 @pytest.mark.parametrize("n", [NAME_MAX_THROUGH_D + 1, DIRECT_MAX + 1, 254])
-def test_a_file_name_longer_than_the_routes_through_d_carries_cannot_be_bound_but_can_be_connected_to(
-    tmp: TmpDirs, n: int
-) -> None:
+def test_a_file_name_longer_than_the_routes_through_d_carry(tmp: TmpDirs, n: int) -> None:
     t = tmp.new()
     p = t + b"/" + b"n" * n
-    with raises_errno(errno.ENAMETOOLONG):
-        sockat.bind(p)
+    if bind_route_here() is Route.SYMLINK_FILE:
+        listener, r = _route.run(BIND, p)
+        with listener:
+            assert r is Route.SYMLINK_FILE
+            assert is_socket(p)
+            assert listener.getsockname() == os.fsdecode(p)
+            with sockat.connect(p) as client:
+                accept_ping(listener, client)
+        os.unlink(p)
+    else:
+        with raises_errno(errno.ENAMETOOLONG):
+            sockat.bind(p)
     assert listing(t) == []
     if sys.platform.startswith("freebsd") and n > DIRECT_MAX:
         with raises_errno(errno.ENAMETOOLONG):
@@ -218,12 +231,13 @@ def test_a_file_name_longer_than_the_routes_through_d_carries_cannot_be_bound_bu
             accept_ping(listener, client)
 
 
-# Where the routes through D have no means (NetBSD, OpenBSD, illumos: no thread
-# cwd, no bindat, no /proc), no long path can be bound (the SPEC's next step
-# is the fork route, which Python does not have): ENAMETOOLONG with nothing
-# created. A connect to a listener at such a path still gets through its
-# fallbacks.
-@pytest.mark.skipif(d_route_here() is not None, reason="the routes through D have a means here")
+# Where no route of the default bind can be used (NetBSD, OpenBSD, illumos:
+# no thread cwd, no bindat, no /proc; and symlink-file only where the bind
+# follows its link, which is unknown there), no long path can be bound (the
+# SPEC's next step is the fork route, which Python does not have):
+# ENAMETOOLONG with nothing created. A connect to a listener at such a path
+# still gets through the routes of its order.
+@pytest.mark.skipif(bind_route_here() is not None, reason="a route of the default bind can be used here")
 def test_without_the_routes_through_d_a_long_bind_is_enametoolong(tmp: TmpDirs) -> None:
     p = nest(tmp.new(), 300)
     with raises_errno(errno.ENAMETOOLONG):

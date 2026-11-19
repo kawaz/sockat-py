@@ -383,12 +383,15 @@ def d_cfg(
     proc: bytes = PROC,
     wide: bool = IS_APPLE,
     connect_order: tuple[Route, ...] | None = None,
+    bind_symlink_file: bool = not IS_LINUX,
 ) -> Config:
     """The route order's inputs with ``own`` as the places for D (the socket's
     directory unless given), the thread's own cwd tried unless turned off,
     the real /proc unless ``proc`` says where else to look, ``links`` as the
-    places for a connect's symlink, and the connect order of this system
-    unless ``connect_order`` forces another."""
+    places for symlink-file (no place unless given, so a bind's symlink-file
+    cannot be used), the connect order of this system unless
+    ``connect_order`` forces another, and a bind's symlink-file tried where
+    the system has it unless ``bind_symlink_file`` says otherwise."""
     return Config(
         own_dir_places=tuple(own),
         link_places=tuple(links),
@@ -396,10 +399,11 @@ def d_cfg(
         proc_self_fd=proc,
         thread_cwd=thread_cwd,
         connect_order=connect_order,
+        bind_symlink_file=bind_symlink_file,
     )
 
 
-PROC_ORDER_THROUGH_D = (Route.THREAD_CWD, Route.PROC, Route.PROC_HELD, Route.SYMLINK)
+PROC_ORDER_THROUGH_D = (Route.THREAD_CWD, Route.PROC, Route.PROC_HELD, Route.SYMLINK_FILE)
 """The connect order where /proc can be used (Linux) without proc-direct, its
 first route: forces a connect through the routes through D's /proc means
 (the tests force each route, SPEC). proc-direct's spelling is the /proc
@@ -466,6 +470,50 @@ def d_route_here() -> Route | None:
     return None
 
 
+@functools.cache
+def bind_follows_a_symlink() -> bool:
+    """Whether a bind here follows a symlink in the last component to a path
+    that does not exist yet, making the socket there (what a bind's
+    symlink-file needs). Probed with the ``socket`` module in a fresh
+    directory under ``/tmp``. Where the answer is known it is asserted, so a
+    broken probe cannot quietly move the tests to the other side: macOS
+    follows, Linux does not (measured, hub DR-0016)."""
+    d = tempfile.mkdtemp(prefix="sockat-f-", dir="/tmp")
+    try:
+        target = os.path.join(d, "s.sock")
+        link = os.path.join(d, "l")
+        os.symlink(target, link)
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s, contextlib.suppress(OSError):
+            s.bind(link)
+        follows = is_socket(os.fsencode(target))
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+    if sys.platform == "darwin":
+        assert follows, "a bind is expected to follow a symlink on macOS"
+    if IS_LINUX:
+        assert not follows, "a bind is expected not to follow a symlink on Linux"
+    return follows
+
+
+def bind_route_here() -> Route | None:
+    """The route the default bind takes here, with the configuration read
+    from the environment, for a long path with a short file name: symlink-file
+    where a bind tries it (every system but Linux) and follows the link,
+    else the routes through D (:func:`d_route_here`)."""
+    if not IS_LINUX and bind_follows_a_symlink():
+        return Route.SYMLINK_FILE
+    return d_route_here()
+
+
+def skipped_before_d_here() -> list[str]:
+    """What the default bind skips before the routes through D here, with a
+    usable place for the symlink: the standard (the path is too long), and,
+    where a bind tries symlink-file but does not follow it, symlink-file."""
+    if not IS_LINUX and not bind_follows_a_symlink():
+        return ["standard", "symlink-file"]
+    return ["standard"]
+
+
 def far_connect_here() -> Route | None:
     """The route the connect order of this system takes, with the real
     configuration, for a path far from the cwd and longer than any sockaddr
@@ -483,8 +531,8 @@ def far_connect_here() -> Route | None:
 
 
 needs_long_bind = pytest.mark.skipif(
-    d_route_here() is None,
-    reason="no means of the routes through D here, so no long path can be bound (no fork route in Python)",
+    bind_route_here() is None,
+    reason="no route of the default bind here (no symlink-file a bind follows, no means of the routes through D)",
 )
 """For the tests that bind long paths through the public API."""
 

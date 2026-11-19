@@ -108,13 +108,24 @@ def means_here() -> list[Means]:
     so for bindat and /proc it is taken out of the order
     (:data:`_support.FREEBSD_ORDER_THROUGH_D`,
     :data:`_support.PROC_ORDER_THROUGH_D`). The thread's own cwd needs no
-    forcing: the paths here are too far from the cwd and too long for
-    relative and widened, and /proc is made to look absent."""
+    forcing for the connects: the paths here are too far from the cwd and
+    too long for relative and widened, and /proc is made to look absent. The
+    binds are forced too: a bind tries symlink-file before the routes
+    through D on every system but Linux, and where the bind follows the
+    link (macOS) it carries every path, so it is turned off."""
     found: list[Means] = []
     if IS_FREEBSD:
-        found.append(Means("at", lambda own: d_cfg(own, connect_order=FREEBSD_ORDER_THROUGH_D), Route.AT))
+        found.append(
+            Means(
+                "at",
+                lambda own: d_cfg(own, connect_order=FREEBSD_ORDER_THROUGH_D, bind_symlink_file=False),
+                Route.AT,
+            )
+        )
     if thread_cwd_usable():
-        found.append(Means("thread-cwd", lambda own: d_cfg(own, proc=NO_PROC), Route.THREAD_CWD))
+        found.append(
+            Means("thread-cwd", lambda own: d_cfg(own, proc=NO_PROC, bind_symlink_file=False), Route.THREAD_CWD)
+        )
     if HAS_PROC:
         found.append(
             Means("proc", lambda own: d_cfg(own, thread_cwd=False, connect_order=PROC_ORDER_THROUGH_D), Route.PROC)
@@ -419,7 +430,7 @@ def fallback_route_here(req: _route.Request) -> Route:
         return Route.AT_DIRECT
     if HAS_PROC:
         return Route.PROC_DIRECT
-    return Route.SYMLINK
+    return Route.SYMLINK_FILE
 
 
 # D goes in the first place where it can be made, and the places it cannot be
@@ -469,7 +480,7 @@ def test_d_goes_in_the_first_place_where_it_can_be_made(
     seen.clear()
     links = tmp.new()
     z = with_name(p, b"z.sock")
-    c = d_cfg(tuple(bad), [links], thread_cwd=means.route is Route.THREAD_CWD)
+    c = d_cfg(tuple(bad), [links], thread_cwd=means.route is Route.THREAD_CWD, bind_symlink_file=False)
     before = listing(parent(p))
     listener, r = _route.run_long(BIND, z, c)
     with listener:
@@ -514,7 +525,9 @@ def test_the_places_read_from_the_environment() -> None:
 # child process because it sets TMPDIR: D is made in TMPDIR when it can be,
 # whether TMPDIR is absolute, relative to the cwd, or 600 bytes deep (the
 # place's length never goes into the spelling); and in /tmp when TMPDIR does
-# not exist. The child reports the places D was made in, and the route.
+# not exist. The child reports the places D was made in, and the route. The
+# bind's symlink-file is turned off in the child: where the bind follows the
+# link (macOS) it comes before D and carries the bind without making D.
 @pytest.mark.parametrize("kind", ["absolute", "relative", "deep", "missing"])
 def test_d_goes_in_tmpdir_then_tmp(tmp: TmpDirs, kind: str) -> None:
     t = tmp.new()
@@ -1222,7 +1235,7 @@ def test_where_the_threads_cwd_cannot_be_used_the_next_means_is_tried(
                 raise RuntimeError("can't start new thread")
 
         monkeypatch.setattr("sockat._route.threading", types.SimpleNamespace(Thread=NoThread, Lock=threading.Lock))
-    c = d_cfg((d_place,), [links])
+    c = d_cfg((d_place,), [links], bind_symlink_file=False)
     mark_untouched(d_place)
     made = count_made_d(monkeypatch)
     if HAS_PROC:

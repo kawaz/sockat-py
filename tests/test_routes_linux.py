@@ -167,7 +167,7 @@ def test_a_file_name_that_does_not_fit_behind_proc_goes_on_to_the_next_fallback(
     with listener_at(p) as listener:
         for c, want in (
             (proc_fallback_cfg(own=(tmp.new(),)), Route.PROC_HELD),
-            (proc_fallback_cfg([b"/tmp"]), Route.SYMLINK),
+            (proc_fallback_cfg([b"/tmp"]), Route.SYMLINK_FILE),
         ):
             for req in (CONNECT, CONNECT_NONBLOCKING):
                 client, r = _route.run_long(req, p, c)
@@ -241,7 +241,7 @@ def test_without_proc_the_order_of_the_systems_without_it_runs(tmp: TmpDirs, emp
     with listener_at(far) as listener:
         client, r = _route.run_long(CONNECT, far, c)
         with client:
-            assert r is Route.SYMLINK
+            assert r is Route.SYMLINK_FILE
             accept_ping(listener, client)
     os.unlink(far)
     check_unreachable(far, fallback_cfg(proc=none))
@@ -278,7 +278,7 @@ def test_every_linux_fallback(tmp: TmpDirs, what: str) -> None:
     elif what == "proc-direct":
         f = forced(what, nest(t, 300), proc_fallback_cfg(), routes(bound, Route.PROC_DIRECT), bind_cfg=bind)
     else:
-        want = routes(bound, Route.SYMLINK)
+        want = routes(bound, Route.SYMLINK_FILE)
         f = forced(what, nest(t, 600), fallback_cfg([place], proc=NO_PROC), want, bind_cfg=bind)
         assert_far_from_cwd(f.path)
     check_route(f, [place])

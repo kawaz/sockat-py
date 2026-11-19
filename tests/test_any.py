@@ -16,6 +16,7 @@ symlink route is forced elsewhere only."""
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import errno
 import os
 import re
@@ -35,6 +36,7 @@ from _support import (
     assert_empty,
     assert_far_from_cwd,
     assert_untouched,
+    bind_route_here,
     check_route,
     d_cfg,
     d_route_here,
@@ -51,6 +53,7 @@ from _support import (
     raises_errno,
     routes,
     serve_asyncio,
+    skipped_before_d_here,
     stale_socket,
     thread_cwd_usable,
     with_name,
@@ -110,16 +113,19 @@ def env_cfg(monkeypatch: pytest.MonkeyPatch) -> list[Config]:
 
 def skipped_before_the_symlink() -> list[str]:
     """The routes :func:`any_cfg` makes ``bind_any`` skip, in order: the
-    standard (the path is too long), the routes through D this system has
-    (unusable: turned off, /proc absent), then the fork route this
-    implementation does not have. No place for D is ever tried, as no means
-    is left to use one, so neither is the form without D."""
+    standard (the path is too long), symlink-file where a bind tries it
+    (every system but Linux; no place for its symlink), the routes through D
+    this system has (unusable: turned off, /proc absent), then the fork route
+    this implementation does not have. No place for D is ever tried, as no
+    means is left to use one, so neither is the form without D."""
     names = ["standard"]
+    if not IS_LINUX:
+        names.append("symlink-file")
     if _sys.HAS_THREAD_CWD:
         names.append("thread-cwd")
     if IS_LINUX:
         names.append("proc")
-    return [*names, "fork"]
+    return [*names, "fork-cwd"]
 
 
 def names(skipped: tuple[Skipped, ...]) -> list[str]:
@@ -195,17 +201,19 @@ def test_the_names_are_the_specs() -> None:
         "thread-cwd",
         "at",
         "proc",
-        "fork",
+        "fork-cwd",
         "thread-cwd-sockdir",
         "at-sockdir",
         "proc-sockdir",
-        "fork-sockdir",
+        "fork-cwd-sockdir",
         "proc-direct",
         "proc-held",
         "relative",
         "widened",
-        "symlink",
+        "symlink-file",
+        "symlink-dir",
         "at-direct",
+        "fork-cwd-direct",
     }
     assert {r.value for r in Route} == spec_routes
 
@@ -272,19 +280,21 @@ def test_an_abstract_address_loses_nothing() -> None:
 
 
 # Where the default bind reaches a long path, bind_any takes the same route
-# (through the public API, from the environment) and loses respelled, having
-# skipped only the standard (the path is too long) and, where the system
-# refuses a thread its own cwd (Linux under docker's default seccomp),
-# thread-cwd.
+# (through the public API, from the environment) and loses respelled: the
+# symlink-file route where the bind follows the link (macOS; SPEC: tried
+# right after the standard on every system but Linux), else the routes
+# through D. Skipped: the standard (the path is too long), symlink-file where
+# the bind does not follow the link, and, where the system refuses a thread
+# its own cwd (Linux under docker's default seccomp), thread-cwd.
 @needs_long_bind
 def test_a_long_path_takes_the_default_bind_route(tmp: TmpDirs) -> None:
     p = nest(tmp.new(), 300)
-    here = d_route_here()
+    here = bind_route_here()
     assert here is not None
     listener, losses, route, skipped = bind_any(p)
     with listener:
         assert (losses, route) == (RESPELLED, here.value)
-        want = ["standard"]
+        want = skipped_before_d_here() if here is not Route.SYMLINK_FILE else ["standard"]
         if IS_LINUX and not thread_cwd_usable():
             want.append("thread-cwd")
         assert names(skipped) == want
@@ -295,7 +305,8 @@ def test_a_long_path_takes_the_default_bind_route(tmp: TmpDirs) -> None:
 
 
 # Where D can be made nowhere, bind_any takes the form without D as the
-# default bind does, and loses respelled. Skipped first: the standard, every
+# default bind does, and loses respelled. Skipped first: the standard,
+# symlink-file where a bind tries it (no place for its symlink here), every
 # route through D of this system (a usable one for want of a place for D),
 # the fork route; then the routes of the form without D before the one that
 # carries it.
@@ -314,9 +325,10 @@ def test_where_d_can_be_made_nowhere_the_form_without_d_is_taken(tmp: TmpDirs, e
     with listener:
         assert (losses, route) == (RESPELLED, sockdir[here].value)
         before = candidates[: candidates.index(here)]
-        want = ["standard", *(r.value for r in candidates), "fork", *(sockdir[r].value for r in before)]
+        first = ["standard", *([] if IS_LINUX else ["symlink-file"])]
+        want = [*first, *(r.value for r in candidates), "fork-cwd", *(sockdir[r].value for r in before)]
         assert names(skipped) == want
-        reasons = {s.name: s.reason for s in skipped[1 : 1 + len(candidates)]}
+        reasons = {s.name: s.reason for s in skipped[len(first) : len(first) + len(candidates)]}
         assert {r for r in candidates if reasons[r.value] == _route.NO_PLACE_FOR_D} == usable, skipped
         accept_ping(listener, connect_here(p))
     assert listing(parent(p)) == [b"s.sock"]
@@ -340,7 +352,7 @@ def test_past_the_default_bind_a_place_of_our_own_carries_it(tmp: TmpDirs, env_c
     env_cfg.append(any_cfg((own,)))
     listener, losses, route, skipped = bind_any(p)
     with listener:
-        assert (losses, route) == (RESPELLED, "symlink")
+        assert (losses, route) == (RESPELLED, "symlink-dir")
         assert names(skipped) == skipped_before_the_symlink()
         assert_through(listener, own, p)
     assert_empty(own)
@@ -351,10 +363,10 @@ def test_past_the_default_bind_a_place_of_our_own_carries_it(tmp: TmpDirs, env_c
 
     def way(req: _route.Request) -> tuple[socket.socket, Route]:
         if req.op is _sys.Op.BIND:
-            return bind_any(p).listener, Route.SYMLINK
+            return bind_any(p).listener, Route.SYMLINK_DIR
         return _route.run_long(req, p, d_cfg())
 
-    check_route(Forced("symlink", p, way, routes(Route.SYMLINK, connect_route)), [own])
+    check_route(Forced("symlink", p, way, routes(Route.SYMLINK_DIR, connect_route)), [own])
 
 
 # A place only we can write to is used before a shared one (sticky, ours or
@@ -371,7 +383,7 @@ def test_a_place_of_our_own_is_tried_before_a_shared_one(tmp: TmpDirs, env_cfg: 
     env_cfg.append(any_cfg((shared, own)))
     listener, losses, route, _ = bind_any(p)
     with listener:
-        assert (losses, route) == (RESPELLED, "symlink")
+        assert (losses, route) == (RESPELLED, "symlink-dir")
         assert_through(listener, own, p)
     assert_untouched(shared)
     assert_empty(own)
@@ -388,7 +400,7 @@ def test_a_shared_place_alone_carries_it_with_a_recreatable_spelling(tmp: TmpDir
     env_cfg.append(any_cfg((shared, later)))
     listener, losses, route, _ = bind_any(p)
     with listener:
-        assert (losses, route) == (SHARED, "symlink")
+        assert (losses, route) == (SHARED, "symlink-dir")
         assert_through(listener, shared, p)
         client = connect_here(p)
         with client:
@@ -421,7 +433,7 @@ def test_a_place_that_is_not_safe_is_passed_over(tmp: TmpDirs, env_cfg: list[Con
     env_cfg.append(any_cfg((*unsafe, t + b"/missing", file, shared)))
     listener, losses, route, _ = bind_any(p)
     with listener:
-        assert (losses, route) == (SHARED, "symlink")
+        assert (losses, route) == (SHARED, "symlink-dir")
         assert_through(listener, shared, p)
     for d in unsafe:
         assert_untouched(d)
@@ -443,7 +455,7 @@ def test_a_place_too_long_for_the_spelling_is_passed_over(tmp: TmpDirs, env_cfg:
     env_cfg.append(any_cfg((too_long, just)))
     listener, _, route, _ = bind_any(p)
     with listener:
-        assert route == "symlink"
+        assert route == "symlink-dir"
         assert_through(listener, just, p)
         assert len(os.fsencode(kernel_sockname(listener))) == DIRECT_MAX
     assert_untouched(too_long)
@@ -492,8 +504,11 @@ def test_the_places_for_the_symlink_read_from_the_environment(monkeypatch: pytes
 
 # A bind that fails is the error sockat.bind raises (its type and errno),
 # with the routes skipped up to the failure and the route whose bind failed:
-# the standard for a short path (nothing skipped); the default bind's route
-# for a long one.
+# the standard for a short path (nothing skipped); the default bind's first
+# route that binds for a long one: symlink-file where a bind tries it (every
+# system but Linux; with a socket file at the path its failure is the
+# outcome whether or not the kernel followed the link), else the routes
+# through D.
 def test_a_failed_bind_tells_the_route_and_what_was_skipped(tmp: TmpDirs) -> None:
     short = nest(tmp.new(), 60)
     stale_socket(short)
@@ -507,7 +522,8 @@ def test_a_failed_bind_tells_the_route_and_what_was_skipped(tmp: TmpDirs) -> Non
     stale_socket(long)
     e = raised(long)
     assert e.errno == errno.EADDRINUSE
-    assert getattr(e, "route") == here.value  # noqa: B009
+    failed = here if IS_LINUX else Route.SYMLINK_FILE
+    assert getattr(e, "route") == failed.value  # noqa: B009
     want = ["standard"]
     if IS_LINUX and not thread_cwd_usable():
         want.append("thread-cwd")
@@ -528,23 +544,29 @@ def test_a_missing_directory_tells_no_route(tmp: TmpDirs) -> None:
 
 
 # A file name no route carries (too long for R/<name>, for the form without
-# D and for the symlink through /tmp) is ENAMETOOLONG with every route
-# skipped, through the public API from the environment: the standard, the
-# routes through D this system has (the spelling too long), the fork route;
-# no route got as far as a bind.
-def test_a_file_name_no_route_carries_tells_every_route_skipped(tmp: TmpDirs) -> None:
+# D and for bind_any's symlink through /tmp) is ENAMETOOLONG with every route
+# skipped, through the public API from the environment with no place for
+# symlink-file (which carries any file name where the bind follows the link,
+# as on macOS): the standard, symlink-file where a bind tries it, the routes
+# through D this system has (the spelling too long), the fork route; no
+# route got as far as a bind.
+def test_a_file_name_no_route_carries_tells_every_route_skipped(tmp: TmpDirs, env_cfg: list[Config]) -> None:
     p = with_name(far(tmp), b"n" * 100)
+    from_env = Config.from_tmpdir(os.environb.get(b"TMPDIR"), os.environb.get(b"XDG_RUNTIME_DIR"))
+    env_cfg.append(dataclasses.replace(from_env, link_places=()))
     e = raised(p)
     assert e.errno == errno.ENAMETOOLONG
     assert getattr(e, "route") is None  # noqa: B009
     want = ["standard"]
+    if not IS_LINUX:
+        want.append("symlink-file")
     if IS_FREEBSD:
         want.append("at")
     elif _sys.HAS_THREAD_CWD:
         want.append("thread-cwd")
     if IS_LINUX:
         want.append("proc")
-    assert names(getattr(e, "skipped")) == [*want, "fork"]  # noqa: B009
+    assert names(getattr(e, "skipped")) == [*want, "fork-cwd"]  # noqa: B009
     assert not os.path.lexists(p)
 
 
@@ -562,7 +584,7 @@ def test_a_failure_through_the_symlink_is_not_retried(tmp: TmpDirs, env_cfg: lis
     env_cfg.append(any_cfg((first, second)))
     e = raised(p)
     assert e.errno == errno.EADDRINUSE
-    assert getattr(e, "route") == "symlink"  # noqa: B009
+    assert getattr(e, "route") == "symlink-dir"  # noqa: B009
     assert names(getattr(e, "skipped")) == skipped_before_the_symlink()  # noqa: B009
     assert os.stat(first).st_mtime != 0
     assert_empty(first)

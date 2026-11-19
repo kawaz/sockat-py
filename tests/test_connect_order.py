@@ -25,7 +25,9 @@ from _support import (
     assert_far_from_cwd,
     assert_untouched,
     d_cfg,
+    d_route_here,
     dir_id,
+    far_connect_here,
     listener_at,
     listing,
     mark_untouched,
@@ -120,12 +122,12 @@ def test_the_connect_order_of_this_system() -> None:
     if IS_FREEBSD:
         assert order(True) == order(False) == (Route.AT_DIRECT, Route.AT)
     elif IS_LINUX:
-        assert order(True) == (Route.PROC_DIRECT, Route.THREAD_CWD, Route.PROC, Route.PROC_HELD, Route.SYMLINK)
-        assert order(False) == (Route.RELATIVE, Route.THREAD_CWD, Route.SYMLINK)
+        assert order(True) == (Route.PROC_DIRECT, Route.THREAD_CWD, Route.PROC, Route.PROC_HELD, Route.SYMLINK_FILE)
+        assert order(False) == (Route.RELATIVE, Route.THREAD_CWD, Route.SYMLINK_FILE)
     elif IS_APPLE:
-        assert order(True) == order(False) == (Route.RELATIVE, Route.WIDENED, Route.THREAD_CWD, Route.SYMLINK)
+        assert order(True) == order(False) == (Route.RELATIVE, Route.WIDENED, Route.THREAD_CWD, Route.SYMLINK_FILE)
     else:
-        assert order(True) == order(False) == (Route.RELATIVE, Route.SYMLINK)
+        assert order(True) == order(False) == (Route.RELATIVE, Route.SYMLINK_FILE)
 
 
 # The routes run in the order of the system (with /proc as found: present,
@@ -308,7 +310,7 @@ def test_where_d_can_be_made_nowhere_the_routes_that_use_it_are_skipped(
     with listener_at(p) as listener:
         done, _ = connect(p, c)
         with done.sock as client:
-            assert done.route is Route.SYMLINK
+            assert done.route is Route.SYMLINK_FILE
             assert noted(done.skipped) == before
             assert {r for r, why in done.skipped if why == NO_PLACE_FOR_D} == no_d, done.skipped
             accept_ping(listener, client)
@@ -336,7 +338,7 @@ def test_a_failure_on_a_route_of_the_order_names_that_route(tmp: TmpDirs) -> Non
     cases: list[tuple[bytes, _route.Config, Route, list[Route]]] = []
     p = far(tmp)
     c = d_cfg((), [links], thread_cwd=False, proc=NO_PROC)
-    cases.append((p, c, Route.SYMLINK, [Route.STANDARD, *_route.connect_order(False)[:-1]]))
+    cases.append((p, c, Route.SYMLINK_FILE, [Route.STANDARD, *_route.connect_order(False)[:-1]]))
     if IS_APPLE:
         cases.append((far(tmp, 200), d_cfg((), [links]), Route.WIDENED, [Route.STANDARD, Route.RELATIVE]))
     if HAS_PROC:
@@ -346,7 +348,7 @@ def test_a_failure_on_a_route_of_the_order_names_that_route(tmp: TmpDirs) -> Non
         cases.append((held, d_cfg((tmp.new(),), [links], thread_cwd=False), Route.PROC_HELD, before))
     for path, cfg, route, before_it in cases:
         stale_named(path)
-        if route is not Route.SYMLINK:
+        if route is not Route.SYMLINK_FILE:
             mark_untouched(links)
         for req in (CONNECT, CONNECT_NONBLOCKING):
             trail = Trail()
@@ -354,7 +356,7 @@ def test_a_failure_on_a_route_of_the_order_names_that_route(tmp: TmpDirs) -> Non
                 _route.reach_long(req, path, cfg, trail)
             assert trail.trying is route, (route, req)
             assert noted(trail.skipped) == before_it, (route, req)
-        if route is not Route.SYMLINK:
+        if route is not Route.SYMLINK_FILE:
             assert_untouched(links)
         assert listing(parent(path)) == [os.path.basename(path)]
     assert_empty(links)
@@ -371,3 +373,48 @@ def test_past_the_last_route_every_route_is_noted(tmp: TmpDirs) -> None:
         _route.reach_long(CONNECT, p, d_cfg((), (), thread_cwd=False, proc=NO_PROC), trail)
     assert trail.trying is None
     assert noted(trail.skipped) == [Route.STANDARD, *_route.connect_order(False)]
+
+
+# ----- the socket's directory that cannot be opened -----
+
+
+# Where the socket's directory cannot be opened (a real directory of mode
+# 0300, opened O_RDONLY as the systems other than Linux and Apple open it,
+# which needs read permission), neither the bind nor the connects fail as a
+# whole: only the routes that need its fd cannot be used (proc-direct and
+# at-direct, noted as skipped for it; D in the socket's directory; the form
+# without D), and the others carry them. The bind goes through D made in
+# another place; the connect where /proc can be used goes on past
+# proc-direct to the routes through D (thread-cwd, else /proc, which proc-
+# direct otherwise always comes before), on FreeBSD past at-direct to at,
+# elsewhere as usual. Root bypasses the permission, so the test runs for
+# other users only.
+@pytest.mark.skipif(os.geteuid() == 0, reason="root bypasses the permission under test")
+def test_a_socket_directory_that_cannot_be_opened_leaves_the_other_routes(
+    tmp: TmpDirs, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    here = d_route_here()
+    if here is None:
+        pytest.skip("no means of the routes through D here")
+    p = far(tmp)
+    os.chmod(parent(p), 0o300)
+    monkeypatch.setattr(_route, "open_dir", _route._open_read_only)
+    with pytest.raises(PermissionError):
+        _route.open_dir(parent(p))
+    d_place = tmp.new()
+    c = d_cfg((d_place,), bind_symlink_file=False)
+    listener, r = _route.run_long(_route.BIND, p, c)
+    with listener:
+        assert r is here
+        done, _ = connect(p, c)
+        with done.sock as client:
+            if IS_FREEBSD:
+                assert done.route is Route.AT
+                assert dict(done.skipped)[Route.AT_DIRECT] == _route.SOCKET_DIR_NOT_OPENED
+            elif HAS_PROC:
+                assert done.route is (Route.THREAD_CWD if thread_cwd_usable() else Route.PROC)
+                assert dict(done.skipped)[Route.PROC_DIRECT] == _route.SOCKET_DIR_NOT_OPENED
+            else:
+                assert done.route is far_connect_here()
+            accept_ping(listener, client)
+    assert_empty(d_place)

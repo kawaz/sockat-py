@@ -62,7 +62,7 @@ def far(tmp: TmpDirs, name: bytes = b"s.sock") -> bytes:
     return p
 
 
-def connects_through(p: bytes, cfg: _route.Config, want: Route = Route.SYMLINK) -> None:
+def connects_through(p: bytes, cfg: _route.Config, want: Route = Route.SYMLINK_FILE) -> None:
     """A listener at ``p`` is reached by both connects through ``cfg``, by
     the route ``want``."""
     with listener_at(p) as listener:
@@ -318,7 +318,7 @@ def test_the_link_resolves_the_path_as_the_kernel_does(tmp: TmpDirs) -> None:
         decoy_listener.setblocking(False)
         client, r = _route.run_long(CONNECT, spelled, fallback_cfg([base]))
         with client:
-            assert r is Route.SYMLINK
+            assert r is Route.SYMLINK_FILE
             accept_ping(listener, client)
         with pytest.raises(BlockingIOError):
             decoy_listener.accept()
@@ -375,7 +375,7 @@ def test_a_place_where_the_link_cannot_be_created_moves_on_to_the_next(tmp: TmpD
     with open(file, "wb"):
         pass
     for base in (NO_PLACE, file):
-        assert _route.symlink_route(CONNECT, base, p, DIRECT_MAX) is _route.Skip.UNUSABLE, base
+        assert _route.symlink_file_route(CONNECT, base, p, DIRECT_MAX) is _route.Skip.UNUSABLE, base
     good = tmp.new()
     for i, bad in enumerate((NO_PLACE, file)):
         connects_through(with_name(p, f"{i}.sock".encode()), fallback_cfg([bad, good]))
@@ -412,7 +412,7 @@ def test_a_tmpdir_too_long_for_the_symlink_falls_back_to_tmp(tmp: TmpDirs) -> No
     mark_untouched(long_tmpdir)
     with listener_at(p):
         out = run_child("connect_report", b"/", {"PATH": p}, env={"TMPDIR": long_tmpdir})
-    assert out["route"] == Route.SYMLINK.value, out
+    assert out["route"] == Route.SYMLINK_FILE.value, out
     assert out["bases"] == f'["{os.fsdecode(long_tmpdir)}", "/tmp"]', out
     assert_untouched(long_tmpdir)
 
@@ -430,7 +430,7 @@ def test_a_long_relative_path_is_reached_through_a_link_to_its_absolute_target(t
     p = nest(t, len(t) + 1 + 300)
     rel = p[len(t) + 1 :]
     out = run_child("relative_input", t, {"REL": rel, "BASE": base})
-    assert out["connect"] == Route.SYMLINK.value, out
+    assert out["connect"] == Route.SYMLINK_FILE.value, out
     assert_empty(base)
 
 

@@ -5,6 +5,7 @@ takes the widened form (the routes through D spells it within ``sun_path``)."""
 
 from __future__ import annotations
 
+import dataclasses
 import errno
 import os
 import socket
@@ -15,6 +16,7 @@ from _support import (
     UNTOUCHED,
     TmpDirs,
     accept_ping,
+    assert_address_fits,
     assert_empty,
     assert_far_from_cwd,
     assert_untouched,
@@ -129,11 +131,11 @@ def test_every_apple_route(tmp: TmpDirs, what: str) -> None:
     elif what.startswith("widened-"):
         f = forced(what, nest(t, int(what[8:])), fallback_cfg(), bound, bind_cfg=d_cfg())
     elif what == "symlink":
-        want = routes(Route.THREAD_CWD, Route.SYMLINK)
+        want = routes(Route.THREAD_CWD, Route.SYMLINK_FILE)
         f = forced(what, nest(t, 600), fallback_cfg([place]), want, bind_cfg=d_cfg())
     else:
         places = [long_place(tmp, 150), place]
-        want = routes(Route.THREAD_CWD, Route.SYMLINK)
+        want = routes(Route.THREAD_CWD, Route.SYMLINK_FILE)
         f = forced(what, nest(t, 600), fallback_cfg(places), want, bind_cfg=d_cfg())
     if f.want(BIND) is not Route.STANDARD:
         assert_far_from_cwd(f.path)
@@ -154,8 +156,13 @@ def test_every_apple_route(tmp: TmpDirs, what: str) -> None:
 #   form (Route.WIDENED);
 # * by the file name: names of 93 (one more than `R/<name>` takes), 200 and
 #   253 bytes with every route on (D in the socket's directory, a short place
-#   for the symlink). The bind is ENAMETOOLONG, with nothing created next to
-#   the socket or in the place; the connects go through the link to the file.
+#   for the symlink). The bind goes through symlink-file (SPEC, DR-0016: the
+#   bind follows a symlink on macOS), whose spelling `<place>/sockat.XXXXXXXXXX`
+#   fits sun_path whatever the name (the kernel's address of the listener
+#   fits it too, never widened); with symlink-file off, standing in for a
+#   kernel that does not follow the link, the bind is ENAMETOOLONG with
+#   nothing created next to the socket or in the place. The connects go
+#   through the link to the file.
 def test_an_apple_bind_never_takes_the_widened_sockaddr(tmp: TmpDirs) -> None:
     t = tmp.new()
     for i, total in enumerate((DIRECT_MAX + 1, 200, 253)):
@@ -178,15 +185,26 @@ def test_an_apple_bind_never_takes_the_widened_sockaddr(tmp: TmpDirs) -> None:
     for n in (DIRECT_MAX - _route.IN_OWN_DIR_LEN + 1, 200, 253):
         p = nest(t, 600, b"n" * n)
         before = listing(parent(p))
+        listener, r = _route.run_long(BIND, p, c)
+        with listener:
+            assert r is Route.SYMLINK_FILE, n
+            assert_address_fits(f"{n}", kernel_sockname(listener))
+            assert sorted(listing(parent(p))) == sorted([*before, b"n" * n])
+            client, r = _route.run_long(CONNECT, p, c)
+            with client:
+                assert r is Route.SYMLINK_FILE, n
+                accept_ping(listener, client)
+        os.unlink(p)
+        assert_empty(short)
         mark_untouched(short)
         with raises_errno(errno.ENAMETOOLONG):
-            _route.run_long(BIND, p, c)
+            _route.run_long(BIND, p, dataclasses.replace(c, bind_symlink_file=False))
         assert listing(parent(p)) == before
         assert_untouched(short)
         with listener_at(p) as listener:
             client, r = _route.run_long(CONNECT, p, c)
             with client:
-                assert r is Route.SYMLINK, n
+                assert r is Route.SYMLINK_FILE, n
                 accept_ping(listener, client)
     assert_empty(short)
 
@@ -261,7 +279,7 @@ def test_a_kernel_refusing_the_widened_form_moves_on_in_the_plain_sockaddr(
     with listener_at(p) as listener:
         client, r = _route.run_long(CONNECT, p, c)
         with client:
-            assert r is Route.SYMLINK
+            assert r is Route.SYMLINK_FILE
             accept_ping(listener, client)
     assert_untouched(long150)
 
@@ -269,7 +287,7 @@ def test_a_kernel_refusing_the_widened_form_moves_on_in_the_plain_sockaddr(
     with listener_at(q) as listener:
         client, r = _route.run_long(CONNECT, q, c)
         with client:
-            assert r is Route.SYMLINK
+            assert r is Route.SYMLINK_FILE
             accept_ping(listener, client)
     # The link under the 150-byte place was made and removed again.
     assert os.stat(long150).st_mtime != UNTOUCHED
