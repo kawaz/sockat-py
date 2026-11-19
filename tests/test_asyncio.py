@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import os
 import socket
+import sys
 from collections.abc import Callable
 
 import pytest
@@ -91,7 +92,10 @@ def test_sockets_from_sockat_are_used_by_asyncio_as_the_standards_are(tmp: TmpDi
 # handed the spelling, it would have recorded the unrelated file's inode at
 # the start and removed that file at the close. The cwd is changed, so this
 # runs in a child process (_children.asyncio_namesakes); the thread-cwd part
-# runs where the system gives a thread a cwd of its own.
+# runs where the system gives a thread a cwd of its own. FreeBSD has neither
+# spelling: a thread has no cwd of its own there, and a long path is bound
+# with bindat before the relative route is reached.
+@pytest.mark.skipif(sys.platform.startswith("freebsd"), reason="FreeBSD binds a long path with bindat")
 def test_asyncio_removes_the_socket_file_not_a_namesake_from_the_cwd(tmp: TmpDirs) -> None:
     t = tmp.new()
     thread = nest(tmp.new(), 600, b"s.sock")
