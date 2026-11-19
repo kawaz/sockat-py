@@ -4,8 +4,12 @@ package: it sits outside ``src/`` so neither the wheel nor the sdist carries
 it.
 
 Reads one JSON object from stdin, ``{"op": "bind" | "connect", "path":
-"..."}``, makes one bind (and listen) / connect through the routes of the
-default bind / connect, and writes one JSON object to stdout::
+"...", "last_resort": true | false}`` (``last_resort`` may be left out: false),
+makes one bind (and listen) / connect through the routes of the default bind
+/ connect, or with ``last_resort`` through those of ``sockat.ex`` with the
+last resort (a bind's symlink-dir last; a connect's fork-cwd-direct, which
+this implementation does not have, noted as skipped), and writes one JSON
+object to stdout::
 
     {"ok": true, "error": null, "route": "thread-cwd", "losses": ["respelled"], "skipped": ["standard"]}
 
@@ -38,19 +42,23 @@ import sys
 from dataclasses import dataclass
 from typing import Literal
 
-from sockat._route import BIND, CONNECT, Loss, Reached, Route, Trail, reach
+from sockat._route import Loss, Reached, Request, Route, Trail, reach
+from sockat._sys import Op
 
 
 @dataclass(frozen=True)
 class Case:
-    """The input: what to do, and the path handed to the library as is."""
+    """The input: what to do, the path handed to the library as is, and
+    whether the last resort is used."""
 
     op: Literal["bind", "connect"]
     path: str
+    last_resort: bool = False
 
 
 class BadInput(Exception):
-    """The input is not ``{"op": "bind" | "connect", "path": "<str>"}``."""
+    """The input is not ``{"op": "bind" | "connect", "path": "<str>",
+    "last_resort": <bool>}`` (``last_resort`` optional)."""
 
 
 def parse(text: str) -> Case:
@@ -67,7 +75,10 @@ def parse(text: str) -> Case:
     path = doc.get("path")
     if not isinstance(path, str):
         raise BadInput('"path" must be a string')
-    return Case(op, path)
+    last_resort = doc.get("last_resort", False)
+    if not isinstance(last_resort, bool):
+        raise BadInput('"last_resort" must be true or false')
+    return Case(op, path, last_resort)
 
 
 def _names(skipped: list[tuple[Route, str]] | tuple[tuple[Route, str], ...]) -> list[str]:
@@ -81,7 +92,7 @@ def _losses(losses: tuple[Loss, ...]) -> list[str]:
 def run(case: Case) -> dict[str, object]:
     """Make the call and give the output object."""
     trail = Trail()
-    req = BIND if case.op == "bind" else CONNECT
+    req = Request(Op.BIND if case.op == "bind" else Op.CONNECT, last_resort=case.last_resort)
     try:
         done: Reached = reach(req, case.path, trail)
     except ValueError:
