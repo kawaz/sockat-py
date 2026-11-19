@@ -111,8 +111,9 @@ def means_here() -> list[Means]:
     forcing for the connects: the paths here are too far from the cwd and
     too long for relative and widened, and /proc is made to look absent. The
     binds are forced too: a bind tries symlink-file before the routes
-    through D on every system but Linux, and where the bind follows the
-    link (macOS) it carries every path, so it is turned off."""
+    through D where a bind was not measured not to follow a symlink, and
+    where the bind follows the link (macOS, NetBSD) it carries every path,
+    so it is turned off."""
     found: list[Means] = []
     if IS_FREEBSD:
         found.append(

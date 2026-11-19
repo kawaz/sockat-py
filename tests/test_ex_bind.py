@@ -28,6 +28,7 @@ import sys
 
 import pytest
 from _support import (
+    BIND_TRIES_SYMLINK_FILE,
     HAS_PROC,
     SRC_DIR,
     Forced,
@@ -120,12 +121,13 @@ def env_cfg(monkeypatch: pytest.MonkeyPatch) -> list[Config]:
 def skipped_before_the_symlink() -> list[str]:
     """The routes :func:`last_resort_cfg` makes ``sockat.ex.bind`` skip, in order: the
     standard (the path is too long), symlink-file where a bind tries it
-    (every system but Linux; no place for its symlink), the routes through D
+    (not where a bind was measured not to follow a symlink; no place for its
+    symlink), the routes through D
     this system has (unusable: turned off, /proc absent), then the fork route
     this implementation does not have. No place for D is ever tried, as no
     means is left to use one, so neither is the form without D."""
     names = ["standard"]
-    if not IS_LINUX:
+    if BIND_TRIES_SYMLINK_FILE:
         names.append("symlink-file")
     if _sys.HAS_THREAD_CWD:
         names.append("thread-cwd")
@@ -301,8 +303,9 @@ def test_an_abstract_address_loses_nothing() -> None:
 
 # Where the default bind reaches a long path, sockat.ex.bind takes the same route
 # (through the public API, from the environment) and loses respelled: the
-# symlink-file route where the bind follows the link (macOS; SPEC: tried
-# right after the standard on every system but Linux), else the routes
+# symlink-file route where the bind follows the link (macOS, NetBSD; SPEC:
+# tried right after the standard where a bind was not measured not to follow
+# a symlink), else the routes
 # through D. Skipped: the standard (the path is too long), symlink-file where
 # the bind does not follow the link, and, where the system refuses a thread
 # its own cwd (Linux under docker's default seccomp), thread-cwd.
@@ -345,7 +348,7 @@ def test_where_d_can_be_made_nowhere_the_form_without_d_is_taken(tmp: TmpDirs, e
     with listener:
         assert (losses, route) == (RESPELLED, sockdir[here].value)
         before = candidates[: candidates.index(here)]
-        first = ["standard", *([] if IS_LINUX else ["symlink-file"])]
+        first = ["standard", *(["symlink-file"] if BIND_TRIES_SYMLINK_FILE else [])]
         want = [*first, *(r.value for r in candidates), "fork-cwd", *(sockdir[r].value for r in before)]
         assert names(skipped) == want
         reasons = {s.name: s.reason for s in skipped[len(first) : len(first) + len(candidates)]}
@@ -525,8 +528,8 @@ def test_the_places_for_the_symlink_read_from_the_environment(monkeypatch: pytes
 # A bind that fails is the error sockat.bind raises (its type and errno),
 # with the routes skipped up to the failure and the route whose bind failed:
 # the standard for a short path (nothing skipped); the default bind's first
-# route that binds for a long one: symlink-file where a bind tries it (every
-# system but Linux; with a socket file at the path its failure is the
+# route that binds for a long one: symlink-file where a bind tries it (not
+# on Linux, FreeBSD, OpenBSD or illumos; with a socket file at the path its failure is the
 # outcome whether or not the kernel followed the link), else the routes
 # through D.
 def test_a_failed_bind_tells_the_route_and_what_was_skipped(tmp: TmpDirs) -> None:
@@ -542,7 +545,7 @@ def test_a_failed_bind_tells_the_route_and_what_was_skipped(tmp: TmpDirs) -> Non
     stale_socket(long)
     e = raised(long)
     assert e.errno == errno.EADDRINUSE
-    failed = here if IS_LINUX else Route.SYMLINK_FILE
+    failed = Route.SYMLINK_FILE if BIND_TRIES_SYMLINK_FILE else here
     assert getattr(e, "route") == failed.value  # noqa: B009
     want = ["standard"]
     if IS_LINUX and not thread_cwd_usable():
@@ -578,7 +581,7 @@ def test_a_file_name_no_route_carries_tells_every_route_skipped(tmp: TmpDirs, en
     assert e.errno == errno.ENAMETOOLONG
     assert getattr(e, "route") is None  # noqa: B009
     want = ["standard"]
-    if not IS_LINUX:
+    if BIND_TRIES_SYMLINK_FILE:
         want.append("symlink-file")
     if IS_FREEBSD:
         want.append("at")

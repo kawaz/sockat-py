@@ -383,7 +383,7 @@ def d_cfg(
     proc: bytes = PROC,
     wide: bool = IS_APPLE,
     connect_order: tuple[Route, ...] | None = None,
-    bind_symlink_file: bool = not IS_LINUX,
+    bind_symlink_file: bool = not _route.BIND_DOES_NOT_FOLLOW_A_SYMLINK,
 ) -> Config:
     """The route order's inputs with ``own`` as the places for D (the socket's
     directory unless given), the thread's own cwd tried unless turned off,
@@ -470,14 +470,21 @@ def d_route_here() -> Route | None:
     return None
 
 
+BIND_TRIES_SYMLINK_FILE = not _route.BIND_DOES_NOT_FOLLOW_A_SYMLINK
+"""Whether the default bind tries symlink-file here: not where a bind was
+measured not to follow a symlink (Linux, FreeBSD, OpenBSD, illumos; hub
+SPEC)."""
+
+
 @functools.cache
 def bind_follows_a_symlink() -> bool:
     """Whether a bind here follows a symlink in the last component to a path
     that does not exist yet, making the socket there (what a bind's
     symlink-file needs). Probed with the ``socket`` module in a fresh
     directory under ``/tmp``. Where the answer is known it is asserted, so a
-    broken probe cannot quietly move the tests to the other side: macOS
-    follows, Linux does not (measured, hub DR-0016)."""
+    broken probe cannot quietly move the tests to the other side: macOS and
+    NetBSD follow, Linux, FreeBSD, OpenBSD and illumos do not (measured, hub
+    SPEC)."""
     d = tempfile.mkdtemp(prefix="sockat-f-", dir="/tmp")
     try:
         target = os.path.join(d, "s.sock")
@@ -488,19 +495,19 @@ def bind_follows_a_symlink() -> bool:
         follows = is_socket(os.fsencode(target))
     finally:
         shutil.rmtree(d, ignore_errors=True)
-    if sys.platform == "darwin":
-        assert follows, "a bind is expected to follow a symlink on macOS"
-    if IS_LINUX:
-        assert not follows, "a bind is expected not to follow a symlink on Linux"
+    if sys.platform == "darwin" or sys.platform.startswith("netbsd"):
+        assert follows, f"a bind is expected to follow a symlink on {sys.platform} (measured, hub SPEC)"
+    if _route.BIND_DOES_NOT_FOLLOW_A_SYMLINK:
+        assert not follows, f"a bind is expected not to follow a symlink on {sys.platform} (measured, hub SPEC)"
     return follows
 
 
 def bind_route_here() -> Route | None:
     """The route the default bind takes here, with the configuration read
     from the environment, for a long path with a short file name: symlink-file
-    where a bind tries it (every system but Linux) and follows the link,
+    where a bind tries it (:data:`BIND_TRIES_SYMLINK_FILE`) and follows the link,
     else the routes through D (:func:`d_route_here`)."""
-    if not IS_LINUX and bind_follows_a_symlink():
+    if BIND_TRIES_SYMLINK_FILE and bind_follows_a_symlink():
         return Route.SYMLINK_FILE
     return d_route_here()
 
@@ -509,7 +516,7 @@ def skipped_before_d_here() -> list[str]:
     """What the default bind skips before the routes through D here, with a
     usable place for the symlink: the standard (the path is too long), and,
     where a bind tries symlink-file but does not follow it, symlink-file."""
-    if not IS_LINUX and not bind_follows_a_symlink():
+    if BIND_TRIES_SYMLINK_FILE and not bind_follows_a_symlink():
         return ["standard", "symlink-file"]
     return ["standard"]
 

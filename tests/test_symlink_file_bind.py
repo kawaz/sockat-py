@@ -1,14 +1,17 @@
 """A bind's symlink-file route (hub SPEC "symlink-file", DR-0016): right
-after the standard, on every system but Linux / Android, a symlink
+after the standard, except where a bind was measured not to follow a
+symlink in the last component (Linux / Android, FreeBSD, OpenBSD, illumos),
+a symlink
 ``<place>/sockat.XXXXXXXXXX`` to the socket file in a safe place, the bind
 through it, the symlink removed again. Where the bind follows a symlink in
-the last component (macOS) the socket file is made at the path whatever its
-file name; where it does not (Linux, measured), the kernel answers without
-making anything there, and the route is told unusable at run time and
-skipped.
+the last component (macOS, NetBSD) the socket file is made at the path
+whatever its file name; where it does not, the kernel answers without
+making anything there, and on a system not measured the route is told
+unusable at run time and skipped.
 
-Linux does not try the route by default (``Config.bind_symlink_file``); the
-tests turn it on there to see a kernel that does not follow the link. The
+The systems measured not to follow the link do not try the route by default
+(``Config.bind_symlink_file``); the tests turn it on there to see the route
+tell a kernel that does not follow the link at run time. The
 places are directories of the tests' own (0700, so safe) unless a test says
 otherwise, and the paths are 600 bytes deep under /tmp (so the connects take
 the thread's own cwd on macOS, proc-direct on Linux)."""
@@ -22,6 +25,7 @@ import sys
 
 import pytest
 from _support import (
+    BIND_TRIES_SYMLINK_FILE,
     TmpDirs,
     accept_ping,
     assert_empty,
@@ -48,7 +52,7 @@ from _support import (
 
 from sockat import _route
 from sockat._route import BIND, OWN_DIR_PREFIX, RANDOM_LEN, Loss, Route, Trail
-from sockat._sys import IS_FREEBSD, IS_LINUX
+from sockat._sys import IS_FREEBSD
 
 PROBED = (
     f"probe on {sys.platform}: a bind {'follows' if bind_follows_a_symlink() else 'does not follow'}"
@@ -56,14 +60,16 @@ PROBED = (
 )
 """What :func:`_support.bind_follows_a_symlink` found here, as one line. It is
 the reason of every skip below, so the test run's summary (``-ra``, the
-project's default) shows it on each system, the CI's VMs included (the SPEC
-leaves it unconfirmed on FreeBSD, NetBSD, OpenBSD and illumos)."""
+project's default) shows it on each system, the CI's VMs included, where a
+change of a kernel would show first."""
 
-FOLLOWS = not IS_LINUX and bind_follows_a_symlink()
+FOLLOWS = BIND_TRIES_SYMLINK_FILE and bind_follows_a_symlink()
 """Whether the default bind here goes through symlink-file (tried, and the
 bind follows the link)."""
 
-follows = pytest.mark.skipif(not FOLLOWS, reason=PROBED + ("; Linux does not try the route" if IS_LINUX else ""))
+follows = pytest.mark.skipif(
+    not FOLLOWS, reason=PROBED + ("" if BIND_TRIES_SYMLINK_FILE else "; the default bind does not try the route here")
+)
 
 LINK = re.escape(OWN_DIR_PREFIX) + rb"[A-Za-z0-9]{%d}" % RANDOM_LEN
 
@@ -182,11 +188,13 @@ def test_where_the_bind_does_not_follow_the_link_it_is_skipped(tmp: TmpDirs) -> 
     assert_empty(links)
 
 
-# On Linux the route is not in the bind's order by default: it is neither
-# tried nor noted as skipped (SPEC: a route not in the system's order is not
-# noted), and nothing is made in the place for its symlink.
-@pytest.mark.skipif(not IS_LINUX, reason="Linux does not try the route")
-def test_linux_does_not_try_the_route(tmp: TmpDirs) -> None:
+# Where a bind was measured not to follow a symlink (Linux / Android,
+# FreeBSD, OpenBSD, illumos), the route is not in the bind's order by
+# default (SPEC): it is neither tried nor noted as skipped (a route not in
+# the system's order is not noted), and nothing is made in the place for its
+# symlink.
+@pytest.mark.skipif(BIND_TRIES_SYMLINK_FILE, reason=PROBED + "; the default bind tries the route here")
+def test_where_a_bind_does_not_follow_a_symlink_the_route_is_not_tried(tmp: TmpDirs) -> None:
     p = far(tmp)
     links = tmp.new()
     mark_untouched(links)

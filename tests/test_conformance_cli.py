@@ -157,6 +157,11 @@ def test_long_file_in_the_middle(tmp: TmpDirs) -> None:
     assert out == {"ok": False, "error": "ENOTDIR", "route": None, "losses": [], "skipped": []}
 
 
+# Where no route of the default bind can bind a long path (OpenBSD and
+# illumos), the bind ends in ENAMETOOLONG before any route binds, file or no
+# file at the path (SPEC: the long bind's end), which the routes' own tests
+# check; EADDRINUSE from a route is checked where one binds.
+@needs_long_bind
 def test_long_bind_onto_a_file(tmp: TmpDirs) -> None:
     root, places = tmp.new(), tmp.new()
     path = nest(root, LONG)
