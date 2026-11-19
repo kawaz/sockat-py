@@ -20,6 +20,7 @@ from enum import Enum, StrEnum
 from typing import Literal, NamedTuple, TypeAlias
 
 from . import _path, _socket_file
+from ._errors import CwdChanged
 from ._sockets import PathSocket
 from ._sys import (
     DIRECT_MAX,
@@ -1531,11 +1532,6 @@ def _cwd_spellings(cwd: bytes, cwd_id: tuple[int, int]) -> list[bytes]:
     if pwd and pwd.startswith(b"/") and pwd != cwd and _dir_id(pwd) == cwd_id:
         spellings.append(pwd)
     return spellings
-
-
-class CwdChanged(OSError):
-    """Raised by :meth:`Relative.run` when the cwd changed during the call.
-    Not exported: callers see an :class:`OSError` without an errno."""
 
 
 @dataclass(frozen=True)

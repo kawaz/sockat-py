@@ -104,7 +104,9 @@ def bind(path: StrOrBytesPath, *, last_resort: bool = False) -> Bound:
     ``discard()`` removes the socket file the bind made, and nothing else:
     right after the bind goes through, before the listener is returned, the
     realpath of the socket file and its ``(st_dev, st_ino)`` are remembered
-    (when that fails, the listener is closed and the error raised), and
+    (when that fails, the listener is closed and the error raised; for a
+    relative path, so is a cwd changed between the start of the call and the
+    bind, an :class:`OSError` without ``errno``), and
     ``discard()`` removes the file at that realpath only while it is still
     that file. When it is gone, or has been replaced by another file, it
     does nothing. It may be called any number of times. It does not close
