@@ -7,7 +7,7 @@
 
 - sockat の振る舞いの正本はハブの [SPEC](https://github.com/kawaz/sockat/blob/main/docs/SPEC-ja.md)。経路の設計の判断はハブの [DR-0012](https://github.com/kawaz/sockat/blob/main/docs/decisions/DR-0012-own-directory-and-thread-cwd.md) にある
 - Python の標準 (`socket` モジュール) は `len >= sizeof(sun_path)` のパスを errno の無い `OSError('AF_UNIX path too long')` で断る。macOS の CPython 3.11 / 3.13 / 3.14 / 3.15 で 103 バイトまで通り 104 から断ることを確かめた
-- SPEC は「その言語で作れない経路は飛ばし、README に OS × 経路の表で示す」「fork の経路を作れない言語は `connect_any` 系を出さない」を認めている
+- SPEC は「その言語で作れない経路は飛ばし、README に OS × 経路の表で示す」「fork の無い言語は connect の最終手段 fork-cwd-direct を `skipped` に理由付きで入れて次へ進む」と決めている
 
 ## Decision
 
@@ -24,7 +24,7 @@
 | relative (connect だけ) | 文字列を書き直して標準に渡す | FreeBSD 以外で `/proc` を使えない時 |
 | widened (connect だけ) | ctypes で libc の `connect(2)` に手で組んだ sockaddr を渡す | Apple の OS |
 | symlink-file (connect、Linux / Android 以外の bind) | `os.symlink` で作り、標準に渡し、消す ([DR-0004](DR-0004-own-directory-route.md) の決定 8) | connect は FreeBSD 以外、bind は Linux / Android 以外 |
-| symlink-dir (`bind_any` の最後) | `os.symlink` で作り、標準に渡し、消す ([DR-0005](DR-0005-bind-any.md)) | 全部 |
+| symlink-dir (`sockat.ex.bind` の最終手段) | `os.symlink` で作り、標準に渡し、消す ([DR-0006](DR-0006-sockat-ex.md)) | 全部 |
 | at-direct (connect だけ) | ctypes で `connectat(2)` にソケットのディレクトリの fd とファイル名 | FreeBSD |
 | fork-cwd、fork-cwd-sockdir、fork-cwd-direct | 作らない (kawaz 裁定) | — |
 
@@ -33,22 +33,23 @@
 - thread-cwd は CPython の 1 スレッド = 1 OS スレッドに頼る。他のスレッドの `os.getcwd()` が変わらないことを macOS と Linux で確かめた
 - ctypes を使う呼び出しは `src/sockat/_sys.py` にだけ置き、最初に要った時に import する
 
-理由: Python から `os.fork()` した子は Python を実行するので、SPEC の「子の区間は async-signal-safe」を満たせない。満たすには C 拡張が要り、配布が OS × arch の wheel になる。純 Python で 1 つの wheel にする方を取る (kawaz 裁定)。fork の経路が無いことで bind が届かなくなる所は [DR-0004](DR-0004-own-directory-route.md) の決定 4 (ハブの D12-Q3 の kawaz 裁定で `ENAMETOOLONG`。届かせたい人は `bind_any`)。
+理由: Python から `os.fork()` した子は Python を実行するので、SPEC の「子の区間は async-signal-safe」を満たせない。満たすには C 拡張が要り、配布が OS × arch の wheel になる。純 Python で 1 つの wheel にする方を取る (kawaz 裁定)。fork の経路が無いことで bind が届かなくなる所は [DR-0004](DR-0004-own-directory-route.md) の決定 4 (ハブの D12-Q3 の kawaz 裁定で `ENAMETOOLONG`。届かせたい人は最終手段を使う `sockat.ex.bind`)。
 
 ### 2. 公開 API
 
 | 関数 | SPEC の操作 | 戻り値 |
 |---|---|---|
 | `sockat.bind(path)` | `bind` | listen 済みの `socket.socket` |
-| `sockat.bind_ex(path)` | 後始末つきの bind | `(listener, discard)` ([DR-0004](DR-0004-own-directory-route.md) の決定 7) |
 | `sockat.connect(path)` | `connect` | `socket.socket` (ブロックする) |
 | `sockat.connect_nonblocking(path)` | `connect_nonblocking` | 非ブロッキングの `socket.socket` |
-| `sockat.any.bind_any(path)` | `bind_any` | `AnyBinding` ([DR-0005](DR-0005-bind-any.md)) |
+| `sockat.ex.bind(path, *, last_resort=False)` | `bind_ex` | `Bound` ([DR-0006](DR-0006-sockat-ex.md)) |
+| `sockat.ex.connect(path, *, last_resort=False)` | `connect_ex` | `Connected` ([DR-0006](DR-0006-sockat-ex.md)) |
+| `sockat.ex.connect_nonblocking(path, *, last_resort=False)` | `connect_nonblocking_ex` | `Connected` ([DR-0006](DR-0006-sockat-ex.md)) |
 
-- `connect_any` 系は出さない (fork の経路が無いため)
+- `sockat.ex` は `import sockat` では読み込まない。connect 系の最終手段の fork-cwd-direct は作らず、`skipped` に入れる (fork の経路が無いため)
 - 長いパスでは、戻り値は `socket.socket` の subclass で、アドレスを元のパスで返す ([DR-0003](DR-0003-report-the-given-path.md))
 - `path` は `str` / `bytes` / `os.PathLike`。標準の `socket.bind` は `os.PathLike` を受けない (3.11〜3.15 で確認) が、Python のファイル API の慣習に合わせて受け、`os.fspath` した値を標準に渡す
-- 経路 (`_route.Route`) は公開しない (`bind_any` が経路の名前の文字列を診断用に返すだけ)。試験はパッケージの中から各経路の関数を呼ぶ。環境を読む部分 (D の置き場、symlink-file の置き場の候補、bind で symlink-file を試すか、macOS で広げた sockaddr を試すか、`/proc/self/fd` の場所、thread-cwd を試すか、`bind_any` の symlink-dir の置き場の候補) は `_route.Config` にして試験から差し替える
+- 経路 (`_route.Route`) は公開しない (`sockat.ex` が経路の名前の文字列を診断用に返すだけ)。試験はパッケージの中から各経路の関数を呼ぶ。環境を読む部分 (D の置き場、symlink-file の置き場の候補、bind で symlink-file を試すか、macOS で広げた sockaddr を試すか、`/proc/self/fd` の場所、thread-cwd を試すか、symlink-dir の置き場の候補) は `_route.Config` にして試験から差し替える
 
 ### 3. 標準に揃える点
 
@@ -91,7 +92,7 @@
   - 不採用理由: SPEC の fork の経路と仕組みが違う。PyInstaller 等で固めたアプリでは `sys.executable` がアプリ本体を指し、それを起こしてしまう
 - 案 C: PyO3 で sockat-rs を包む
   - 不採用理由: Rust 標準のソケット設定 (`SO_NOSIGPIPE`、backlog) になり Python 標準と揃わない。経路を Python 側の試験から強制できない。配布が OS × arch の wheel になる
-- 案 D: C 拡張を任意にし、入っている時だけ fork の経路と `connect_any` 系を出す
+- 案 D: C 拡張を任意にし、入っている時だけ fork の経路を出す
   - 不採用理由: 入れ方で公開 API が変わる
 - 案 E: 標準にそのまま渡す長さを、import 時に標準で試して求める
   - 不採用理由: import のたびに試す手間がかかる。値は OS で決まるので表で足り、試験が標準自身で境界を確かめる
@@ -99,7 +100,7 @@
 ## Consequences
 
 - fork の経路でしか届かない所は、`bind` も connect も `ENAMETOOLONG` になる。`bind` では D を通す経路が使えない所全部 (NetBSD / OpenBSD / illumos の長いパス全部を含む。[DR-0004](DR-0004-own-directory-route.md) の決定 4)。README の OS × 経路の表に「fork の経路なし」と書く
-- `connect_any` 系が欲しくなったら、使う人が選んで有効にする別のもの (例: C 拡張を含む別の配布物) として出す。既定の `sockat` は純 Python のまま変えない (kawaz 裁定 2026-11-18)。any 系の置き場は `sockat.any` ([DR-0005](DR-0005-bind-any.md))
+- fork の経路が欲しくなったら、使う人が選んで有効にする別のもの (例: C 拡張を含む別の配布物) として出す。既定の `sockat` は純 Python のまま変えない (kawaz 裁定 2026-11-18)。後始末・診断つきの呼び出しと最終手段の置き場は `sockat.ex` ([DR-0006](DR-0006-sockat-ex.md))
 - SPEC が変わったら、この実装と README / MANUAL を追従させる
 
 ## 関連

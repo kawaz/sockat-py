@@ -1,6 +1,6 @@
-# DR-0004: D を通す経路 (自分専用のディレクトリ D と R) の Python での作り方、bind_ex
+# DR-0004: D を通す経路 (自分専用のディレクトリ D と R) の Python での作り方、bind の discard
 
-- Status: Accepted (ハブの DR-0012 の Python での作り方。統括の判断 2026-11-19。D をどこにも作れない時の bind の D 無しの形はハブの D12-Q1 の kawaz 裁定 (a)。D を通す経路が使えない時の `bind` が `ENAMETOOLONG` なのはハブの D12-Q3 の kawaz 裁定 (a)。`bind_ex` の `discard` が listener を閉じない形と名前はハブの D12-Q4 の kawaz 裁定 (ハブの DR-0014)。開けない D を消すのはハブの D12-Q5 の kawaz 裁定)
+- Status: Accepted (ハブの DR-0012 の Python での作り方。統括の判断 2026-11-19。D をどこにも作れない時の bind の D 無しの形はハブの D12-Q1 の kawaz 裁定 (a)。D を通す経路が使えない時の `bind` が `ENAMETOOLONG` なのはハブの D12-Q3 の kawaz 裁定 (a)。`discard` が listener を閉じない形と名前はハブの D12-Q4 の kawaz 裁定 (ハブの DR-0015)。開けない D を消すのはハブの D12-Q5 の kawaz 裁定)
 - Date: 2026-11-19
 
 ## Context
@@ -80,7 +80,7 @@
 `_route.bind_past_d` の 1 か所にまとめる。
 
 - D をどこにも作れない時 (`through_d` が `Skip.NO_OWN_DIR` を返す) は、D 無しの形 (`_route.bind_sockdir`) を試す
-- D 無しの形も使えない時と、D を作れて手段が全部使えなかった時は `ENAMETOOLONG` (標準で長すぎるパスと同じ)。SPEC の fork-cwd の経路の場所 (ハブの D12-Q3 の kawaz 裁定 (a))。`bind_any` はここで symlink-dir に進む ([DR-0005](DR-0005-bind-any.md))
+- D 無しの形も使えない時と、D を作れて手段が全部使えなかった時は `ENAMETOOLONG` (標準で長すぎるパスと同じ)。SPEC の fork-cwd の経路の場所 (ハブの D12-Q3 の kawaz 裁定 (a))。最終手段を使う `sockat.ex.bind` はここで symlink-dir に進む ([DR-0006](DR-0006-sockat-ex.md))
 - 手段が無くて D を試さなかった時は、D 無しの形も試さない (綴りが D の形より長く、手段の確かめも同じなので、必ず使えない)
 
 D 無しの形:
@@ -132,15 +132,15 @@ D 無しの形:
 | proc-direct (R を通さない `/proc/self/fd/<fd>/<ファイル名>`) | 綴りの fd の番号が後で使い回され、別のディレクトリの同名ファイルに当たる |
 | relative | cwd が変わると別の場所に当たる |
 | widened | listener のアドレスが途中で切れ、標準の `getsockname` が読み過ぎる |
-| symlink-dir | D を通す経路で足りる。`bind_any` だけが最後に使う ([DR-0005](DR-0005-bind-any.md)) |
+| symlink-dir | D を通す経路で足りる。最終手段を使う `sockat.ex.bind` だけが最後に使う ([DR-0006](DR-0006-sockat-ex.md)) |
 
 - 返すアドレスは元のパス ([DR-0003](DR-0003-report-the-given-path.md)) だが、カーネルの綴りも何にも当たらないようにする (`socket.socket.getsockname` を直接呼ぶコード、`socket.fromfd` で作り直したソケットはカーネルの綴りを見る)
 
-### 7. bind_ex
+### 7. bind の discard
 
 | 項目 | 決定 |
 |---|---|
-| 形 | `listener, discard = sockat.bind_ex(path)`。`listener` は `sockat.bind(path)` と同じ。`discard` は引数なしの関数 |
+| 形 | `listener, discard, *_ = sockat.ex.bind(path)` ([DR-0006](DR-0006-sockat-ex.md))。`listener` は `sockat.bind(path)` と同じ。`discard` は引数なしの関数 |
 | 覚えるもの | 経路の中で bind が通った直後 (listen の前) に、ソケットのファイルの realpath (`strict=True`) と、それを `os.lstat` した `(st_dev, st_ino)`。bind が返った後に誰かがパスに置いたファイルを覚えないため |
 | `discard()` | その realpath を `os.lstat` し、`(st_dev, st_ino)` が同じ時だけ `os.unlink`。無い・別のファイルに置き換わっていれば何もしない。何度呼んでもよい。それ以外のエラー (`EACCES` 等) は `OSError` |
 | listener | `discard` は閉じない。閉じるのは利用者 (asyncio に渡したら asyncio) |
@@ -163,8 +163,8 @@ D 無しの形:
 | 失敗した時 | 元のパスを `os.lstat` し、物があればその例外を返して次を試さない。無いか `lstat` が失敗したら、カーネルが辿らなかったとみなし、次の置き場も試さずにこの経路を使えないとして `skipped` に入れ、D を通す経路に進む |
 | 失うもの | `respelled` |
 
-- `bind_ex` は bind が通った直後に元のパスの realpath を覚えるので、symlink-file を通っても `discard()` は元のパスのファイルを消す
-- `_route.Route.SYMLINK_FILE` は connect の symlink-file と同じ名前 (SPEC の「経路の名前」で bind と connect の両方に出る)。`bind_any` の最終手段は `_route.Route.SYMLINK_DIR`
+- `sockat.ex.bind` は bind が通った直後に元のパスの realpath を覚えるので、symlink-file を通っても `discard()` は元のパスのファイルを消す
+- `_route.Route.SYMLINK_FILE` は connect の symlink-file と同じ名前 (SPEC の「経路の名前」で bind と connect の両方に出る)。bind の最終手段は `_route.Route.SYMLINK_DIR`
 
 ## Alternatives Considered
 
@@ -188,7 +188,7 @@ D 無しの形:
 - 長いパスの bind / connect のたびに D と R を作って消す
 - 途中でプロセスが死ぬと、置き場に `sockat.XXXXXXXXXX`、ソケットのディレクトリに `.sockat.XXXXXXXXXX` (D か、D 無しの形の R) が残る
 - R はソケットのディレクトリの realpath を指すので、R を作った後のディレクトリの rename や symlink の張り替えは反映されない
-- 試験は `tests/test_through_d.py` (D を通す経路と D 無しの形)、`tests/test_ex.py` (`bind_ex`)
+- 試験は `tests/test_through_d.py` (D を通す経路と D 無しの形)、`tests/test_ex.py` (`discard`)
 
 ## 関連
 

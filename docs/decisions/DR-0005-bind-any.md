@@ -1,6 +1,6 @@
 # DR-0005: bind_any の Python での形
 
-- Status: Accepted (ハブの DR-0013 の Python での形。any 系の意味・置き場の順・`losses` / `route` / `skipped` を返すこと・失敗にも `skipped` を付けること・`cwd-relative` は kawaz 裁定 (ハブの D12-Q3、D13-Q1、2026-11-19)。モジュールの置き場と型の形は統括の判断 2026-11-19)
+- Status: Superseded by [DR-0006](DR-0006-sockat-ex.md) (ハブの DR-0013 の Python での形。any 系の意味・置き場の順・`losses` / `route` / `skipped` を返すこと・失敗にも `skipped` を付けること・`cwd-relative` は kawaz 裁定 (ハブの D12-Q3、D13-Q1、2026-11-19)。モジュールの置き場と型の形は統括の判断 2026-11-19)
 - Date: 2026-11-19
 
 ## Context

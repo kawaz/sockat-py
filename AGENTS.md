@@ -14,6 +14,7 @@ sockat-py は、`sun_path` の上限を超えるパスでも Unix domain socket 
 | パス | 中身 |
 |---|---|
 | `src/sockat/__init__.py` | 公開 API (`bind` / `connect` / `connect_nonblocking`) |
+| `src/sockat/ex.py` | 後始末・診断つきの呼び出しと最終手段 (`sockat.ex`。`import sockat` では読み込まない) |
 | `src/sockat/_route.py` | 経路の順番と各経路、試験から差し替える `Config` |
 | `src/sockat/_path.py` | パスの分割・相対パスの計算 (ファイルシステムに触らない) |
 | `src/sockat/_sys.py` | ctypes の境界。`socket` モジュールで呼べないシステムコールはここだけ |

@@ -20,16 +20,15 @@ assert server.recv(4) == b"ping"
 | Function | Standard library code it replaces | Returns |
 |---|---|---|
 | `sockat.bind(path)` | `socket()` → `bind(path)` → `listen()` | a listening `socket.socket` (blocking) |
-| `sockat.bind_ex(path)` | the same + cleaning up the socket file | `(listener, discard)` ([below](#bind_ex)) |
 | `sockat.connect(path)` | `socket()` → `connect(path)` | a `socket.socket` (blocking) |
 | `sockat.connect_nonblocking(path)` | `socket()` → `setblocking(False)` → `connect(path)` | a nonblocking `socket.socket` |
-| `sockat.any.bind_any(path)` | the same as `bind` + where it does not reach, reaching it even by losing something | an `AnyBinding` ([below](#bind_any)) |
+| `sockat.ex.bind(path)` and the like | the same + what was lost, cleaning up the socket file, the last resort | a `Bound` / `Connected` ([below](#sockatex)) |
 
 - For a path the standard library accepts, the result is a plain `socket.socket`. For a long path, it is a subclass of `socket.socket` that reports the address as the original path ([below](#the-address-is-reported-as-the-original-path))
 - `path` is a `str` / `bytes` / `os.PathLike` (the standard library's `bind` / `connect` do not take an `os.PathLike`, but sockat does)
 - A path that the standard library accepts ([the length per OS](#how-a-long-path-is-reached)) goes to the standard library unchanged
 - Whatever the route, the socket is created as `socket.socket(AF_UNIX, SOCK_STREAM)`, so it is set up like the standard library's (close-on-exec, the value of `socket.setdefaulttimeout`, the default listen backlog)
-- The socket file is created at the path given. It is not removed when the socket is closed (as with the standard library). To remove it, call `discard()` from `bind_ex`, or `os.unlink(path)` with the original path (unlink has no `sun_path` limit)
+- The socket file is created at the path given. It is not removed when the socket is closed (as with the standard library). To remove it, call `discard()` from `sockat.ex.bind`, or `os.unlink(path)` with the original path (unlink has no `sun_path` limit)
 - To change the backlog, call `listen(n)` again on the returned listener
 
 ## connect and connect_nonblocking
@@ -37,50 +36,65 @@ assert server.recv(4) == b"ping"
 - **`connect`** blocks. As with the standard library's `connect`, it follows the value of `settimeout`
 - **`connect_nonblocking`** is for event loops. The socket is made nonblocking before the connect and returned that way. When the peer's backlog is full it fails at once (`BlockingIOError` on Linux, `ConnectionRefusedError` on macOS). A Unix-domain connect completes or fails within the call, so there is nothing to wait for afterwards
 
-## bind_ex
+## sockat.ex
+
+The calls with cleaning up and diagnosis ([DR-0006](./decisions/DR-0006-sockat-ex.md), the hub's [DR-0015](https://github.com/kawaz/sockat/blob/main/docs/decisions/DR-0015-ex-with-last-resort-and-diagnostics.md), in Japanese). `import sockat` does not load it. Whoever uses it chooses it with `import sockat.ex`.
 
 ```python
-listener, discard = sockat.bind_ex(path)
+import sockat.ex
+
+listener, discard, losses, route, skipped = sockat.ex.bind(path)
 try:
     ...
 finally:
     listener.close()
     discard()
+
+stream, losses, route, skipped = sockat.ex.connect(path)
 ```
 
-- `listener` is the same as from `sockat.bind(path)`
+| Function | Plain call | Returns |
+|---|---|---|
+| `sockat.ex.bind(path, *, last_resort=False)` | `sockat.bind(path)` | a `Bound` (`listener`, `discard`, `losses`, `route`, `skipped`) |
+| `sockat.ex.connect(path, *, last_resort=False)` | `sockat.connect(path)` | a `Connected` (`stream`, `losses`, `route`, `skipped`) |
+| `sockat.ex.connect_nonblocking(path, *, last_resort=False)` | `sockat.connect_nonblocking(path)` | a `Connected` |
+
+- Call them through the module, as `sockat.ex.connect(...)`. Imported as `from sockat.ex import connect`, they are easily mistaken for the plain `sockat.connect`
+- Without `last_resort`, each tries the same routes in the same order as its plain call, and reaches what it reaches. The `listener` / `stream` is what the plain call returns
+- The results are `NamedTuple`s, read by name or by position
+
+### discard
+
+The function `sockat.ex.bind` returns that removes the socket file the bind made, and nothing else.
+
 - Right after the bind goes through (before the listen), the realpath of the socket file and its `(st_dev, st_ino)` are remembered. If that fails, the listener is closed and the error raised
 - `discard()` removes the file at that realpath only while it is still the same file. When it is gone, or replaced by another file, it does nothing
 - A replacement between the check and the removal cannot be prevented (POSIX has no way to remove a name only if it still refers to a given inode)
-- `discard()` may be called any number of times. It does not close the listener (the caller closes it; once handed to asyncio, asyncio does). The name `discard` and its not closing the listener are settled by the hub's [DR-0014](https://github.com/kawaz/sockat/blob/main/docs/decisions/DR-0014-discard-removes-only.md) (in Japanese)
+- `discard()` may be called any number of times. It does not close the listener (the caller closes it; once handed to asyncio, asyncio does)
 - Errors other than the file being gone (`EACCES` on the directory, ...) are raised as `OSError`
 - It works the same for a short path. For a Linux abstract address it does nothing
 
-## bind_any
+### last_resort
 
-```python
-from sockat.any import Loss, bind_any
+`last_resort=True` uses the last resort, which reaches the path even by losing something where no route of the plain order can be used. Passing it is the statement that what is lost is accepted.
 
-listener, losses, route, skipped = bind_any(path)
-if Loss.RECREATABLE_SPELLING in losses:
-    ...  # remove the socket file by the original path (discard and the like)
-server = await asyncio.start_unix_server(handle, sock=listener)
-```
+| Function | The last resort |
+|---|---|
+| `sockat.ex.bind` | where the plain bind gets `ENAMETOOLONG` (no route can be used), [symlink-dir](#symlink-dir) is tried last. Through a shared place it loses `recreatable-spelling` |
+| `sockat.ex.connect`, `sockat.ex.connect_nonblocking` | the specification's last resort is fork-cwd-direct (a forked child connects by the file name). sockat-py has no fork route, so it is put in `skipped` with the reason `no fork route in sockat-py`, and the call gets `ENAMETOOLONG`. It reaches what the plain connect reaches |
 
-It tries the same routes as `bind`, and where `bind` gets `ENAMETOOLONG` (no route can be used), it tries last a route that reaches the path even by losing something, [symlink-dir](#symlink-dir-bind_any) ([DR-0005](./decisions/DR-0005-bind-any.md), the hub's [DR-0013](https://github.com/kawaz/sockat/blob/main/docs/decisions/DR-0013-any-means-reach-at-any-cost.md), in Japanese).
-
-- `import sockat` does not load `sockat.any`. Whoever uses it chooses it with `from sockat.any import bind_any` (the effort of choosing it is the statement that what is lost is accepted)
-- Where `bind` reaches the path, it takes the same route as `bind` and returns the same listener
-- The specification's `connect_any` is not here. What it adds is the fork route, and Python has no fork route, so it would be `connect`
-
-The result is an `AnyBinding` (a `NamedTuple`).
+### What was lost
 
 | Item | Contents |
 |---|---|
-| `listener` | a listening `socket.socket`. As with `bind`, for a long path it reports the address as the original path |
 | `losses` | what the route taken lost (a `tuple[Loss, ...]`). Empty when nothing was lost. Branch on this |
 | `route` | the name of the route taken (a `str`), from [the specification's route names](https://github.com/kawaz/sockat/blob/main/docs/SPEC.md#route-names) (`"standard"`, `"symlink-file"`, `"thread-cwd"`, `"symlink-dir"`, ...) |
 | `skipped` | the routes tried before `route` that could not be used, in the order tried. Each item is a `Skipped(name, reason)`: `name` is the route's name, `reason` why it could not be used, a short English phrase (`"path too long"`, `"seccomp filter"`, `"/proc unusable"`, `"no place for D"`, ...) |
+
+```python
+if sockat.ex.Loss.RECREATABLE_SPELLING in losses:
+    ...  # remove the socket file by the original path (discard and the like)
+```
 
 `Loss` is an `enum.StrEnum`; as a string (`str()`, `.value`) it is the name in [the specification's "What is lost"](https://github.com/kawaz/sockat/blob/main/docs/SPEC.md#what-is-lost).
 
@@ -93,10 +107,11 @@ The result is an `AnyBinding` (a `NamedTuple`).
 
 - There is no order of size or inclusion between the names. The names are promised and only ever added to. Read a name you do not know as "something was lost"
 - `route` and `skipped` are for diagnosis, and their contents are not promised (routes are added and changed)
-- Every route tried before `route` could not be used (a route that actually binds and fails raises there, and nothing after it is tried)
-- The specification's fork routes (`fork-cwd`, `fork-cwd-sockdir`) appear in `skipped` at their place in the order, with the reason that sockat-py does not have them
+- Every route tried before `route` could not be used (a route that actually binds / connects and fails raises there, and nothing after it is tried)
+- The specification's fork routes (a bind's `fork-cwd` and `fork-cwd-sockdir`, a connect's last resort `fork-cwd-direct`) appear in `skipped` at their place in the order, with the reason that sockat-py does not have them
+- A connect's spelling stays nowhere, so a connect's `losses` are empty (the only loss would be fork-cwd-direct's `forked`, which sockat-py does not have)
 
-| Example (macOS) | `losses` | `route` | `name`s in `skipped` |
+| Example of `sockat.ex.bind` (macOS) | `losses` | `route` | `name`s in `skipped` |
 |---|---|---|---|
 | a short absolute path | (empty) | `standard` | (none) |
 | a short relative path | `cwd-relative` | `standard` | (none) |
@@ -106,21 +121,23 @@ The result is an `AnyBinding` (a `NamedTuple`).
 | the same, thread cwd cannot be used either, and symlink-dir has a place only the owner can write to (`XDG_RUNTIME_DIR` and the like) | `respelled` | `symlink-dir` | `standard`, `symlink-file`, `thread-cwd`, `fork-cwd` |
 | the same, only a shared place exists | `respelled`, `recreatable-spelling` | `symlink-dir` | `standard`, `symlink-file`, `thread-cwd`, `fork-cwd` |
 
-When it fails, it raises the same error as `bind` (its type and `errno` unchanged) with two attributes added.
+When a call fails, it raises the same error as its plain counterpart (its type and `errno` unchanged) with two attributes added.
 
 | Attribute | Contents |
 |---|---|
-| `skipped` | the routes tried and found unusable up to the failure (the same form as `AnyBinding.skipped`) |
-| `route` | the name of the route whose bind actually failed. `None` when no route got that far (no directory, `ENAMETOOLONG` with no usable route, an argument error) |
+| `skipped` | the routes tried and found unusable up to the failure (the same form as `skipped`) |
+| `route` | the name of the route whose bind / connect actually failed. `None` when no route got that far (no directory, `ENAMETOOLONG` with no usable route, an argument error) |
 
 ```python
 try:
-    bound = bind_any(path)
+    stream, losses, route, skipped = sockat.ex.connect(path)
 except OSError as e:
     print(e.errno, getattr(e, "route", None), getattr(e, "skipped", ()))
 ```
 
-### symlink-dir (bind_any)
+### symlink-dir
+
+The last resort of `sockat.ex.bind(path, last_resort=True)`.
 
 1. Gather the candidate places: `XDG_RUNTIME_DIR`, `TMPDIR` (each when a non-empty absolute path), then `/tmp`. One spelled the same as `/tmp` or an earlier candidate, component by component, is skipped
 2. `stat` each candidate, following symlinks, and order those only the owner can write to (a directory, owned by the calling user, `mode & 0o022 == 0`) first, the shared ones (a directory, sticky, owned by root or the calling user) after. A candidate of neither kind is not used
@@ -155,7 +172,7 @@ For a longer path, the socket's directory is looked up first (`ENOENT` if it doe
 - A connect tries the routes that need neither a write (creating D, R or a symlink) nor a thread (proc-direct, relative, widened, at-direct) first, and the routes that create D or start a thread after them. The routes that need neither are fast, and relative and widened reach further than the routes through D in some cases
 - D is created at most once per call and shared by the routes that use it (thread-cwd, at, proc, proc-held). When it can be created nowhere, every route that uses it is skipped as unusable, and D is not tried again
 - When D can be created nowhere, a bind tries the same means in [the form without D](#the-form-without-d) (thread-cwd-sockdir, at-sockdir, proc-sockdir)
-- The specification's fork routes (fork-cwd, fork-cwd-sockdir, fork-cwd-direct) are not built. A child forked from Python runs Python, so it cannot satisfy the specification's requirement that the child's span be async-signal-safe ([DR-0001](./decisions/DR-0001-python-port-design.md)). Where the specification has a bind go on to fork-cwd, the bind gets `ENAMETOOLONG` (ruled by kawaz in the hub's D12-Q3). To reach the path even there, use [`bind_any`](#bind_any)
+- The specification's fork routes (fork-cwd, fork-cwd-sockdir, fork-cwd-direct) are not built. A child forked from Python runs Python, so it cannot satisfy the specification's requirement that the child's span be async-signal-safe ([DR-0001](./decisions/DR-0001-python-port-design.md)). Where the specification has a bind go on to fork-cwd, the bind gets `ENAMETOOLONG` (ruled by kawaz in the hub's D12-Q3). To reach the path even there, use [the last resort of `sockat.ex.bind`](#last_resort)
 - A path that no route in the order reaches gets `ENAMETOOLONG`
 
 ### The routes through D
@@ -224,7 +241,7 @@ Only connects use these routes. They are tried in the order per OS (the table in
 
 - relative: if the path is below the cwd (`getcwd`, or a `$PWD` that names the same directory as the cwd), the prefix is cut off. Otherwise both sides are resolved to real paths and a spelling that climbs with `..` is made. The shorter one is used
 - relative: the spelling is checked to name the same directory as the path before it is used, and the cwd is checked to be unchanged after the connect ([below](#relative-is-exposed-to-another-threads-chdir))
-- `bind` does not use proc-direct, relative, widened or symlink-dir. Their spelling later hits an unrelated file (proc-direct through a reused fd number, relative through a changed cwd), or the listener's address is cut short and the standard library's `getsockname` reads past it (widened), or the routes through D are enough (symlink-dir) ([DR-0004](./decisions/DR-0004-own-directory-route.md), in Japanese). Only `bind_any` uses symlink-dir, last ([below](#symlink-dir-bind_any))
+- `bind` does not use proc-direct, relative, widened or symlink-dir. Their spelling later hits an unrelated file (proc-direct through a reused fd number, relative through a changed cwd), or the listener's address is cut short and the standard library's `getsockname` reads past it (widened), or the routes through D are enough (symlink-dir) ([DR-0004](./decisions/DR-0004-own-directory-route.md), in Japanese). Only `sockat.ex.bind` with the last resort uses symlink-dir, last ([above](#symlink-dir))
 
 ### symlink-file
 
@@ -259,7 +276,7 @@ When a path longer than the standard library accepts is `ENAMETOOLONG` (given th
 
 - When D can be created nowhere, a bind reaches a file name of up to 88 bytes (84 on macOS / FreeBSD, about 72 with proc-sockdir alone) through [the form without D](#the-form-without-d) (when the socket's directory can be opened and R created in it; where no means can be used, nothing is reached, as in the table above). A connect gets as far as the routes in its order that do not use D reach (proc-direct, relative, widened, at-direct, symlink-file; proc-held cannot be used either)
 - In the bind column, symlink-file is counted on macOS only. Linux / Android do not try it, their bind not following a symlink. Whether the other OSes follow it is not confirmed
-- `bind_any` reaches the path even where `bind` gets `ENAMETOOLONG`, when the spelling of [symlink-dir](#symlink-dir-bind_any), `<place>/sockat.XXXXXXXXXX/<file name>`, fits `sun_path` and a usable place exists
+- `sockat.ex.bind` with the last resort reaches the path even where `bind` gets `ENAMETOOLONG`, when the spelling of [symlink-dir](#symlink-dir), `<place>/sockat.XXXXXXXXXX/<file name>`, fits `sun_path` and a usable place exists
 - symlink-file and symlink-dir cannot be used when there is no safe place where the symlink can be created (a sandbox where neither `TMPDIR` nor `/tmp` can be used, and the like)
 - A path longer than `PATH_MAX` as a whole (1024 bytes on macOS, 4096 on Linux) is `ENAMETOOLONG` on every route (no other system call opens it either; it is outside what sockat handles)
 
@@ -271,7 +288,7 @@ For a long path, the address the kernel reports (`getsockname(2)` / `getpeername
 
 | Socket | Returns the original path | Otherwise |
 |---|---|---|
-| a listener from `bind` / `bind_ex` / `bind_any` | `getsockname()` | as the standard library |
+| a listener from `bind` / `sockat.ex.bind` | `getsockname()` | as the standard library |
 | a socket returned by the listener's `accept()` | `getsockname()` | `getpeername()` as the standard library (the peer's spelling, usually empty) |
 | a socket from `connect` / `connect_nonblocking` | `getpeername()` | `getsockname()` as the standard library (usually empty) |
 
@@ -279,7 +296,7 @@ For a long path, the address the kernel reports (`getsockname(2)` / `getpeername
 - A `dup()`ed socket reports it the same way. A socket rebuilt from an fd with `socket.fromfd` or the like is of the standard type, so it reports the kernel's spelling
 - So what reads the address back (asyncio's cleanup, `repr`, logs) works with the original path ([DR-0003](./decisions/DR-0003-report-the-given-path.md), in Japanese)
 
-The spellings the kernel reports are as follows (visible by calling the standard implementation, as in `socket.socket.getsockname(s)`). R and the symlink are gone after the bind, so the spelling resolved later names nothing as a rule. The spelling may be seen by other users, though (Linux's `/proc/net/unix`), so when the process's cwd is a place others can write to, and through symlink-dir in a shared place, other users can recreate it ([`losses` of `bind_any`](#bind_any)). Remove the socket file by the original path, not by the spelling. R has a random name to avoid hitting something of the same name that happens to be there, not as a defence against other users.
+The spellings the kernel reports are as follows (visible by calling the standard implementation, as in `socket.socket.getsockname(s)`). R and the symlink are gone after the bind, so the spelling resolved later names nothing as a rule. The spelling may be seen by other users, though (Linux's `/proc/net/unix`), so when the process's cwd is a place others can write to, and through symlink-dir in a shared place, other users can recreate it ([`losses` of `sockat.ex`](#what-was-lost)). Remove the socket file by the original path, not by the spelling. R has a random name to avoid hitting something of the same name that happens to be there, not as a defence against other users.
 
 | Route of the bind | Reported |
 |---|---|
@@ -288,7 +305,7 @@ The spellings the kernel reports are as follows (visible by calling the standard
 | thread-cwd-sockdir, at-sockdir | `.sockat.XXXXXXXXXX/<file name>` |
 | proc-sockdir | `/proc/self/fd/<fd>/.sockat.XXXXXXXXXX/<file name>` |
 | symlink-file | `<place>/sockat.XXXXXXXXXX`. Unlinking that spelling removes at most an entry in the place, never an unrelated file |
-| symlink-dir (`bind_any`) | `<place>/sockat.XXXXXXXXXX/<file name>`. In a shared place, other users can recreate it |
+| symlink-dir (the last resort of `sockat.ex.bind`) | `<place>/sockat.XXXXXXXXXX/<file name>`. In a shared place, other users can recreate it |
 
 The `getpeername()` of a connect to a listener that another program bound with a widened sockaddr (Node.js on macOS, for example) is a truncated path, and on CPython for macOS unrelated bytes may follow the cut (the behaviour of the standard library's `getpeername`; getting it never raises; [cause, in Japanese](./findings/2026-11-18-cpython-getsockname-widened-sockaddr.md)).
 
@@ -302,7 +319,7 @@ A path containing a NUL anywhere but at its start gets a `ValueError` at any len
 
 ### The directory is looked up slightly before the call
 
-The routes through D, the form without D and `bind_any`'s symlink-dir resolve the socket's directory to a real path when they create R or the symlink, and the connect routes proc-direct, relative and at-direct look the directory up first (open it, or resolve it to a real path), then bind / connect by the file name. If a directory along the path is renamed, or a symlink along it repointed, in between, the socket is created in the directory as it was when looked up. widened, symlink-file and proc-held behave as the standard library does.
+The routes through D, the form without D and symlink-dir resolve the socket's directory to a real path when they create R or the symlink, and the connect routes proc-direct, relative and at-direct look the directory up first (open it, or resolve it to a real path), then bind / connect by the file name. If a directory along the path is renamed, or a symlink along it repointed, in between, the socket is created in the directory as it was when looked up. widened, symlink-file and proc-held behave as the standard library does.
 
 ### relative is exposed to another thread's chdir
 
@@ -318,7 +335,7 @@ If the process dies between creating and removing them, the following are left.
 
 | Where | What is left |
 |---|---|
-| the place (`TMPDIR` or `/tmp`; for `bind_any` also `XDG_RUNTIME_DIR`) | `sockat.XXXXXXXXXX` (D, or the symlink of symlink-file or of `bind_any`'s symlink-dir) |
+| the place (`TMPDIR` or `/tmp`; for symlink-dir also `XDG_RUNTIME_DIR`) | `sockat.XXXXXXXXXX` (D, or the symlink of symlink-file or of symlink-dir) |
 | the socket's directory | `.sockat.XXXXXXXXXX` (D, or R of the form without D) |
 
 ## Errors
@@ -349,8 +366,7 @@ reader, writer = await asyncio.open_unix_connection(sock=sockat.connect_nonblock
 
 - It works as with a short path, with no extra arguments. The asyncio of Python 3.13 and later removes the socket file at the original path when the server is closed (`cleanup_socket`; the listener's `getsockname()` returns the original path, and that is what it removes). The asyncio of 3.11 / 3.12 does not remove it (as with the standard library)
 - The transport's `get_extra_info('sockname')` (server side) / `get_extra_info('peername')` (client side) are also the original path
-- The listener from `bind_ex` can be passed the same way. `discard()` may be called while the server runs or after it has closed
-- The `listener` from `bind_any` can be passed the same way
+- The `listener` / `stream` from `sockat.ex` can be passed the same way. `discard()` may be called while the server runs or after it has closed
 
 `connect_nonblocking` does not wait for the peer, so it can be called directly from the event loop. `bind` does not wait for a peer either (with thread-cwd it waits for the thread to end, but the bind returns at once).
 
@@ -359,5 +375,5 @@ reader, writer = await asyncio.open_unix_connection(sock=sockat.connect_nonblock
 - Android and iOS have not been run. They use the same routes as Linux / macOS
 - FreeBSD, NetBSD, OpenBSD and illumos run the tests on VMs in CI
 - The error a nonblocking connect returns for a full backlog was checked only on Linux and macOS
-- No test takes `bind_any`'s symlink-dir on FreeBSD (at cannot be made unusable, so a bind that goes on to symlink-dir cannot be set up)
+- No test takes the last resort symlink-dir on FreeBSD (at cannot be made unusable, so a bind that goes on to symlink-dir cannot be set up)
 - Whether the bind of FreeBSD, NetBSD, OpenBSD and illumos follows symlink-file's link is not confirmed (the tests on the CI VMs tell)
