@@ -1,11 +1,11 @@
-"""The proc-held fallback of a connect (Linux with /proc): D made as the
+"""The proc-held route of a connect (Linux with /proc): D made as the
 routes through D make it, in the first of the places for D where it can be
 (whether the place is safe or not does not matter: D is held by its fd), with
 ``s`` in it, a symlink to the socket file, and the connect to
 ``/proc/self/fd/<fd of D>/s``.
 
 The socket paths here have a file name of 100 bytes, which fits neither
-behind ``/proc/self/fd/<n>/`` (so the proc-direct fallback cannot be used) nor in
+behind ``/proc/self/fd/<n>/`` (so proc-direct cannot be used) nor in
 ``R/<name>`` (so the routes through D cannot be used), 600 bytes deep under /tmp
 (so no relative spelling fits). No bind reaches such a name, so the
 listeners are bound by the standard under a short name and renamed
@@ -16,6 +16,7 @@ checked in ``test_through_d.py``."""
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import errno
 import os
 import re
@@ -55,7 +56,7 @@ from _support import (
 )
 
 from sockat import _route
-from sockat._route import BIND, CONNECT, CONNECT_NONBLOCKING, OWN_DIR_PREFIX, RANDOM_LEN, Config, Request, Route, Skip
+from sockat._route import BIND, CONNECT, CONNECT_NONBLOCKING, OWN_DIR_PREFIX, RANDOM_LEN, Config, Request, Route
 
 pytestmark = pytest.mark.skipif(not sys.platform.startswith("linux"), reason="the proc-held route needs Linux's /proc")
 
@@ -268,7 +269,7 @@ def test_d_goes_in_the_first_place_where_it_can_be_made(tmp: TmpDirs) -> None:
 
 
 # Without /proc (no such directory; an empty one) there is no proc-held route: the
-# place for D is not touched, and the connect takes the fallbacks of the
+# place for D is not touched, and the connect takes the order of the
 # systems without /proc (the symlink here, under a safe place).
 @pytest.mark.parametrize("empty", [False, True])
 def test_without_proc_there_is_no_proc_held_form(tmp: TmpDirs, empty: bool) -> None:
@@ -291,16 +292,19 @@ def test_without_proc_there_is_no_proc_held_form(tmp: TmpDirs, empty: bool) -> N
 
 
 # When `s` cannot be created in D (here the target is longer than a symlink
-# may hold, ENAMETOOLONG), the form is unusable there and D is removed again.
+# may hold, ENAMETOOLONG), the route is unusable (SPEC: "D か s を作れない")
+# and D is removed again. The order is narrowed to proc-held alone, so the
+# connect ends in ENAMETOOLONG with proc-held noted as skipped after the
+# standard, and no route noted as having failed.
 def test_a_symlink_that_cannot_be_created_leaves_nothing(tmp: TmpDirs) -> None:
     base = tmp.new()
-    sock_dir = tmp.new()
     mark_untouched(base)
-    dirfd = _route.open_dir(sock_dir)
-    try:
-        assert _route.proc_held_route(CONNECT, b"/" + b"x" * 5000, dirfd, fd_cfg([base])) is Skip.UNUSABLE
-    finally:
-        os.close(dirfd)
+    cfg = dataclasses.replace(fd_cfg([base]), connect_order=(Route.PROC_HELD,))
+    trail = _route.Trail()
+    with raises_errno(errno.ENAMETOOLONG):
+        _route.reach_long(CONNECT, b"/" + b"x" * 5000, cfg, trail)
+    assert [r for r, _ in trail.skipped] == [Route.STANDARD, Route.PROC_HELD]
+    assert trail.trying is None
     assert_used(base)
 
 

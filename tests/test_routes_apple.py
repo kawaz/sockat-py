@@ -1,4 +1,4 @@
-"""The Apple fallbacks of a connect (macOS): the widened ``sockaddr_un`` on
+"""The Apple routes of a connect (macOS): the widened ``sockaddr_un`` on
 its own and through the symlink, every route forced and checked, what
 happens when the kernel refuses the widened form, and the bind, which never
 takes the widened form (the routes through D spells it within ``sun_path``)."""

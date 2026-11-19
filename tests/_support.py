@@ -382,14 +382,35 @@ def d_cfg(
     thread_cwd: bool = True,
     proc: bytes = PROC,
     wide: bool = IS_APPLE,
+    connect_order: tuple[Route, ...] | None = None,
 ) -> Config:
     """The route order's inputs with ``own`` as the places for D (the socket's
     directory unless given), the thread's own cwd tried unless turned off,
     the real /proc unless ``proc`` says where else to look, ``links`` as the
-    places for a connect's symlink."""
+    places for a connect's symlink, and the connect order of this system
+    unless ``connect_order`` forces another."""
     return Config(
-        own_dir_places=tuple(own), link_places=tuple(links), wide=wide, proc_self_fd=proc, thread_cwd=thread_cwd
+        own_dir_places=tuple(own),
+        link_places=tuple(links),
+        wide=wide,
+        proc_self_fd=proc,
+        thread_cwd=thread_cwd,
+        connect_order=connect_order,
     )
+
+
+PROC_ORDER_THROUGH_D = (Route.THREAD_CWD, Route.PROC, Route.PROC_HELD, Route.SYMLINK)
+"""The connect order where /proc can be used (Linux) without proc-direct, its
+first route: forces a connect through the routes through D's /proc means
+(the tests force each route, SPEC). proc-direct's spelling is the /proc
+means' less ``R/`` (11 bytes), so it carries the file names the /proc means
+carries, and a connect in the order of the SPEC reaches the /proc means only
+where the socket's directory cannot be opened."""
+
+FREEBSD_ORDER_THROUGH_D = (Route.AT,)
+"""FreeBSD's connect order without at-direct, its first route: forces a
+connect through ``connectat`` on D (at-direct otherwise carries every file
+name at carries)."""
 
 
 @functools.cache
@@ -442,6 +463,22 @@ def d_route_here() -> Route | None:
         return Route.THREAD_CWD
     if HAS_PROC:
         return Route.PROC
+    return None
+
+
+def far_connect_here() -> Route | None:
+    """The route the connect order of this system takes, with the real
+    configuration, for a path far from the cwd and longer than any sockaddr
+    carries (600 bytes, so neither relative nor widened), with a short file
+    name: proc-direct where /proc can be used, at-direct on FreeBSD, the
+    thread's own cwd where it can be used, else ``None`` (the symlink, when a
+    place for it is given)."""
+    if sys.platform.startswith("freebsd"):
+        return Route.AT_DIRECT
+    if HAS_PROC:
+        return Route.PROC_DIRECT
+    if thread_cwd_usable():
+        return Route.THREAD_CWD
     return None
 
 

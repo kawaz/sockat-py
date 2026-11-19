@@ -4,9 +4,9 @@ realpath of the socket's directory, and the bind / connect of ``R/<name>``
 from D's fd: through a thread's own cwd (Linux, Apple), ``bindat`` /
 ``connectat`` (FreeBSD), or ``/proc/self/fd/<fd of D>/R/<name>`` (Linux).
 
-The paths are 600 bytes deep under /tmp unless a test says otherwise (so no
-fallback of a connect is the relative one, and the directory's length does not
-matter to the route). The configurations come from
+The paths are 600 bytes deep under /tmp unless a test says otherwise (so
+neither relative nor widened carries a connect, and the directory's length
+does not matter to the route). The configurations come from
 :func:`_support.d_cfg`."""
 
 from __future__ import annotations
@@ -26,11 +26,13 @@ from dataclasses import dataclass
 
 import pytest
 from _support import (
+    FREEBSD_ORDER_THROUGH_D,
     HAS_PROC,
     NAME_MAX_THROUGH_D,
     NO_PLACE,
     NO_PROC,
     PROC,
+    PROC_ORDER_THROUGH_D,
     UNTOUCHED,
     TmpDirs,
     accept_ping,
@@ -99,14 +101,24 @@ class Means:
 def means_here() -> list[Means]:
     """Every means of the routes through D this system can use: a thread's own
     cwd (Linux where the system allows it, Apple), bindat (FreeBSD), /proc
-    with the thread's own cwd turned off (Linux)."""
+    with the thread's own cwd turned off (Linux). The connects are forced
+    through the means too: the connect order of the SPEC puts a route that
+    makes nothing (at-direct on FreeBSD, proc-direct where /proc can be used)
+    before the routes through D, and it carries every file name they carry,
+    so for bindat and /proc it is taken out of the order
+    (:data:`_support.FREEBSD_ORDER_THROUGH_D`,
+    :data:`_support.PROC_ORDER_THROUGH_D`). The thread's own cwd needs no
+    forcing: the paths here are too far from the cwd and too long for
+    relative and widened, and /proc is made to look absent."""
     found: list[Means] = []
     if IS_FREEBSD:
-        found.append(Means("at", lambda own: d_cfg(own), Route.AT))
+        found.append(Means("at", lambda own: d_cfg(own, connect_order=FREEBSD_ORDER_THROUGH_D), Route.AT))
     if thread_cwd_usable():
         found.append(Means("thread-cwd", lambda own: d_cfg(own, proc=NO_PROC), Route.THREAD_CWD))
     if HAS_PROC:
-        found.append(Means("proc", lambda own: d_cfg(own, thread_cwd=False), Route.PROC))
+        found.append(
+            Means("proc", lambda own: d_cfg(own, thread_cwd=False, connect_order=PROC_ORDER_THROUGH_D), Route.PROC)
+        )
     return found
 
 
@@ -154,7 +166,8 @@ def listing_of(own: OwnDir) -> list[bytes]:
 
 def spy(monkeypatch: pytest.MonkeyPatch) -> list[Seen]:
     """Record every D the route makes (where, its name, mode and owner, what
-    it holds, R and where R points), as :meth:`OwnDir.make` returns it."""
+    it holds, R and where R points; empty when D was made without R), as
+    :meth:`OwnDir.make` returns it."""
     seen: list[Seen] = []
     real = OwnDir.make
 
@@ -170,8 +183,8 @@ def spy(monkeypatch: pytest.MonkeyPatch) -> list[Seen]:
                     mode=stat.S_IMODE(st.st_mode),
                     owner=st.st_uid,
                     entries=listing_of(own),
-                    link=own.link,
-                    target=os.readlink(own.link, dir_fd=own.fd),
+                    link=own.links[0] if own.links else b"",
+                    target=os.readlink(own.links[0], dir_fd=own.fd) if own.links else b"",
                 )
             )
         return own
@@ -398,9 +411,10 @@ def test_the_proc_spelling_names_nothing_when_its_fd_number_is_reused(tmp: TmpDi
 
 
 def fallback_route_here(req: _route.Request) -> Route:
-    """The fallback a connect to a path far from the cwd takes here with a
-    short safe place for the symlink and the real /proc: connectat on
-    FreeBSD, /proc on Linux, the symlink elsewhere."""
+    """The route of the connect order that makes no D and carries a connect
+    to a path far from the cwd here, with a short safe place for the symlink
+    and the real /proc: at-direct on FreeBSD, proc-direct on Linux, the
+    symlink elsewhere."""
     if IS_FREEBSD:
         return Route.AT_DIRECT
     if HAS_PROC:
@@ -414,7 +428,7 @@ def fallback_route_here(req: _route.Request) -> Route:
 # D is named `.sockat.` and 10 letters or digits there. Where D can be made
 # nowhere, no D is made: the bind takes the form without D by the same means
 # (R in the socket's directory, removed again, so only the socket file is
-# left next to it), and a connect takes its fallback. Root writes anywhere, so
+# left next to it), and a connect goes on in its order. Root writes anywhere, so
 # the unwritable place is checked only for other users (the docker nobody
 # run, macOS).
 @pytest.mark.parametrize("means", MEANS, ids=MEANS_IDS)
@@ -1180,10 +1194,14 @@ def test_the_reopening_by_name_must_find_d_itself(tmp: TmpDirs) -> None:
 
 # Where the thread's own cwd cannot be used, the next means is tried in the
 # same D: /proc on Linux, nothing on Apple (the bind is ENAMETOOLONG and a
-# connect takes its fallback, the symlink here). Stood in for at the boundary
-# (enter_dir_in_this_thread answering False, as under a seccomp filter or a
-# refused unshare) and by a thread that cannot be started. D was made (the
-# pre-check cannot see the refusal) and is removed again.
+# connect goes on in its order, to the symlink here). Stood in for at the
+# boundary (enter_dir_in_this_thread answering False, as under a seccomp
+# filter or a refused unshare) and by a thread that cannot be started. D was
+# made (the pre-check cannot see the refusal), once per call: the /proc means
+# uses the D the thread's own cwd made (SPEC: D is made once per call and
+# shared by the routes that use it), and it is removed again. The connect on
+# Linux is forced past proc-direct, which would carry it before the thread's
+# own cwd is tried (PROC_ORDER_THROUGH_D).
 @pytest.mark.skipif(not thread_cwd_usable(), reason="the system does not give a thread a cwd of its own here")
 @pytest.mark.parametrize("how", ["refused", "no-thread"])
 def test_where_the_threads_cwd_cannot_be_used_the_next_means_is_tried(
@@ -1206,34 +1224,56 @@ def test_where_the_threads_cwd_cannot_be_used_the_next_means_is_tried(
         monkeypatch.setattr("sockat._route.threading", types.SimpleNamespace(Thread=NoThread, Lock=threading.Lock))
     c = d_cfg((d_place,), [links])
     mark_untouched(d_place)
+    made = count_made_d(monkeypatch)
     if HAS_PROC:
         listener, r = _route.run_long(BIND, p, c)
         with listener:
             assert r is Route.PROC
-            client, r = _route.run_long(CONNECT, p, c)
+            assert made == [dir_id(d_place)]
+            made.clear()
+            client, r = _route.run_long(CONNECT, p, dataclasses.replace(c, connect_order=PROC_ORDER_THROUGH_D))
             with client:
                 assert r is Route.PROC
                 accept_ping(listener, client)
+            assert made == [dir_id(d_place)]
     else:
         with raises_errno(errno.ENAMETOOLONG):
             _route.run_long(BIND, p, c)
         assert not os.path.lexists(p)
         with listener_at(p) as listener:
+            made.clear()
             client, r = _route.run_long(CONNECT, p, c)
             with client:
                 assert r is fallback_route_here(CONNECT)
                 accept_ping(listener, client)
+            assert made == [dir_id(d_place)]
     assert_used(d_place)
     assert_empty(links)
+
+
+def count_made_d(monkeypatch: pytest.MonkeyPatch) -> list[tuple[int, int]]:
+    """Record the place (``(st_dev, st_ino)``, as :func:`_support.dir_id`
+    gives it) of every D the routes make, in order."""
+    made: list[tuple[int, int]] = []
+    real = _route.mkdir_at
+
+    def mkdir_at(base_fd: int, name: bytes) -> None:
+        real(base_fd, name)
+        st = os.fstat(base_fd)
+        made.append((st.st_dev, st.st_ino))
+
+    monkeypatch.setattr(_route, "mkdir_at", mkdir_at)
+    return made
 
 
 # A file name too long for `R/<name>` in a sockaddr (NAME_MAX_THROUGH_D + 1
 # bytes) leaves the routes through D without a means before anything is made: the
 # place for D stays untouched, the bind is ENAMETOOLONG with nothing created,
-# and a connect takes its fallback. NAME_MAX_THROUGH_D bytes still go through
-# the thread's own cwd or bindat. Through /proc the limit is shorter
-# (`/proc/self/fd/<n>/` in front): a name of 70 bytes goes, one of 85 does
-# not.
+# and a connect in the connect order of the SPEC (not forced through the
+# means) is carried by a route that makes no D (at-direct, proc-direct, the
+# symlink). NAME_MAX_THROUGH_D bytes still go through the thread's own cwd or
+# bindat. Through /proc the limit is shorter (`/proc/self/fd/<n>/` in front):
+# a name of 70 bytes goes, one of 85 does not.
 @pytest.mark.parametrize("means", MEANS, ids=MEANS_IDS)
 def test_a_file_name_too_long_for_the_routes_through_d_makes_nothing(tmp: TmpDirs, means: Means) -> None:
     t = tmp.new()
@@ -1257,7 +1297,7 @@ def test_a_file_name_too_long_for_the_routes_through_d_makes_nothing(tmp: TmpDir
     assert listing(parent(q)) == before
     assert_untouched(d_place)
     with listener_at(q) as listener:
-        client, r = _route.run_long(CONNECT, q, c)
+        client, r = _route.run_long(CONNECT, q, dataclasses.replace(c, connect_order=None))
         with client:
             assert r is not means.route
             accept_ping(listener, client)

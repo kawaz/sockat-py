@@ -39,6 +39,7 @@ from _support import (
     d_cfg,
     d_route_here,
     fallback_cfg,
+    far_connect_here,
     is_socket,
     kernel_sockname,
     listing,
@@ -158,9 +159,9 @@ def raised(path: bytes) -> OSError:
 
 
 def connect_here(p: bytes) -> socket.socket:
-    """A connect to ``p`` by the routes through D, or the symlink through
-    /tmp where they have no means, whatever the public API is made to read
-    (:func:`env_cfg`)."""
+    """A connect to ``p`` by the connect order of this system with the real
+    /proc and thread cwd and /tmp for the symlink, whatever the public API is
+    made to read (:func:`env_cfg`)."""
     return _route.run_long(CONNECT, p, d_cfg(links=(b"/tmp",)))[0]
 
 
@@ -328,7 +329,9 @@ def test_where_d_can_be_made_nowhere_the_form_without_d_is_taken(tmp: TmpDirs, e
 # the bind through a symlink, losing respelled only: every check of a route
 # (the socket at the path, data both ways, the path reported while the
 # kernel keeps the spelling through the symlink, asyncio, nothing left in
-# the place), and the routes skipped before it.
+# the place), and the routes skipped before it. The connects take the
+# connect order of the SPEC with the real configuration, whose first route
+# that can be used here (far_connect_here) carries them.
 @forces_the_symlink_route
 def test_past_the_default_bind_a_place_of_our_own_carries_it(tmp: TmpDirs, env_cfg: list[Config]) -> None:
     p = far(tmp)
@@ -342,7 +345,7 @@ def test_past_the_default_bind_a_place_of_our_own_carries_it(tmp: TmpDirs, env_c
         assert_through(listener, own, p)
     assert_empty(own)
     os.unlink(p)
-    connect_route = d_route_here()
+    connect_route = far_connect_here()
     if connect_route is None:
         return
 

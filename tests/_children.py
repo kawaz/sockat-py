@@ -24,9 +24,11 @@ from collections.abc import Callable
 
 from _support import (
     CHECKS_FULL_BACKLOG,
+    FREEBSD_ORDER_THROUGH_D,
     NO_PLACE,
     NO_PROC,
     PROC,
+    PROC_ORDER_THROUGH_D,
     RESULT_MARK,
     Forced,
     accept_ping,
@@ -71,14 +73,14 @@ def make_stale_socket() -> None:
 
 def means_cfg(means: str, own: tuple[OwnDirPlace, ...]) -> tuple[Config, Route]:
     """The configuration that forces one means of the routes through D (as
-    ``test_through_d.means_here`` names them), with ``own`` as the places for
-    D, and the route it takes."""
+    ``test_through_d.means_here`` names them and forces them, the connects
+    included), with ``own`` as the places for D, and the route it takes."""
     if means == "thread-cwd":
         return d_cfg(own, proc=NO_PROC), Route.THREAD_CWD
     if means == "proc":
-        return d_cfg(own, thread_cwd=False), Route.PROC
+        return d_cfg(own, thread_cwd=False, connect_order=PROC_ORDER_THROUGH_D), Route.PROC
     assert means == "at", means
-    return d_cfg(own), Route.AT
+    return d_cfg(own, connect_order=FREEBSD_ORDER_THROUGH_D), Route.AT
 
 
 def connect_report() -> None:

@@ -17,10 +17,11 @@ import sys
 from pathlib import Path
 
 import pytest
-from _support import TmpDirs, is_socket, nest
+from _support import HAS_PROC, TmpDirs, is_socket, nest, thread_cwd_usable
 
 import sockat
-from sockat._sys import DIRECT_MAX
+from sockat import _route
+from sockat._sys import DIRECT_MAX, IS_APPLE, IS_FREEBSD, IS_LINUX
 
 CLI = Path(__file__).resolve().parents[1] / "conformance" / "cli.py"
 
@@ -144,6 +145,12 @@ def test_long_bind_onto_a_file(tmp: TmpDirs) -> None:
     assert leftovers(places, os.path.dirname(path)) == []
 
 
+# A connect to a socket nobody listens on fails on the first route of the
+# connect order that connects at all (with the path too long for relative
+# from the cwd: proc-direct where /proc can be used, the widened sockaddr on
+# Apple, at-direct on FreeBSD, the thread's own cwd or else the symlink
+# elsewhere), and `route` names that route, the routes before it in the order
+# being `skipped` (hub SPEC: the route whose connect failed).
 def test_long_connect_without_listener(tmp: TmpDirs) -> None:
     root, places = tmp.new(), tmp.new()
     path = nest(root, LONG)
@@ -152,6 +159,20 @@ def test_long_connect_without_listener(tmp: TmpDirs) -> None:
     assert out["ok"] is False
     assert out["error"] == "ECONNREFUSED"
     assert out["losses"] == []
+    order = [r.value for r in _route.connect_order(HAS_PROC)]
+    if IS_FREEBSD:
+        failed = "at-direct"
+    elif HAS_PROC:
+        failed = "proc-direct"
+    elif IS_APPLE:
+        failed = "widened"
+    elif IS_LINUX and thread_cwd_usable():
+        failed = "thread-cwd"
+    else:
+        failed = "symlink"
+    assert out["route"] == failed
+    assert out["skipped"] == ["standard", *order[: order.index(failed)]]
+    assert leftovers(places, os.path.dirname(path)) == []
 
 
 @pytest.mark.parametrize("tail", [b"/", b"/.", b"/..", b"/a\0b"], ids=["slash", "dot", "dotdot", "nul"])

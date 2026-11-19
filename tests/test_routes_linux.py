@@ -1,7 +1,8 @@
 """The Linux routes: the D routes' means (thread cwd, /proc) for the
-binds and connects, and a connect's fallbacks where /proc can be used
-(``/proc/self/fd/<dirfd>/<name>``, the proc-held route, the symlink) and where it
-cannot (the relative spelling, the symlink). The proc-held route is in
+binds and connects, and a connect's other routes where /proc can be used
+(proc-direct ``/proc/self/fd/<dirfd>/<name>`` first, the proc-held route,
+the symlink) and where it cannot (the relative spelling first, the
+symlink). The proc-held route is in
 ``test_proc_held.py``, the routes through D in general in ``test_through_d.py``.
 
 "No /proc" is stood in for by pointing ``Config.proc_self_fd`` at a path
@@ -72,10 +73,14 @@ def no_proc(t: bytes, empty: bool) -> bytes:
 
 
 # Every path over DIRECT_MAX bytes, however long its directory part, is bound
-# and connected to by the routes through D through /proc where the thread's own
-# cwd is off (the directory never goes into the sockaddr, only the fd number,
-# R and the file name), and by the thread's own cwd where it is on and can be
-# used. Nothing else is tried: the place for the symlink stays untouched.
+# by the routes through D: through /proc where the thread's own cwd is off
+# (the directory never goes into the sockaddr, only the fd number, R and the
+# file name), by the thread's own cwd where it is on and can be used. A
+# connect to it takes proc-direct, the first route of the connect order where
+# /proc can be used (SPEC: the routes that need neither a write nor a thread
+# come first), so it makes nothing: no D (only the socket file is in its
+# directory, the place for D the connects are given) and no symlink (the
+# place for it stays untouched).
 @pytest.mark.parametrize("total", [DIRECT_MAX + 1, 300, 1000])
 @pytest.mark.parametrize("thread", [False, True])
 def test_long_paths_take_the_routes_through_d(tmp: TmpDirs, total: int, thread: bool) -> None:
@@ -90,11 +95,13 @@ def test_long_paths_take_the_routes_through_d(tmp: TmpDirs, total: int, thread: 
     with listener:
         assert r is want
         assert is_socket(p)
+        mark_untouched(parent(p))
         for req in (CONNECT, CONNECT_NONBLOCKING):
             client, r = _route.run_long(req, p, c)
             with client:
-                assert r is want
+                assert r is Route.PROC_DIRECT
                 accept_ping(listener, client)
+        assert_untouched(parent(p))
     assert_untouched(place)
 
 

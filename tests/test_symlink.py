@@ -1,6 +1,7 @@
-"""The symlink fallback of a connect (every system but FreeBSD; on Linux
-after /proc and the proc-held route, so /proc is made to look absent here): the
-places for the symlink, its name, and how it is created and removed. A bind
+"""The symlink route of a connect (every system but FreeBSD; the last of
+the connect order, on Linux after the /proc routes and proc-held, so /proc
+is made to look absent here): the places for the symlink, its name, and how
+it is created and removed. A bind
 never takes it (the routes through D carry the binds).
 
 Unless a test says otherwise there is no place for D and the thread's own

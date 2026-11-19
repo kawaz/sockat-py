@@ -1,7 +1,7 @@
-"""The relative fallback of a connect (every system but FreeBSD and Linux
+"""The relative route of a connect (every system but FreeBSD and Linux
 with /proc; made so on Linux here by pointing ``proc_self_fd`` at a path that
 does not exist), the fork route's place, and opening the socket's directory.
-The routes through D are in ``test_through_d.py``, the symlink fallback in
+The routes through D are in ``test_through_d.py``, the symlink route in
 ``test_symlink.py``.
 
 Tests that need a particular cwd or ``$PWD`` run in a child process
