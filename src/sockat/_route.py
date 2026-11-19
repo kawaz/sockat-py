@@ -116,8 +116,8 @@ class Route(Enum):
     """A short temporary symlink ``<place>/sockat.XXXXXXXXXX`` to the socket
     file in a place for it: a connect's route (in a widened ``sockaddr_un``
     on Apple when the spelling needs it), and a bind's where the kernel
-    follows a symlink in the last component of a bind (every system but
-    Linux / Android, told at run time)."""
+    follows a symlink in the last component of a bind (macOS and NetBSD,
+    measured; the systems not measured, told at run time)."""
     SYMLINK_DIR = "symlink-dir"
     """The last resort of a bind (:func:`sockat.ex.bind`): a short temporary symlink to the
     socket's directory in a place for it, the bind through
@@ -190,6 +190,12 @@ def _same_spelling(a: bytes, b: bytes) -> bool:
     return a.startswith(b"/") == b.startswith(b"/") and _path.components(a) == _path.components(b)
 
 
+BIND_DOES_NOT_FOLLOW_A_SYMLINK = IS_LINUX or sys.platform.startswith(("freebsd", "openbsd", "sunos"))
+"""Whether this is a system where a bind was measured not to follow a
+symlink in the last component (Linux / Android, FreeBSD, OpenBSD, illumos;
+hub SPEC, measured 2026-11-19): a bind does not try symlink-file there."""
+
+
 @dataclass(frozen=True)
 class Config:
     """What the route order reads from the environment, made explicit so the
@@ -221,12 +227,13 @@ class Config:
     """Whether the routes through D try a thread's own cwd at all (Linux,
     Apple). The tests turn it off to stand in for a system where it cannot be
     used."""
-    bind_symlink_file: bool = not IS_LINUX
-    """Whether a bind tries symlink-file after the standard (every system
-    but Linux / Android, whose bind does not follow a symlink in the last
-    component: measured, so not tried there). The tests turn it on on Linux
-    to see the route tell a kernel that does not follow the link at run
-    time."""
+    bind_symlink_file: bool = not BIND_DOES_NOT_FOLLOW_A_SYMLINK
+    """Whether a bind tries symlink-file after the standard: not where a bind
+    was measured not to follow a symlink in the last component
+    (:data:`BIND_DOES_NOT_FOLLOW_A_SYMLINK`); on Apple's systems, NetBSD
+    (measured to follow it) and the systems not measured (told at run time).
+    The tests turn it on on Linux to see the route tell a kernel that does
+    not follow the link at run time."""
     connect_order: tuple[Route, ...] | None = None
     """The routes a long connect tries, in order: :func:`connect_order` for
     this system when ``None``. The tests give an order of their own to force
@@ -376,7 +383,8 @@ def routes(req: Request, path: bytes, cfg: Config, trail: Trail) -> Reached:
        (no read permission where it is opened ``O_RDONLY``), those routes
        cannot be used and the others are tried;
     2. a bind: symlink-file where the bind may follow a symlink
-       (:func:`bind_symlink_file`, every system but Linux / Android), then
+       (:func:`bind_symlink_file`; not where it was measured not to,
+       :data:`BIND_DOES_NOT_FOLLOW_A_SYMLINK`), then
        the routes through D (:func:`through_d`), a private directory
        D reached by its fd through a thread's own cwd (Linux, Apple) or
        ``bindat`` (FreeBSD), then through /proc (Linux); where they cannot be
@@ -1645,7 +1653,8 @@ def symlink_file_route(req: Request, base: bytes, path: bytes, limit: int) -> tu
     returns, whatever the outcome.
 
     A connect follows a symlink in the last component everywhere. A bind
-    does on some systems only (macOS; not Linux), and where it does not the
+    does on some systems only (macOS and NetBSD; not Linux, FreeBSD,
+    OpenBSD or illumos), and where it does not the
     kernel answers without making anything at the path: so when a bind
     fails, the path is looked up (``lstat``) and, with something there, the
     failure is the outcome and raised (``EADDRINUSE`` for a file already at
