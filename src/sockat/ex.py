@@ -15,7 +15,7 @@ the plain calls of :mod:`sockat`::
         ...  # remove the socket file by the path given (discard), never by the address
     server = await asyncio.start_unix_server(handle, sock=listener)
     ...
-    discard()
+    discard()  # before the listener is closed (the server's close closes it)
 
     sock, losses, route, skipped = sockat.ex.connect(path)
 
@@ -109,9 +109,15 @@ def bind(path: StrOrBytesPath, *, last_resort: bool = False) -> Bound:
     bind, an :class:`OSError` without ``errno``), and
     ``discard()`` removes the file at that realpath only while it is still
     that file. When it is gone, or has been replaced by another file, it
-    does nothing. It may be called any number of times. It does not close
-    the listener (close it yourself, or let asyncio close it when it serves
-    it). Errors other than the file being gone are raised as
+    does nothing. A replacement is told apart when it was made while the
+    listener was open (the kernel holds on to the socket file meanwhile, so
+    its number is not reused); something removed and made again after the
+    listener was closed may get the same ``(st_dev, st_ino)`` on a file
+    system that reuses numbers at once (ext4, BSD's UFS / FFS), and be
+    removed, as removing by the path would. So call ``discard()`` before
+    closing the listener. It may be called any number of times. It does not
+    close the listener (close it yourself, or let asyncio close it when it
+    serves it). Errors other than the file being gone are raised as
     :class:`OSError`.
 
     With ``last_resort``, where :func:`sockat.bind` would raise

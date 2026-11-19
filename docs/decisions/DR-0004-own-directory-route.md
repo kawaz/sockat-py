@@ -143,6 +143,7 @@ D 無しの形:
 | 形 | `listener, discard, *_ = sockat.ex.bind(path)` ([DR-0006](DR-0006-sockat-ex.md))。`listener` は `sockat.bind(path)` と同じ。`discard` は引数なしの関数 |
 | 覚えるもの | 経路の中で bind が通った直後 (listen の前) に、ソケットのファイルの realpath (`strict=True`) と、それを `os.lstat` した `(st_dev, st_ino)`。bind が返った後に誰かがパスに置いたファイルを覚えないため |
 | `discard()` | その realpath を `os.lstat` し、`(st_dev, st_ino)` が同じ時だけ `os.unlink`。無い・別のファイルに置き換わっていれば何もしない。何度呼んでもよい。それ以外のエラー (`EACCES` 等) は `OSError` |
+| 約束の範囲 | 見分けられるのは、listener を開いている間に置き換えられた時 (開いている間はカーネルがソケットのファイルを掴み続け、番号が使い回されない)。閉じた後に消して作り直された物は、番号をすぐ使い回すファイルシステム (ext4、BSD の UFS / FFS) では同じ `(st_dev, st_ino)` になり消しうる (元のパスで消すのと同じ)。説明では `discard()` を listener を閉じる前に呼ぶよう勧める (ハブの DS-Q1 の kawaz 裁定 a、DR-0015) |
 | listener | `discard` は閉じない。閉じるのは利用者 (asyncio に渡したら asyncio) |
 | 短いパス | 長いパスと同じに動く |
 | Linux の abstract のアドレス | `discard` は何もしない |

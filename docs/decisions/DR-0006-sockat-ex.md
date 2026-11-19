@@ -53,7 +53,7 @@ class Connected(NamedTuple):
 |---|---|
 | 型 | `NamedTuple`。`listener, discard, losses, route, skipped = sockat.ex.bind(path)`、`sock, losses, route, skipped = sockat.ex.connect(path)` と分解できる。`listener, discard, *_ = sockat.ex.bind(path)` とも書ける |
 | `listener` / `sock` | 既定の `sockat.bind` / `sockat.connect` / `sockat.connect_nonblocking` が返すものと同じ |
-| `discard` | [DR-0004](DR-0004-own-directory-route.md) の決定 7 |
+| `discard` | [DR-0004](DR-0004-own-directory-route.md) の決定 7。約束は listener を開いている間の置き換えまで (閉じた後に消して作り直された物は、番号を使い回すファイルシステムで見分けられず消しうる)。説明では `discard()` を listener を閉じる前に呼ぶよう勧める (ハブの DS-Q1 の kawaz 裁定 a) |
 | `losses` | `Loss` の並び。`Loss` は `enum.StrEnum` で、`str()` と `.value` が SPEC の名前。SPEC の名前を全部持つ (`FORKED` は sockat-py では付かないが、SPEC の語彙として置く) |
 | `route` | `_route.Route` の値 (SPEC の経路の名前の文字列)。`Route` の enum は公開しない |
 | `skipped` | 試した順。経路の名前と理由 (短い英語の句、診断用) |

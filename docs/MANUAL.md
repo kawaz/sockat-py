@@ -47,8 +47,8 @@ listener, discard, losses, route, skipped = sockat.ex.bind(path)
 try:
     ...
 finally:
-    listener.close()
     discard()
+    listener.close()
 
 sock, losses, route, skipped = sockat.ex.connect(path)
 ```
@@ -70,6 +70,7 @@ The function `sockat.ex.bind` returns that removes the socket file the bind made
 - Right after the bind goes through (before the listen), the realpath of the socket file and its `(st_dev, st_ino)` are remembered. If that fails, the listener is closed and the error raised (the file is not removed)
 - For a relative path, the `(st_dev, st_ino)` of the process's cwd before the path is looked up is compared with that after the bind, and a difference is treated as a failure to remember (an `OSError` without an errno). Another thread that changed the cwd in between would have the bind made under one cwd and the file remembered under another, and `discard()` could remove an unrelated file of the same name. A change undone in between is not seen
 - `discard()` removes the file at that realpath only while it is still the same file. When it is gone, or replaced by another file, it does nothing
+- A replacement can be told apart only when it was made while the listener was open (while it is open, the kernel holds on to the socket file and its number is not reused). Something removed and made again after the listener was closed may get the same `(st_dev, st_ino)` on a file system that reuses numbers at once (ext4, BSD's UFS / FFS), and `discard()` may remove it (as removing by the original path would). Call `discard()` before closing the listener ([the hub's measurements](https://github.com/kawaz/sockat/blob/main/docs/findings/2026-11-19-inode-reuse-after-close.md), in Japanese)
 - A replacement between the check and the removal cannot be prevented (POSIX has no way to remove a name only if it still refers to a given inode)
 - `discard()` may be called any number of times. It does not close the listener (the caller closes it; once handed to asyncio, asyncio does)
 - Errors other than the file being gone (`EACCES` on the directory, ...) are raised as `OSError`
@@ -173,8 +174,8 @@ os.unlink(path)
 
 listener, discard, losses, route, skipped = sockat.ex.bind(path)
 ...
-listener.close()
 discard()
+listener.close()
 ```
 
 ### cwd-relative
@@ -210,8 +211,8 @@ import sockat.ex
 
 listener, discard, losses, route, skipped = sockat.ex.bind(path, last_resort=True)
 ...
-listener.close()
 discard()
+listener.close()
 ```
 
 ## How a long path is reached
@@ -450,15 +451,15 @@ os.unlink(path)
 
 - The pattern: ending the cleanup with `listener.close()` alone
 - Why not: for a long path it is not removed, even in a language whose standard library removes it ([respelled](#respelled)). Python's standard library does not remove it even for a short path
-- Instead: `discard()`, or remove by the original path
+- Instead: `discard()`, or remove by the original path. Call `discard()` before closing the listener ([discard](#discard))
 
 ```python
 import sockat.ex
 
 listener, discard, losses, route, skipped = sockat.ex.bind(path)
 ...
-listener.close()
 discard()
+listener.close()
 ```
 
 ### Relying on discard() to close the listener too
@@ -488,8 +489,8 @@ import sockat.ex
 listener, discard, losses, route, skipped = sockat.ex.bind(path)
 if sockat.ex.Loss.RECREATABLE_SPELLING in losses:
     ...
-listener.close()
 discard()
+listener.close()
 ```
 
 ### Reaping children with waitpid(-1) in another thread of a program that goes through a fork
@@ -524,7 +525,7 @@ reader, writer = await asyncio.open_unix_connection(sock=sockat.connect_nonblock
 
 - It works as with a short path, with no extra arguments. The asyncio of Python 3.13 and later removes the socket file at the original path when the server is closed (`cleanup_socket`; the listener's `getsockname()` returns the original path, and that is what it removes). The asyncio of 3.11 / 3.12 does not remove it (as with the standard library)
 - The transport's `get_extra_info('sockname')` (server side) / `get_extra_info('peername')` (client side) are also the original path
-- The `listener` / `sock` from `sockat.ex` can be passed the same way. `discard()` may be called while the server runs or after it has closed
+- The `listener` / `sock` from `sockat.ex` can be passed the same way. Call `discard()` before closing the server (while it runs) ([discard](#discard))
 
 `connect_nonblocking` does not wait for the peer, so it can be called directly from the event loop. `bind` does not wait for a peer either (with thread-cwd it waits for the thread to end, but the bind returns at once).
 

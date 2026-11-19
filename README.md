@@ -100,8 +100,8 @@ import sockat.ex
 
 listener, discard, losses, route, skipped = sockat.ex.bind(path)
 ...
-listener.close()
 discard()
+listener.close()
 
 sock, losses, route, skipped = sockat.ex.connect(path)
 ```
@@ -109,7 +109,7 @@ sock, losses, route, skipped = sockat.ex.connect(path)
 - `sockat.ex.bind` / `sockat.ex.connect` / `sockat.ex.connect_nonblocking` try the same routes as the plain `sockat.bind` / `sockat.connect` / `sockat.connect_nonblocking`, and also return the name of the route taken (`route`), the routes tried and found unusable (`skipped`, with `name` and `reason`), and what was lost (`losses`)
 - Call them through the module, as `sockat.ex.connect(...)` (imported as `from sockat.ex import connect`, they are easily mistaken for the plain `sockat.connect`)
 - `import sockat` does not load `sockat.ex`. Whoever uses it chooses it with `import sockat.ex`
-- `discard()` removes the socket file the bind made, and nothing else (not when it has been replaced by another file). It may be called any number of times, and it does not close the listener (the caller does)
+- `discard()` removes the socket file the bind made, and nothing else (not when it was replaced by another file while the listener was open). It may be called any number of times, and it does not close the listener (the caller does). Call it before closing the listener (something removed and made again after the close may, on some file systems, not be told apart and be removed)
 - `losses` is what the route taken lost (`Loss`'s `respelled`, `recreatable-spelling`, `cwd-relative`; empty when nothing was lost). Branch on it. `route` and `skipped` are for diagnosis, and their contents are not promised
 - `last_resort=True` uses the last resort: `sockat.ex.bind` tries symlink-dir last where the plain bind gets `ENAMETOOLONG` (no route can be used) (it creates in a place `sockat.XXXXXXXXXX` pointing to the socket's directory, binds with `<place>/sockat.XXXXXXXXXX/<file name>`, and removes it at once; the places are `XDG_RUNTIME_DIR`, `TMPDIR` and `/tmp`, those only the owner can write to first, the shared ones after; through a shared place it loses `recreatable-spelling`). A connect's last resort is the fork route, which Python does not have, so it only appears in `skipped`
 - When a call fails, the error (of the same type and `errno` as the plain call's) gets the attributes `skipped` and `route`
@@ -134,7 +134,7 @@ Ways of writing it that remove an unrelated file or fail to remove the file. The
 |---|---|
 | `os.unlink(socket.socket.getsockname(listener))` (removing by the spelling the kernel reports) | `os.unlink(path)` (the original path) or `discard()` |
 | `sockat.bind("server.sock")` → `os.chdir(...)` → `os.unlink("server.sock")` | `os.path.abspath(path)` before the bind. `discard()` |
-| ending the cleanup with `listener.close()` alone | `discard()` or `os.unlink(path)` |
+| ending the cleanup with `listener.close()` alone | `discard()` (before closing the listener) or `os.unlink(path)` |
 | calling `discard()` alone without closing the listener | `close()` the listener too |
 | `if route == "symlink-dir":` (branching on `route`, `skipped` or `reason`) | `if sockat.ex.Loss.RECREATABLE_SPELLING in losses:` (branching on `losses`) |
 

@@ -100,8 +100,8 @@ import sockat.ex
 
 listener, discard, losses, route, skipped = sockat.ex.bind(path)
 ...
-listener.close()
 discard()
+listener.close()
 
 sock, losses, route, skipped = sockat.ex.connect(path)
 ```
@@ -109,7 +109,7 @@ sock, losses, route, skipped = sockat.ex.connect(path)
 - `sockat.ex.bind` / `sockat.ex.connect` / `sockat.ex.connect_nonblocking` は、既定の `sockat.bind` / `sockat.connect` / `sockat.connect_nonblocking` と同じ経路を試し、通った経路の名前 (`route`)、試して使えなかった経路 (`skipped`、`name` と `reason`)、失ったもの (`losses`) を一緒に返す
 - `sockat.ex.connect(...)` のようにモジュールを通して呼ぶ (`from sockat.ex import connect` と取り込むと既定の `sockat.connect` と紛れる)
 - `sockat.ex` は `import sockat` では読み込まれない。使う人が `import sockat.ex` で選ぶ
-- `discard()` は bind が作ったソケットファイルだけを消す (別のファイルに置き換わっていたら消さない)。何度呼んでもよく、listener は閉じない (閉じるのは利用者)
+- `discard()` は bind が作ったソケットファイルだけを消す (listener を開いている間に別のファイルに置き換わっていたら消さない)。何度呼んでもよく、listener は閉じない (閉じるのは利用者)。listener を閉じる前に呼ぶ (閉じた後に消して作り直された物は、ファイルシステムによっては見分けられず消しうる)
 - `losses` は通った経路で失ったものの並び (`Loss` の `respelled`、`recreatable-spelling`、`cwd-relative`。何も失わなければ空)。分岐にはこれを使う。`route` と `skipped` は診断用で中身は約束しない
 - `last_resort=True` で最終手段を使う: `sockat.ex.bind` は、既定の bind が `ENAMETOOLONG` になる所 (経路が全部使えない所) で最後に symlink-dir を試す (置き場にソケットのディレクトリを指す `sockat.XXXXXXXXXX` を作り、`<置き場>/sockat.XXXXXXXXXX/<ファイル名>` で bind して、すぐ消す。置き場は `XDG_RUNTIME_DIR`、`TMPDIR`、`/tmp` で、持ち主だけが書ける置き場を先に、無ければ共有の置き場。共有の置き場を通ると `recreatable-spelling` が付く)。connect の最終手段は fork の経路で、Python には無いので `skipped` に入るだけ
 - 失敗した時は、例外 (型と `errno` は既定の呼び出しと同じ) に `skipped` と `route` の属性を付ける
@@ -134,7 +134,7 @@ sock, losses, route, skipped = sockat.ex.connect(path)
 |---|---|
 | `os.unlink(socket.socket.getsockname(listener))` (カーネルが返す綴りで消す) | `os.unlink(path)` (元のパス) か `discard()` |
 | `sockat.bind("server.sock")` → `os.chdir(...)` → `os.unlink("server.sock")` | bind の前に `os.path.abspath(path)`。`discard()` |
-| `listener.close()` だけで後始末を終える | `discard()` か `os.unlink(path)` |
+| `listener.close()` だけで後始末を終える | `discard()` (listener を閉じる前に) か `os.unlink(path)` |
 | `discard()` だけを呼び listener を閉じない | listener も `close()` する |
 | `if route == "symlink-dir":` (`route`・`skipped`・`reason` で分岐する) | `if sockat.ex.Loss.RECREATABLE_SPELLING in losses:` (`losses` で分岐する) |
 

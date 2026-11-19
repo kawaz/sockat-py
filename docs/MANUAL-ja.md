@@ -47,8 +47,8 @@ listener, discard, losses, route, skipped = sockat.ex.bind(path)
 try:
     ...
 finally:
-    listener.close()
     discard()
+    listener.close()
 
 sock, losses, route, skipped = sockat.ex.connect(path)
 ```
@@ -70,6 +70,7 @@ sock, losses, route, skipped = sockat.ex.connect(path)
 - bind が通った直後 (listen の前) に、ソケットファイルの realpath と `(st_dev, st_ino)` を覚える。覚えられなければ listener を閉じて例外を返す (ファイルは消さない)
 - 相対パスの時は、パスを引く前と bind の後でプロセスの cwd の `(st_dev, st_ino)` を比べ、違えば覚えられない時と同じに扱う (errno の無い `OSError`)。他のスレッドが間に cwd を変えると、bind と覚えるのが別の cwd の下になり、`discard()` が同じ名前の無関係なファイルを消しうるため。変えて戻した場合は見えない
 - `discard()` は、その realpath のファイルがまだ同じファイルの時だけ消す。無い時、別のファイルに置き換わっている時は何もしない
+- 置き換えを見分けられるのは、listener が開いている間に置き換えられた時 (開いている間はカーネルがソケットのファイルを掴み続け、番号が使い回されない)。listener を閉じた後に消して作り直された物は、番号をすぐ使い回すファイルシステム (ext4、BSD の UFS / FFS) では同じ `(st_dev, st_ino)` になり、`discard()` が消しうる (元のパスで消すのと同じ)。`discard()` は listener を閉じる前に呼ぶ ([ハブの実測](https://github.com/kawaz/sockat/blob/main/docs/findings/2026-11-19-inode-reuse-after-close.md))
 - 確かめてから消すまでの間の置き換えは防げない (POSIX に inode を指定して消す手段が無い)
 - `discard()` は何度呼んでもよい。listener は閉じない (閉じるのは利用者。asyncio に渡したら asyncio)
 - ファイルが無い以外のエラー (ディレクトリの `EACCES` 等) は `OSError`
@@ -173,8 +174,8 @@ os.unlink(path)
 
 listener, discard, losses, route, skipped = sockat.ex.bind(path)
 ...
-listener.close()
 discard()
+listener.close()
 ```
 
 ### cwd-relative
@@ -210,8 +211,8 @@ import sockat.ex
 
 listener, discard, losses, route, skipped = sockat.ex.bind(path, last_resort=True)
 ...
-listener.close()
 discard()
+listener.close()
 ```
 
 ## 長いパスへの届き方
@@ -450,15 +451,15 @@ os.unlink(path)
 
 - 書き方: `listener.close()` だけで後始末を終える
 - なぜいけないか: 長いパスでは、標準が消す言語でも消えない ([respelled](#respelled))。Python の標準は短いパスでも消さない
-- 代わりに: `discard()` か、元のパスで消す
+- 代わりに: `discard()` か、元のパスで消す。`discard()` は listener を閉じる前に呼ぶ ([discard](#discard))
 
 ```python
 import sockat.ex
 
 listener, discard, losses, route, skipped = sockat.ex.bind(path)
 ...
-listener.close()
 discard()
+listener.close()
 ```
 
 ### discard() で listener も閉じると当てにする
@@ -488,8 +489,8 @@ import sockat.ex
 listener, discard, losses, route, skipped = sockat.ex.bind(path)
 if sockat.ex.Loss.RECREATABLE_SPELLING in losses:
     ...
-listener.close()
 discard()
+listener.close()
 ```
 
 ### fork を通るプログラムで、他のスレッドが waitpid(-1) で子を刈る
@@ -524,7 +525,7 @@ reader, writer = await asyncio.open_unix_connection(sock=sockat.connect_nonblock
 
 - 引数を足さずに、短いパスと同じに動く。Python 3.13 以降の asyncio は、server を閉じる時に元のパスのソケットファイルを消す (`cleanup_socket`。listener の `getsockname()` が元のパスを返すので、それで消す)。3.11 / 3.12 の asyncio は消さない (標準と同じ)
 - transport の `get_extra_info('sockname')` (server 側) / `get_extra_info('peername')` (client 側) も元のパス
-- `sockat.ex` の `listener` / `sock` も同じに渡せる。`discard()` は server の動作中に呼んでも、閉じた後に呼んでもよい
+- `sockat.ex` の `listener` / `sock` も同じに渡せる。`discard()` は server を閉じる前 (動作中) に呼ぶ ([discard](#discard))
 
 `connect_nonblocking` は相手を待たないので、イベントループから直接呼べる。`bind` も相手を待たない (thread-cwd ではスレッドの終わりを待つが、bind してすぐ終わる)。
 
