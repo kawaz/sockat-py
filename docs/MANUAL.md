@@ -229,11 +229,13 @@ For a longer path, the socket's directory is looked up first (`ENOENT` if it doe
 |---|---|---|
 | Linux / Android (`/proc` usable) | [thread-cwd](#the-routes-through-d) → [proc](#the-routes-through-d) | [proc-direct](#routes-only-a-connect-takes) → [thread-cwd](#the-routes-through-d) → [proc](#the-routes-through-d) → [proc-held](#routes-only-a-connect-takes) → [symlink-file](#symlink-file) |
 | Linux / Android (`/proc` not usable) | [thread-cwd](#the-routes-through-d) | [relative](#routes-only-a-connect-takes) → [thread-cwd](#the-routes-through-d) → [symlink-file](#symlink-file) |
-| FreeBSD | [symlink-file](#symlink-file) → [at](#the-routes-through-d) | [at-direct](#routes-only-a-connect-takes) → [at](#the-routes-through-d) |
+| FreeBSD | [at](#the-routes-through-d) | [at-direct](#routes-only-a-connect-takes) → [at](#the-routes-through-d) |
 | macOS / iOS | [symlink-file](#symlink-file) → [thread-cwd](#the-routes-through-d) | [relative](#routes-only-a-connect-takes) → [widened](#routes-only-a-connect-takes) → [thread-cwd](#the-routes-through-d) → [symlink-file](#symlink-file) |
-| NetBSD / OpenBSD / illumos / other Unix | [symlink-file](#symlink-file) | [relative](#routes-only-a-connect-takes) → [symlink-file](#symlink-file) |
+| NetBSD | [symlink-file](#symlink-file) | [relative](#routes-only-a-connect-takes) → [symlink-file](#symlink-file) |
+| OpenBSD / illumos | none (`ENAMETOOLONG`) | [relative](#routes-only-a-connect-takes) → [symlink-file](#symlink-file) |
+| other Unix | [symlink-file](#symlink-file) (whether it is followed is told at run time) | [relative](#routes-only-a-connect-takes) → [symlink-file](#symlink-file) |
 
-- A bind tries [symlink-file](#symlink-file) right after the standard everywhere but Linux / Android. Where a bind follows a symlink (confirmed on macOS), it reaches a path whatever the length of its file name. Where the link is not followed, the next route is tried
+- A bind tries [symlink-file](#symlink-file) right after the standard, except on the OSes confirmed not to follow a symlink in a bind (Linux / Android, FreeBSD, OpenBSD, illumos). Where a bind follows it (confirmed on macOS and NetBSD), it reaches a path whatever the length of its file name. On an OS not confirmed, where the link is not followed, the next route is tried
 - A connect tries the routes that need neither a write (creating D, R or a symlink) nor a thread (proc-direct, relative, widened, at-direct) first, and the routes that create D or start a thread after them. The routes that need neither are fast, and relative and widened reach further than the routes through D in some cases
 - D is created at most once per call and shared by the routes that use it (thread-cwd, at, proc, proc-held). When it can be created nowhere, every route that uses it is skipped as unusable, and D is not tried again
 - When D can be created nowhere, a bind tries the same means in [the form without D](#the-form-without-d) (thread-cwd-sockdir, at-sockdir, proc-sockdir)
@@ -310,7 +312,7 @@ Only connects use these routes. They are tried in the order per OS (the table in
 
 ### symlink-file
 
-Binds (everywhere but Linux / Android) and connects use it.
+Binds (except on Linux / Android, FreeBSD, OpenBSD and illumos, confirmed not to follow a symlink in a bind) and connects use it.
 
 1. Look at the places `TMPDIR` (when it is an absolute path other than `/tmp`), then `/tmp`, and in the first where the spelling `<place>/sockat.XXXXXXXXXX` fits `sun_path` (for a connect on macOS, up to 253 bytes with the widened sockaddr) and which is a safe place, create `sockat.XXXXXXXXXX` (10 random characters; on `EEXIST` another, up to 16 tries) pointing to the path of the socket file (with the cwd in front for a relative path). Nothing is created in a place where it does not fit, that is not safe, or where it cannot be created; the next one is tried
 2. Bind / connect with that spelling, and remove the symlink on success and on failure alike
@@ -319,7 +321,7 @@ Binds (everywhere but Linux / Android) and connects use it.
   - sticky and owned by root or by the calling user (as `/tmp` is)
   - owned by the calling user with no write permission for group and others (as macOS's `$TMPDIR` is)
 - Neither the file name nor the directory goes into the spelling, so a path is reached whatever the length of its file name
-- A bind goes through it only on an OS whose bind follows a symlink in the last component (confirmed on macOS; Linux / Android do not follow it, so it is not tried there; other OSes are not confirmed). When the bind fails, the original path is looked up with `lstat`: if something is there, that error (`EADDRINUSE` and the like) is returned and nothing more is tried; if nothing is there, or it cannot be told, the kernel is taken not to have followed the link, so the route cannot be used and the next route is tried (the hub's [DR-0016](https://github.com/kawaz/sockat/blob/main/docs/decisions/DR-0016-bind-through-file-symlink.md), in Japanese)
+- A bind goes through it only on an OS whose bind follows a symlink in the last component (confirmed on macOS and NetBSD; not tried on Linux / Android, FreeBSD, OpenBSD and illumos, confirmed not to follow it; other OSes are not confirmed and are told at run time). When the bind fails, the original path is looked up with `lstat`: if something is there, that error (`EADDRINUSE` and the like) is returned and nothing more is tried; if nothing is there, or it cannot be told, the kernel is taken not to have followed the link, so the route cannot be used and the next route is tried (the hub's [DR-0016](https://github.com/kawaz/sockat/blob/main/docs/decisions/DR-0016-bind-through-file-symlink.md), in Japanese)
 - A bind through it loses only `respelled`. The address the kernel reports is the symlink's spelling; unlinking that spelling removes at most an entry in the place (the symlink is already gone), so it cannot be made to remove an unrelated file
 
 ### How a failing route is treated
@@ -334,13 +336,14 @@ When a path longer than the standard library accepts is `ENAMETOOLONG` (given th
 |---|---|---|
 | Linux / Android (`/proc` usable) | file name > 96 (about 79 when thread-cwd cannot be used) | reached (proc-held) |
 | Linux / Android (`/proc` not usable) | file name > 96, or thread-cwd cannot be used | relative > 107, thread-cwd cannot be used (file name > 96 or thread-cwd unusable), and symlink-file cannot be used |
-| FreeBSD | file name > 92 (symlink-file not counted) | file name > 103 |
+| FreeBSD | file name > 92 | file name > 103 |
 | macOS / iOS | macOS: reached (symlink-file). When symlink-file cannot be used, file name > 92, or thread-cwd cannot be used<br>other Apple OSes: file name > 92, or thread-cwd cannot be used | both the original and the relative path > 253, thread-cwd cannot be used (file name > 92 or thread-cwd unusable), and symlink-file cannot be used |
-| NetBSD / OpenBSD | every long path (symlink-file not counted) | relative > 103, and symlink-file cannot be used |
-| illumos | every long path (symlink-file not counted) | relative > 107, and symlink-file cannot be used |
+| NetBSD | reached (symlink-file). When symlink-file cannot be used, every long path | relative > 103, and symlink-file cannot be used |
+| OpenBSD | every long path | relative > 103, and symlink-file cannot be used |
+| illumos | every long path | relative > 107, and symlink-file cannot be used |
 
 - When D can be created nowhere, a bind reaches a file name of up to 88 bytes (84 on macOS / FreeBSD, about 72 with proc-sockdir alone) through [the form without D](#the-form-without-d) (when the socket's directory can be opened and R created in it; where no means can be used, nothing is reached, as in the table above). A connect gets as far as the routes in its order that do not use D reach (proc-direct, relative, widened, at-direct, symlink-file; proc-held cannot be used either)
-- In the bind column, symlink-file is counted on macOS only. Linux / Android do not try it, their bind not following a symlink. Whether the other OSes follow it is not confirmed
+- In the bind column, symlink-file is counted on macOS and NetBSD only, confirmed to follow a symlink in a bind. Linux / Android, FreeBSD, OpenBSD and illumos do not follow it, so they do not try it
 - `sockat.ex.bind` with the last resort reaches the path even where `bind` gets `ENAMETOOLONG`, when the spelling of [symlink-dir](#symlink-dir), `<place>/sockat.XXXXXXXXXX/<file name>`, fits `sun_path` and a usable place exists
 - symlink-file and symlink-dir cannot be used when there is no safe place where the symlink can be created (a sandbox where neither `TMPDIR` nor `/tmp` can be used, and the like)
 - A path longer than `PATH_MAX` as a whole (1024 bytes on macOS, 4096 on Linux) is `ENAMETOOLONG` on every route (no other system call opens it either; it is outside what sockat handles)
@@ -531,4 +534,4 @@ reader, writer = await asyncio.open_unix_connection(sock=sockat.connect_nonblock
 - FreeBSD, NetBSD, OpenBSD and illumos run the tests on VMs in CI
 - The error a nonblocking connect returns for a full backlog was checked only on Linux and macOS
 - No test takes the last resort symlink-dir on FreeBSD (at cannot be made unusable, so a bind that goes on to symlink-dir cannot be set up)
-- Whether the bind of FreeBSD, NetBSD, OpenBSD and illumos follows symlink-file's link is not confirmed (the tests on the CI VMs tell)
+- Whether a bind follows symlink-file's link was confirmed on macOS, Linux and the CI VMs (FreeBSD 15, NetBSD 11, OpenBSD 8, illumos). On other versions and OSes the tests tell it by a probe at start, and show the result in one line of their output

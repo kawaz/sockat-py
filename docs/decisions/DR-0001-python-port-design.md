@@ -23,7 +23,7 @@
 | proc-held (connect だけ) | [DR-0002](DR-0002-unsafe-base-held-by-fd.md) | Linux / Android |
 | relative (connect だけ) | 文字列を書き直して標準に渡す | FreeBSD 以外で `/proc` を使えない時 |
 | widened (connect だけ) | ctypes で libc の `connect(2)` に手で組んだ sockaddr を渡す | Apple の OS |
-| symlink-file (connect、Linux / Android 以外の bind) | `os.symlink` で作り、標準に渡し、消す ([DR-0004](DR-0004-own-directory-route.md) の決定 8) | connect は FreeBSD 以外、bind は Linux / Android 以外 |
+| symlink-file (connect と bind) | `os.symlink` で作り、標準に渡し、消す ([DR-0004](DR-0004-own-directory-route.md) の決定 8) | connect は FreeBSD 以外、bind は bind が symlink を辿らないと確かめた OS (Linux / Android、FreeBSD、OpenBSD、illumos) 以外 |
 | symlink-dir (`sockat.ex.bind` の最終手段) | `os.symlink` で作り、標準に渡し、消す ([DR-0006](DR-0006-sockat-ex.md)) | 全部 |
 | at-direct (connect だけ) | ctypes で `connectat(2)` にソケットのディレクトリの fd とファイル名 | FreeBSD |
 | fork-cwd、fork-cwd-sockdir、fork-cwd-direct | 作らない (kawaz 裁定) | — |

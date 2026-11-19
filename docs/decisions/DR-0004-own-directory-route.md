@@ -19,7 +19,7 @@
 |---|---|---|
 | 1 | `sun_path` − 1 以下なら標準にそのまま (環境も読まない) | 同じ |
 | 2 | ソケットのディレクトリを `os.stat` で引く (無ければ `ENOENT`、ディレクトリでなければ `ENOTDIR`)。fd が要る経路のために開く | 同じ |
-| 3 | symlink-file (Linux / Android 以外。決定 8) | connect の順 (決定 5)。D を通す経路もこの順の中で試す |
+| 3 | symlink-file (bind が symlink を辿らないと確かめた OS 以外。決定 8) | connect の順 (決定 5)。D を通す経路もこの順の中で試す |
 | 3 の次 | D を通す経路 (決定 3 の順) | (同上) |
 | 4 | D をどこにも作れなければ D 無しの形。それも使えない時と、D を作れて手段が全部使えなかった時は `ENAMETOOLONG` (決定 4) | 順の最後まで使えなければ `ENAMETOOLONG` |
 
@@ -157,7 +157,7 @@ D 無しの形:
 
 | 項目 | 決定 |
 |---|---|
-| 試す OS | `_route.Config.bind_symlink_file` (既定は Linux / Android 以外で真)。Linux / Android は bind が最後の要素の symlink を辿らない (実測) ので試さない。試験はこれを Linux でも真にして、辿らないカーネルを実行時に見分けることを確かめる |
+| 試す OS | `_route.Config.bind_symlink_file` (既定は `_route.BIND_DOES_NOT_FOLLOW_A_SYMLINK` でない OS で真)。bind が最後の要素の symlink を辿らないと実測した Linux / Android、FreeBSD、OpenBSD、illumos では試さない。辿るのは macOS と NetBSD (実測 2026-11-19、ハブの SPEC)。他の OS は実行時に見分ける。試験はこれを Linux でも真にして、辿らないカーネルを実行時に見分けることを確かめる |
 | 置き場と symlink | connect の symlink-file と同じ (`Config.link_places`、安全な置き場、`<置き場>/sockat.XXXXXXXXXX` が `sun_path` に収まる)。symlink の先は元のパス (相対パスなら cwd を前に付ける)。bind は広げた sockaddr を使わない |
 | bind | 綴りで標準の `bind`、`listen` (`_route.symlink_file_route`)。成功でも失敗でも symlink を消す |
 | 失敗した時 | 元のパスを `os.lstat` し、物があればその例外を返して次を試さない。無いか `lstat` が失敗したら、カーネルが辿らなかったとみなし、次の置き場も試さずにこの経路を使えないとして `skipped` に入れ、D を通す経路に進む |
@@ -184,7 +184,7 @@ D 無しの形:
 ## Consequences
 
 - bind のファイル名の上限は `R/` の 11 バイト分短い (Linux 96、Apple の OS / BSD 92。proc はおよそ 79)。D をどこにも作れない時は D 無しの形の 19 バイト分 (Linux 88、Apple の OS / BSD 84。proc-sockdir はおよそ 72)
-- NetBSD / OpenBSD / illumos では長いパスの bind が届かない (ハブの D12-Q3 の kawaz 裁定 (a))
+- OpenBSD / illumos では長いパスの bind が届かない (ハブの D12-Q3 の kawaz 裁定 (a))。NetBSD は symlink-file で届く
 - 長いパスの bind / connect のたびに D と R を作って消す
 - 途中でプロセスが死ぬと、置き場に `sockat.XXXXXXXXXX`、ソケットのディレクトリに `.sockat.XXXXXXXXXX` (D か、D 無しの形の R) が残る
 - R はソケットのディレクトリの realpath を指すので、R を作った後のディレクトリの rename や symlink の張り替えは反映されない

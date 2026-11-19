@@ -74,7 +74,7 @@ bind の `skipped` に入るもの (長いパス):
 | 位置 | 経路 | 理由の例 |
 |---|---|---|
 | 最初 | standard | `path too long` |
-| 次 (Linux / Android 以外) | symlink-file | `no place for the symlink`、`symlink not followed by bind` |
+| 次 (bind が symlink を辿らないと確かめた Linux / Android、FreeBSD、OpenBSD、illumos 以外) | symlink-file | `no place for the symlink`、`symlink not followed by bind` |
 | D を通す経路 | この OS にある経路 (Linux は thread-cwd、proc。Apple の OS は thread-cwd。FreeBSD は at) | `spelling too long`、`seccomp filter`、`no pthread_fchdir_np`、`thread cwd turned off`、`/proc unusable`、`thread cwd refused`、`no place for D` |
 | fork-cwd | fork-cwd | `no fork route in sockat-py` |
 | D 無しの形 (D をどこにも作れない時だけ) | thread-cwd-sockdir (FreeBSD は at-sockdir)、proc-sockdir | 上と同じ、`socket directory not opened`、`R not created` |

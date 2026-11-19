@@ -53,9 +53,11 @@ A longer path is tried on the routes below, in this order per OS, and bound / co
 |---|---|---|
 | Linux / Android (`/proc` usable) | thread-cwd → proc | proc-direct → thread-cwd → proc → proc-held → symlink-file |
 | Linux / Android (`/proc` not usable) | thread-cwd | relative → thread-cwd → symlink-file |
-| FreeBSD | symlink-file → at | at-direct → at |
+| FreeBSD | at | at-direct → at |
 | macOS / iOS | symlink-file → thread-cwd | relative → widened → thread-cwd → symlink-file |
-| NetBSD / OpenBSD / illumos / other Unix | symlink-file | relative → symlink-file |
+| NetBSD | symlink-file | relative → symlink-file |
+| OpenBSD / illumos | none (`ENAMETOOLONG`) | relative → symlink-file |
+| other Unix | symlink-file (whether it is followed is told at run time) | relative → symlink-file |
 | Windows | not supported (`ImportError` on import) | the same |
 
 | Route | How |
@@ -69,16 +71,16 @@ A longer path is tried on the routes below, in this order per OS, and bound / co
 | proc-held | connects only. Create a symlink `s` to the socket file inside D, and pass `/proc/self/fd/<fd of D>/s` |
 | relative | connects only. Pass the path relative to the cwd. Only the string is rewritten; the cwd is never changed |
 | widened | connects only. Pass a sockaddr carrying up to 253 bytes, which the macOS kernel accepts |
-| symlink-file | create a short symlink to the socket file under `TMPDIR` or `/tmp` where no other user can replace it, go through it, and remove it at once. The spelling holds no file name. A bind goes through it only where a bind follows a symlink in the last component (confirmed on macOS; Linux / Android do not follow it, so it is not tried there), and goes on to the next route where it is not followed |
+| symlink-file | create a short symlink to the socket file under `TMPDIR` or `/tmp` where no other user can replace it, go through it, and remove it at once. The spelling holds no file name. A bind goes through it only where a bind follows a symlink in the last component (confirmed on macOS and NetBSD). It is not tried on the OSes confirmed not to follow it (Linux / Android, FreeBSD, OpenBSD, illumos); on other OSes a bind goes on to the next route where it is not followed |
 | symlink-dir | `sockat.ex.bind` with the last resort only. Create a short symlink to the socket's directory in a place, go through it, and remove it at once ([below](#calls-with-cleaning-up-and-diagnosis-sockatex)) |
 | at-direct | connects only. Pass the fd of the socket's directory and the file name to `connectat(2)` (FreeBSD) |
 | fork-cwd, fork-cwd-sockdir, fork-cwd-direct | **none** (the specification's fork routes are not built. The last resort of `sockat.ex.connect`, fork-cwd-direct, only appears in `skipped`) |
 
 - None of the routes changes the cwd of the calling process or thread, so they can be used from multi-threaded programs
 - A connect tries the routes that need neither a write (creating D, R or a symlink) nor a thread (proc-direct, relative, widened, at-direct) first, and the routes that create D or start a thread after them. D is created at most once per connect and shared by the routes that use it (thread-cwd, at, proc, proc-held). When it can be created nowhere, every route that uses it is skipped
-- On macOS a bind reaches a path through symlink-file whatever the length of its file name (losing only `respelled`)
+- On macOS and NetBSD a bind reaches a path through symlink-file whatever the length of its file name (losing only `respelled`)
 - A bind through the routes through D reaches a path at any directory depth as long as the file name is within 96 bytes (92 on macOS / FreeBSD, about 79 with proc), shorter than the standard library's limit by `R/`. When D can be created nowhere, the form without D reaches up to 88 bytes (84 on macOS / FreeBSD, about 72 with proc-sockdir)
-- On NetBSD / OpenBSD / illumos (when their bind does not follow symlink-file's link), and where no means of the routes through D can be used (Linux without `/proc` under a seccomp filter, and the like), a `bind` of a long path gets `ENAMETOOLONG` (where the specification reaches it through the fork-cwd route, which Python does not have; ruled by kawaz in the hub's D12-Q3). To reach it even there, use `sockat.ex.bind` with the last resort ([below](#calls-with-cleaning-up-and-diagnosis-sockatex))
+- On OpenBSD / illumos, and where no means of the routes through D can be used (Linux without `/proc` under a seccomp filter, and the like), a `bind` of a long path gets `ENAMETOOLONG` (where the specification reaches it through the fork-cwd route, which Python does not have; ruled by kawaz in the hub's D12-Q3). To reach it even there, use `sockat.ex.bind` with the last resort ([below](#calls-with-cleaning-up-and-diagnosis-sockatex))
 - A path that fits no route gets `ENAMETOOLONG` (an `OSError` with errno), as a path too long for the standard library does
 - The conditions of each route, and where a path stops being reached, are in [docs/MANUAL.md](./docs/MANUAL.md#how-a-long-path-is-reached)
 

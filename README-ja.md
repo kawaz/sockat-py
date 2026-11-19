@@ -53,9 +53,11 @@ pip install sockat
 |---|---|---|
 | Linux / Android (`/proc` を使える) | thread-cwd → proc | proc-direct → thread-cwd → proc → proc-held → symlink-file |
 | Linux / Android (`/proc` を使えない) | thread-cwd | relative → thread-cwd → symlink-file |
-| FreeBSD | symlink-file → at | at-direct → at |
+| FreeBSD | at | at-direct → at |
 | macOS / iOS | symlink-file → thread-cwd | relative → widened → thread-cwd → symlink-file |
-| NetBSD / OpenBSD / illumos / その他の Unix | symlink-file | relative → symlink-file |
+| NetBSD | symlink-file | relative → symlink-file |
+| OpenBSD / illumos | なし (`ENAMETOOLONG`) | relative → symlink-file |
+| その他の Unix | symlink-file (辿るかを実行時に見分ける) | relative → symlink-file |
 | Windows | 対象外 (import で `ImportError`) | 同左 |
 
 | 経路 | やり方 |
@@ -69,16 +71,16 @@ pip install sockat
 | proc-held | connect だけ。D の中にソケットのファイルを指す symlink `s` を作り、`/proc/self/fd/<D の fd>/s` で渡す |
 | relative | connect だけ。cwd からの相対パスで渡す。文字列を書き直すだけで cwd は変えない |
 | widened | connect だけ。macOS のカーネルが受け付ける、253 バイトまで入る sockaddr で渡す |
-| symlink-file | 他人が差し替えられない `TMPDIR` か `/tmp` に、ソケットのファイルを指す短い symlink を作って通し、すぐ消す。綴りにファイル名が出ない。bind は、bind が最後の要素の symlink を辿る OS (macOS で確認。Linux / Android は辿らないので試さない) でだけ通り、辿らない時は次の経路に進む |
+| symlink-file | 他人が差し替えられない `TMPDIR` か `/tmp` に、ソケットのファイルを指す短い symlink を作って通し、すぐ消す。綴りにファイル名が出ない。bind は、bind が最後の要素の symlink を辿る OS (macOS と NetBSD で確認) でだけ通る。辿らないと確かめた OS (Linux / Android、FreeBSD、OpenBSD、illumos) では試さず、他の OS では辿らない時に次の経路に進む |
 | symlink-dir | 最終手段を使う `sockat.ex.bind` だけ。置き場にソケットのディレクトリを指す短い symlink を作って通し、すぐ消す ([後述](#後始末診断つきの呼び出し-sockatex)) |
 | at-direct | connect だけ。`connectat(2)` にソケットのディレクトリの fd とファイル名を渡す (FreeBSD) |
 | fork-cwd、fork-cwd-sockdir、fork-cwd-direct | **無い** (仕様の fork の経路は作っていない。`sockat.ex.connect` の最終手段の fork-cwd-direct は `skipped` に入るだけ) |
 
 - どの経路も呼び出し元のプロセスとスレッドの cwd を変えないので、マルチスレッドのプログラムから使える
 - connect は、書き込み (D・R・symlink を作る) もスレッドも要らない経路 (proc-direct、relative、widened、at-direct) を先に試し、D を作る経路とスレッドを立てる経路をその後にする。D は 1 回の connect で 1 度だけ作り、D を使う経路 (thread-cwd、at、proc、proc-held) で共有する。どこにも作れなければ、D を使う経路はどれも飛ばす
-- macOS の bind は symlink-file でファイル名の長さによらず届く (失うのは `respelled` だけ)
+- macOS と NetBSD の bind は symlink-file でファイル名の長さによらず届く (失うのは `respelled` だけ)
 - D を通す経路の bind はディレクトリの深さによらず、ファイル名が 96 バイト (macOS / FreeBSD は 92、proc はおよそ 79) まで届く (`R/` の分、標準より短い)。D をどこにも作れない時は D 無しの形で 88 バイト (macOS / FreeBSD は 84、proc-sockdir はおよそ 72) まで
-- NetBSD / OpenBSD / illumos (bind が symlink-file を辿らない時) と、D を通す経路の手段を使えない環境 (seccomp の filter の下で `/proc` の無い Linux 等) では、長いパスの `bind` は `ENAMETOOLONG` になる (仕様では fork-cwd の経路で届く所。Python には fork の経路が無い。ハブの D12-Q3 で kawaz 裁定)。そこでも届かせたい時は最終手段を使う `sockat.ex.bind` ([後述](#後始末診断つきの呼び出し-sockatex))
+- OpenBSD / illumos と、D を通す経路の手段を使えない環境 (seccomp の filter の下で `/proc` の無い Linux 等) では、長いパスの `bind` は `ENAMETOOLONG` になる (仕様では fork-cwd の経路で届く所。Python には fork の経路が無い。ハブの D12-Q3 で kawaz 裁定)。そこでも届かせたい時は最終手段を使う `sockat.ex.bind` ([後述](#後始末診断つきの呼び出し-sockatex))
 - どの経路にも収まらないパスは、標準で長すぎるパスと同じく `ENAMETOOLONG` (errno 付きの `OSError`) になる
 - 各経路の条件と、どこから届かなくなるかは [docs/MANUAL-ja.md](./docs/MANUAL-ja.md#長いパスへの届き方) にある
 
