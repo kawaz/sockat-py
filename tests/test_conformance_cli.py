@@ -293,6 +293,10 @@ def load_cli() -> ModuleType:
     assert spec is not None
     assert spec.loader is not None
     module = importlib.util.module_from_spec(spec)
+    # Registered before it runs, as an import would: a dataclass in the CLI
+    # looks its module up in sys.modules while the class is made (Python
+    # 3.11 fails with the module missing there).
+    sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
 
