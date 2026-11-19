@@ -512,14 +512,16 @@ def test_a_failed_bind_tells_the_route_and_what_was_skipped(tmp: TmpDirs) -> Non
 
 
 # A missing directory is ENOENT (a FileNotFoundError, as from sockat.bind)
-# before any route's bind is made: no route, the standard skipped.
+# before any route is tried: routes are noted only once the directory has
+# been looked up (SPEC), so no route and nothing skipped, not even the
+# standard.
 def test_a_missing_directory_tells_no_route(tmp: TmpDirs) -> None:
     p = with_name(nest(tmp.new(), 300), b"missing/s.sock")
     e = raised(p)
     assert isinstance(e, FileNotFoundError)
     assert e.errno == errno.ENOENT
     assert getattr(e, "route") is None  # noqa: B009
-    assert names(getattr(e, "skipped")) == ["standard"]  # noqa: B009
+    assert names(getattr(e, "skipped")) == []  # noqa: B009
 
 
 # A file name no route carries (too long for R/<name>, for the form without

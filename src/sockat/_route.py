@@ -366,9 +366,10 @@ def routes(req: Request, path: bytes, cfg: Config, trail: Trail) -> Reached:
     A bind through any of them loses :attr:`Loss.RESPELLED` (``bind_any``'s
     symlink in a shared place :attr:`Loss.RECREATABLE_SPELLING` too); a
     connect loses nothing. The routes are noted in ``trail`` from the
-    standard on (it takes no path this long).
+    standard on (it takes no path this long), once the directory has been
+    looked up: a failure before that (no such directory, ...) notes nothing
+    (SPEC).
     """
-    trail.skip(Route.STANDARD, "path too long")
     check_no_nul(path)
     directory, name = _path.split(path)
     st = os.stat(directory)
@@ -378,6 +379,7 @@ def routes(req: Request, path: bytes, cfg: Config, trail: Trail) -> Reached:
     # is the error it is, before any length is judged (SPEC), rather than the
     # routes through D quietly counting as unusable and ending in ENAMETOOLONG.
     real_dir = os.fsencode(os.path.realpath(directory, strict=True))
+    trail.skip(Route.STANDARD, "path too long")
     dirfd: int | None
     try:
         dirfd = open_dir(directory)
