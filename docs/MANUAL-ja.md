@@ -67,7 +67,8 @@ sock, losses, route, skipped = sockat.ex.connect(path)
 
 `sockat.ex.bind` が返す、bind が作ったソケットファイルだけを消す関数。
 
-- bind が通った直後 (listen の前) に、ソケットファイルの realpath と `(st_dev, st_ino)` を覚える。覚えられなければ listener を閉じて例外を返す
+- bind が通った直後 (listen の前) に、ソケットファイルの realpath と `(st_dev, st_ino)` を覚える。覚えられなければ listener を閉じて例外を返す (ファイルは消さない)
+- 相対パスの時は、パスを引く前と bind の後でプロセスの cwd の `(st_dev, st_ino)` を比べ、違えば覚えられない時と同じに扱う (errno の無い `OSError`)。他のスレッドが間に cwd を変えると、bind と覚えるのが別の cwd の下になり、`discard()` が同じ名前の無関係なファイルを消しうるため。変えて戻した場合は見えない
 - `discard()` は、その realpath のファイルがまだ同じファイルの時だけ消す。無い時、別のファイルに置き換わっている時は何もしない
 - 確かめてから消すまでの間の置き換えは防げない (POSIX に inode を指定して消す手段が無い)
 - `discard()` は何度呼んでもよい。listener は閉じない (閉じるのは利用者。asyncio に渡したら asyncio)
@@ -504,7 +505,7 @@ sockat-py には fork の経路が無いので起きない ([forked](#forked))�
 | どの経路にも収まらない ([どこから届かなくなるか](#どこから届かなくなるか)) | `OSError` (`ENAMETOOLONG`) |
 | 標準にそのまま渡せない長さのパスで、名前で終わらない | `ValueError` |
 | 先頭以外に NUL を含むパス | `ValueError` |
-| relative の途中で cwd が変わった | errno の無い `OSError` |
+| relative の経路の途中、または相対パスの `sockat.ex.bind` の途中で cwd が変わった | errno の無い `OSError` |
 
 macOS では、相手の backlog が満杯の時も connect は `ECONNREFUSED` を返す。`ECONNREFUSED` を見てソケットファイルを消すような処理は、macOS では生きている listener のソケットファイルを消しうる (カーネルの振る舞いで、標準でも同じ)。
 

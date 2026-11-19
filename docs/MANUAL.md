@@ -67,7 +67,8 @@ sock, losses, route, skipped = sockat.ex.connect(path)
 
 The function `sockat.ex.bind` returns that removes the socket file the bind made, and nothing else.
 
-- Right after the bind goes through (before the listen), the realpath of the socket file and its `(st_dev, st_ino)` are remembered. If that fails, the listener is closed and the error raised
+- Right after the bind goes through (before the listen), the realpath of the socket file and its `(st_dev, st_ino)` are remembered. If that fails, the listener is closed and the error raised (the file is not removed)
+- For a relative path, the `(st_dev, st_ino)` of the process's cwd before the path is looked up is compared with that after the bind, and a difference is treated as a failure to remember (an `OSError` without an errno). Another thread that changed the cwd in between would have the bind made under one cwd and the file remembered under another, and `discard()` could remove an unrelated file of the same name. A change undone in between is not seen
 - `discard()` removes the file at that realpath only while it is still the same file. When it is gone, or replaced by another file, it does nothing
 - A replacement between the check and the removal cannot be prevented (POSIX has no way to remove a name only if it still refers to a given inode)
 - `discard()` may be called any number of times. It does not close the listener (the caller closes it; once handed to asyncio, asyncio does)
@@ -504,7 +505,7 @@ Never happens: sockat-py has no fork route ([forked](#forked)).
 | no route reaches the path ([Where a path stops being reached](#where-a-path-stops-being-reached)) | `OSError` (`ENAMETOOLONG`) |
 | a path too long for the standard library that does not end with a name | `ValueError` |
 | a path containing a NUL anywhere but at its start | `ValueError` |
-| the cwd changed during relative | an `OSError` without an errno |
+| the cwd changed during the relative route, or during `sockat.ex.bind` of a relative path | an `OSError` without an errno |
 
 On macOS a connect also returns `ECONNREFUSED` when the peer's backlog is full. Code that removes the socket file on seeing `ECONNREFUSED` can, on macOS, remove the socket file of a live listener (the kernel's behaviour, the same with the standard library).
 
