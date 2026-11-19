@@ -54,7 +54,7 @@ class Request:
     """Reach the path even by losing something (``bind_any``, the SPEC's any
     operations): where every route of the default bind is unusable (and it
     would answer ``ENAMETOOLONG``), the bind goes on to the symlink route
-    (:func:`bind_symlink_route`)."""
+    (:func:`symlink_dir_route`)."""
 
 
 BIND = Request(Op.BIND)
@@ -79,9 +79,9 @@ class Route(Enum):
     PROC = "proc"
     """``/proc/self/fd/<fd of D>/R/<name>``, through the ``socket`` module
     (Linux)."""
-    FORK = "fork"
-    """The SPEC's fork route of a bind, which this implementation does not
-    have (DR-0001): only ever noted as skipped."""
+    FORK_CWD = "fork-cwd"
+    """The SPEC's fork-cwd route of a bind, which this implementation does
+    not have (DR-0001): only ever noted as skipped."""
     THREAD_CWD_SOCKDIR = "thread-cwd-sockdir"
     """A bind's form without D, where D could be made nowhere:
     ``.sockat.XXXXXXXXXX/<name>`` (R in the socket's directory) from a
@@ -95,8 +95,8 @@ class Route(Enum):
     """A bind's form without D through /proc:
     ``/proc/self/fd/<fd of the socket's directory>/.sockat.XXXXXXXXXX/<name>``,
     through the ``socket`` module (Linux)."""
-    FORK_SOCKDIR = "fork-sockdir"
-    """The SPEC's fork route in the form without D, which this
+    FORK_CWD_SOCKDIR = "fork-cwd-sockdir"
+    """The SPEC's fork-cwd route in the form without D, which this
     implementation does not have: only ever noted as skipped."""
     PROC_DIRECT = "proc-direct"
     """A connect's route: ``/proc/self/fd/<fd of the socket's
@@ -110,15 +110,22 @@ class Route(Enum):
     WIDENED = "widened"
     """A connect's route: the path itself, or else its relative spelling,
     in a widened ``sockaddr_un`` (Apple)."""
-    SYMLINK = "symlink"
-    """A short temporary symlink in a place for it: a connect's route
-    through ``<place>/sockat.XXXXXXXXXX`` pointing to the socket file (in a
-    widened ``sockaddr_un`` on Apple when the spelling needs it), or the
-    last route of ``bind_any`` through ``<place>/sockat.XXXXXXXXXX/<name>``
-    pointing to the socket's directory."""
+    SYMLINK_FILE = "symlink-file"
+    """A short temporary symlink ``<place>/sockat.XXXXXXXXXX`` to the socket
+    file in a place for it: a connect's route (in a widened ``sockaddr_un``
+    on Apple when the spelling needs it), and a bind's where the kernel
+    follows a symlink in the last component of a bind (every system but
+    Linux / Android, told at run time)."""
+    SYMLINK_DIR = "symlink-dir"
+    """The last resort of ``bind_any``: a short temporary symlink to the
+    socket's directory in a place for it, the bind through
+    ``<place>/sockat.XXXXXXXXXX/<name>``."""
     AT_DIRECT = "at-direct"
     """A connect's route: ``connectat(2)`` of the file name on the fd of
     the socket's directory (FreeBSD)."""
+    FORK_CWD_DIRECT = "fork-cwd-direct"
+    """The SPEC's last resort of a connect, which this implementation does
+    not have: only ever noted as skipped."""
 
 
 class Loss(StrEnum):
@@ -193,13 +200,14 @@ class Config:
     The tests leave places out to stand in for places where D cannot be
     made."""
     link_places: tuple[bytes, ...]
-    """Where a connect's temporary symlink may go, in the order tried:
-    ``TMPDIR`` when it is set to an absolute path, then ``/tmp``."""
+    """Where symlink-file's temporary symlink (a bind's and a connect's) may
+    go, in the order tried: ``TMPDIR`` when it is set to an absolute path,
+    then ``/tmp``."""
     bind_link_places: tuple[bytes, ...] = ()
     """Where ``bind_any``'s temporary symlink may go, the candidates in the
     order given: ``XDG_RUNTIME_DIR`` and ``TMPDIR`` when they are set to an
     absolute path, then ``/tmp``, each spelling once. Which of them are
-    tried first is decided by what they are (:func:`bind_symlink_route`)."""
+    tried first is decided by what they are (:func:`symlink_dir_route`)."""
     wide: bool = IS_APPLE
     """Whether a connect tries the widened ``sockaddr_un`` at all (Apple).
     The tests turn it off to stand in for a kernel that refuses the widened
@@ -211,6 +219,12 @@ class Config:
     """Whether the routes through D try a thread's own cwd at all (Linux,
     Apple). The tests turn it off to stand in for a system where it cannot be
     used."""
+    bind_symlink_file: bool = not IS_LINUX
+    """Whether a bind tries symlink-file after the standard (every system
+    but Linux / Android, whose bind does not follow a symlink in the last
+    component: measured, so not tried there). The tests turn it on on Linux
+    to see the route tell a kernel that does not follow the link at run
+    time."""
     connect_order: tuple[Route, ...] | None = None
     """The routes a long connect tries, in order: :func:`connect_order` for
     this system when ``None``. The tests give an order of their own to force
@@ -359,7 +373,9 @@ def routes(req: Request, path: bytes, cfg: Config, trail: Trail) -> Reached:
        ``connectat``, D in the socket's directory); when it cannot be opened
        (no read permission where it is opened ``O_RDONLY``), those routes
        cannot be used and the others are tried;
-    2. a bind: the routes through D (:func:`through_d`), a private directory
+    2. a bind: symlink-file where the bind may follow a symlink
+       (:func:`bind_symlink_file`, every system but Linux / Android), then
+       the routes through D (:func:`through_d`), a private directory
        D reached by its fd through a thread's own cwd (Linux, Apple) or
        ``bindat`` (FreeBSD), then through /proc (Linux); where they cannot be
        used, :func:`bind_past_d` (the form without D where D could be made
@@ -395,6 +411,12 @@ def routes(req: Request, path: bytes, cfg: Config, trail: Trail) -> Reached:
         if req.op is not Op.BIND:
             call = ConnectCall(req, path, directory, real_dir, name, dirfd, cfg, proc_ok)
             return connect_routes(call, trail)
+        if cfg.bind_symlink_file:
+            trail.attempt(Route.SYMLINK_FILE)
+            linked = bind_symlink_file(req, path, cfg)
+            if isinstance(linked, socket.socket):
+                return Reached(linked, Route.SYMLINK_FILE, (Loss.RESPELLED,), tuple(trail.skipped))
+            trail.skip(Route.SYMLINK_FILE, linked)
         done = through_d(req, real_dir, name, dirfd, cfg, proc_ok=proc_ok, trail=trail)
         if isinstance(done, tuple):
             return Reached(*done, (Loss.RESPELLED,), tuple(trail.skipped))
@@ -439,20 +461,20 @@ def bind_past_d(
     implementation does not have (DR-0001): the default bind answers what a
     plain bind of a path longer than ``sun_path`` answers, ``ENAMETOOLONG``
     (hub QUESTIONS D12-Q3), and ``bind_any`` (``req.at_any_cost``) goes on to
-    the symlink route (:func:`bind_symlink_route`), whose ``ENAMETOOLONG``
+    the symlink route (:func:`symlink_dir_route`), whose ``ENAMETOOLONG``
     ends it where no place carries it either."""
-    trail.skip(Route.FORK, NO_FORK)
+    trail.skip(Route.FORK_CWD, NO_FORK)
     if why is Skip.NO_OWN_DIR:
         done = bind_sockdir(req, real_dir, name, dirfd, cfg, proc_ok=proc_ok, trail=trail)
         if done is not None:
             return Reached(*done, (Loss.RESPELLED,), tuple(trail.skipped))
-        trail.skip(Route.FORK_SOCKDIR, NO_FORK)
+        trail.skip(Route.FORK_CWD_SOCKDIR, NO_FORK)
     if req.at_any_cost:
-        trail.attempt(Route.SYMLINK)
-        done_any = bind_symlink_route(req, real_dir, name, cfg.bind_link_places)
+        trail.attempt(Route.SYMLINK_DIR)
+        done_any = symlink_dir_route(req, real_dir, name, cfg.bind_link_places)
         if done_any is not None:
             sock, losses = done_any
-            return Reached(sock, Route.SYMLINK, losses, tuple(trail.skipped))
+            return Reached(sock, Route.SYMLINK_DIR, losses, tuple(trail.skipped))
         trail.trying = None
     raise _enametoolong()
 
@@ -915,6 +937,9 @@ class Skip(Enum):
     WIDE_REFUSED = "wide-refused"
     """The spelling needed the widened form and the kernel refused it
     (Apple)."""
+    NOT_FOLLOWED = "not-followed"
+    """A bind through a symlink to the socket file failed with nothing at
+    the path: the kernel did not follow the link (Linux)."""
 
 
 class Means(Enum):
@@ -933,6 +958,7 @@ SOCKDIR = {Means.THREAD_CWD: Route.THREAD_CWD_SOCKDIR, Means.AT: Route.AT_SOCKDI
 
 TOO_LONG = "spelling too long"
 NO_PLACE_FOR_D = "no place for D"
+NO_PLACE_FOR_LINK = "no place for the symlink"
 NO_FORK = "no fork route in sockat-py"
 
 
@@ -1198,11 +1224,11 @@ def connect_order(proc_ok: bool) -> tuple[Route, ...]:
         return (Route.AT_DIRECT, Route.AT)
     if IS_LINUX:
         if proc_ok:
-            return (Route.PROC_DIRECT, Route.THREAD_CWD, Route.PROC, Route.PROC_HELD, Route.SYMLINK)
-        return (Route.RELATIVE, Route.THREAD_CWD, Route.SYMLINK)
+            return (Route.PROC_DIRECT, Route.THREAD_CWD, Route.PROC, Route.PROC_HELD, Route.SYMLINK_FILE)
+        return (Route.RELATIVE, Route.THREAD_CWD, Route.SYMLINK_FILE)
     if IS_APPLE:
-        return (Route.RELATIVE, Route.WIDENED, Route.THREAD_CWD, Route.SYMLINK)
-    return (Route.RELATIVE, Route.SYMLINK)
+        return (Route.RELATIVE, Route.WIDENED, Route.THREAD_CWD, Route.SYMLINK_FILE)
+    return (Route.RELATIVE, Route.SYMLINK_FILE)
 
 
 class ConnectCall:
@@ -1429,17 +1455,17 @@ def connect_widened(call: ConnectCall) -> socket.socket | str:
     return TOO_LONG
 
 
-def connect_symlink(call: ConnectCall) -> socket.socket | str:
+def connect_symlink_file(call: ConnectCall) -> socket.socket | str:
     """A temporary symlink to the socket file in the first of
     :attr:`Config.link_places` that carries the connect
-    (:func:`symlink_route`)."""
+    (:func:`symlink_file_route`)."""
     for base in call.cfg.link_places:
-        outcome = symlink_route(call.req, base, call.path, WIDE_PATH_MAX if call.wide else DIRECT_MAX)
+        outcome = symlink_file_route(call.req, base, call.path, WIDE_PATH_MAX if call.wide else DIRECT_MAX)
         if isinstance(outcome, tuple):
             return outcome[0]
         if outcome is Skip.WIDE_REFUSED:
             call.wide = False
-    return "no place for the symlink"
+    return NO_PLACE_FOR_LINK
 
 
 def connect_at_direct(call: ConnectCall) -> socket.socket | str:
@@ -1461,7 +1487,7 @@ CONNECT_ROUTES: dict[Route, Callable[[ConnectCall], socket.socket | str]] = {
     Route.AT: connect_at,
     Route.PROC: connect_proc,
     Route.PROC_HELD: connect_proc_held,
-    Route.SYMLINK: connect_symlink,
+    Route.SYMLINK_FILE: connect_symlink_file,
 }
 """What each route of a connect order does: the socket it connected, or why
 it cannot be used."""
@@ -1600,22 +1626,31 @@ class Relative:
         return result
 
 
-# ---------- the symlink route ----------
+# ---------- the symlink routes ----------
 
 
-def symlink_route(req: Request, base: bytes, path: bytes, limit: int) -> tuple[socket.socket, Route] | Skip:
-    """A connect's symlink route: connect to ``path`` through a symlink
+def symlink_file_route(req: Request, base: bytes, path: bytes, limit: int) -> tuple[socket.socket, Route] | Skip:
+    """The symlink-file route: bind / connect ``path`` through a symlink
     ``<base>/sockat.XXXXXXXXXX`` to the socket file (``path`` made absolute
     against the cwd, so the kernel resolves the link as it resolves
-    ``path``). A connect follows a symlink in the last component, so the
-    spelling's length depends on neither the directory nor the file name.
+    ``path``). The spelling holds neither the directory nor the file name,
+    so its length depends on neither.
 
     Used when the spelling is at most ``limit`` bytes (:data:`DIRECT_MAX` for
-    the plain sockaddr, on Apple the widened form's 253) and ``base`` is a
-    place where nobody else can replace the symlink (:func:`safe_base`). Both
-    are checked before anything is created. Nothing is left under ``base``:
-    the symlink is removed when this returns, whatever the outcome.
-    """
+    the plain sockaddr, on Apple the widened form's 253 for a connect) and
+    ``base`` is a place where nobody else can replace the symlink
+    (:func:`safe_base`). Both are checked before anything is created.
+    Nothing is left under ``base``: the symlink is removed when this
+    returns, whatever the outcome.
+
+    A connect follows a symlink in the last component everywhere. A bind
+    does on some systems only (macOS; not Linux), and where it does not the
+    kernel answers without making anything at the path: so when a bind
+    fails, the path is looked up (``lstat``) and, with something there, the
+    failure is the outcome and raised (``EADDRINUSE`` for a file already at
+    the path); with nothing there, or nothing to tell, the kernel is taken
+    not to have followed the link: :attr:`Skip.NOT_FOLLOWED` (SPEC,
+    DR-0016)."""
     if len(_join(base, OWN_DIR_PREFIX + b"X" * RANDOM_LEN)) > limit or not safe_base(base):
         return Skip.UNUSABLE
     target = _absolute(path)
@@ -1626,17 +1661,48 @@ def symlink_route(req: Request, base: bytes, path: bytes, limit: int) -> tuple[s
     except (OSError, NotImplementedError):
         return Skip.UNUSABLE
     with link:
+        if req.op is Op.BIND:
+            try:
+                return plain_op(req, link.path), Route.SYMLINK_FILE
+            except OSError:
+                if _something_at(target):
+                    raise
+                return Skip.NOT_FOLLOWED
         if IS_APPLE and len(link.path) > DIRECT_MAX:
             try:
-                return wide_op(req, link.path), Route.SYMLINK
+                return wide_op(req, link.path), Route.SYMLINK_FILE
             except OSError as e:
                 if refuses_wide(e):
                     return Skip.WIDE_REFUSED
                 raise
-        return plain_op(req, link.path), Route.SYMLINK
+        return plain_op(req, link.path), Route.SYMLINK_FILE
 
 
-def bind_symlink_route(
+def _something_at(path: bytes) -> bool:
+    """Whether ``lstat(path)`` finds anything (``False`` when it cannot
+    tell)."""
+    try:
+        os.lstat(path)
+    except OSError:
+        return False
+    return True
+
+
+def bind_symlink_file(req: Request, path: bytes, cfg: Config) -> socket.socket | str:
+    """A bind's symlink-file route (:func:`symlink_file_route`) in the first
+    of :attr:`Config.link_places` that carries it, or why it cannot be used.
+    The kernel not following the link ends the route at once: no other place
+    would do better."""
+    for base in cfg.link_places:
+        outcome = symlink_file_route(req, base, path, DIRECT_MAX)
+        if isinstance(outcome, tuple):
+            return outcome[0]
+        if outcome is Skip.NOT_FOLLOWED:
+            return "symlink not followed by bind"
+    return NO_PLACE_FOR_LINK
+
+
+def symlink_dir_route(
     req: Request, real_dir: bytes, name: bytes, places: tuple[bytes, ...]
 ) -> tuple[socket.socket, tuple[Loss, ...]] | None:
     """``bind_any``'s symlink route, its last: bind ``<place>/sockat.XXXXXXXXXX/<name>``

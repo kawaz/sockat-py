@@ -57,7 +57,7 @@ class AnyBinding(NamedTuple):
     was lost"."""
     route: str
     """The name of the route that carried the bind, as the sockat SPEC names
-    it (``"standard"``, ``"thread-cwd"``, ``"symlink"``, ...). For diagnosis
+    it (``"standard"``, ``"symlink-file"``, ``"thread-cwd"``, ``"symlink-dir"``, ...). For diagnosis
     only: not promised."""
     skipped: tuple[Skipped, ...]
     """The routes tried before :attr:`route` and found unusable, in the order

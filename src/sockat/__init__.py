@@ -33,8 +33,10 @@ subclasses such as :class:`FileNotFoundError`), :class:`ValueError` for a
 long path that does not end with a file name or contains a NUL byte, and an
 :class:`OSError` without ``errno`` when the cwd changed during a connect
 through a path relative to it. A long path that no route reaches is
-``ENAMETOOLONG``: for a bind, a file name longer than the routes through D
-carry (or, on systems where they have no means, any long path).
+``ENAMETOOLONG``: for a bind where the bind does not go through a symlink to
+the socket file (it does on macOS, whatever the file name; not on Linux), a
+file name longer than the routes through D carry (or, on systems where they
+have no means, any long path).
 
 :mod:`sockat.any` (imported only when asked for:
 ``from sockat.any import bind_any``) binds even where :func:`bind` is
