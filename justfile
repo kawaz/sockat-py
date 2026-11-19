@@ -68,6 +68,18 @@ test-linux *ARGS:
       done
     done
 
+# ハブの適合試験 (docs/design/conformance.md) の試験用 CLI を起こす (標準入力に JSON 1 つ、標準出力に結果)
+#
+# 場面ごとの cwd・環境変数・umask はハブのスクリプトが整えるので、cwd を変えずに (no-cd)
+# .venv の python で直に起こす。uv run を挟むと uv が $TMPDIR に uv-*.lock を残し、
+# 場面の置き場を汚す ([script] にしないのも just が $TMPDIR に script を書くため)。
+# .venv は uv sync (just check / uv run でも作られる) で用意しておく。
+# CLI は src/ の外 (conformance/) にあり、wheel にも sdist にも入らない。
+[no-cd]
+conformance-cli:
+    @[ -x {{quote(justfile_directory() / ".venv" / "bin" / "python")}} ] || { echo "conformance-cli: .venv が無い。先にリポで uv sync を" >&2; exit 2; }
+    @exec {{quote(justfile_directory() / ".venv" / "bin" / "python")}} {{quote(justfile_directory() / "conformance" / "cli.py")}}
+
 # check + test (CI entry point)
 ci: check test
 
