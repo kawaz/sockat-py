@@ -18,6 +18,7 @@ from __future__ import annotations
 import errno
 import os
 import re
+import sys
 
 import pytest
 from _support import (
@@ -47,13 +48,22 @@ from _support import (
 
 from sockat import _route
 from sockat._route import BIND, OWN_DIR_PREFIX, RANDOM_LEN, Loss, Route, Trail
-from sockat._sys import IS_LINUX
+from sockat._sys import IS_FREEBSD, IS_LINUX
+
+PROBED = (
+    f"probe on {sys.platform}: a bind {'follows' if bind_follows_a_symlink() else 'does not follow'}"
+    " a symlink in the last component"
+)
+"""What :func:`_support.bind_follows_a_symlink` found here, as one line. It is
+the reason of every skip below, so the test run's summary (``-ra``, the
+project's default) shows it on each system, the CI's VMs included (the SPEC
+leaves it unconfirmed on FreeBSD, NetBSD, OpenBSD and illumos)."""
 
 FOLLOWS = not IS_LINUX and bind_follows_a_symlink()
 """Whether the default bind here goes through symlink-file (tried, and the
 bind follows the link)."""
 
-follows = pytest.mark.skipif(not FOLLOWS, reason="the bind here does not follow a symlink (or does not try it)")
+follows = pytest.mark.skipif(not FOLLOWS, reason=PROBED + ("; Linux does not try the route" if IS_LINUX else ""))
 
 LINK = re.escape(OWN_DIR_PREFIX) + rb"[A-Za-z0-9]{%d}" % RANDOM_LEN
 
@@ -148,9 +158,8 @@ def test_a_relative_path_is_bound_through_its_absolute_target(tmp: TmpDirs) -> N
 # next to the socket, and the bind goes on to the routes through D (or ends
 # in ENAMETOOLONG where they have no means). Where the bind follows it, the
 # same configuration goes through the link.
+@pytest.mark.skipif(FOLLOWS, reason=PROBED)
 def test_where_the_bind_does_not_follow_the_link_it_is_skipped(tmp: TmpDirs) -> None:
-    if FOLLOWS:
-        pytest.skip("the bind here follows the link")
     p = far(tmp)
     links = tmp.new()
     c = d_cfg((tmp.new(),), [links], bind_symlink_file=True)
@@ -250,7 +259,15 @@ def test_a_place_that_cannot_carry_it_is_passed_over(tmp: TmpDirs) -> None:
 
     q = with_name(p, b"q.sock")
     trail = Trail()
-    with raises_errno(errno.ENAMETOOLONG):
-        _route.reach_long(BIND, q, d_cfg((), [unsafe], thread_cwd=False), trail)
-    assert dict(trail.skipped)[Route.SYMLINK_FILE] == _route.NO_PLACE_FOR_LINK
+    c = d_cfg((), [unsafe], thread_cwd=False)
+    if IS_FREEBSD:
+        # bindat cannot be turned off: a later route carries the bind.
+        done, trail = bind(q, c)
+        with done.sock:
+            noted = list(done.skipped)
+    else:
+        with raises_errno(errno.ENAMETOOLONG):
+            _route.reach_long(BIND, q, c, trail)
+        noted = list(trail.skipped)
+    assert dict(noted)[Route.SYMLINK_FILE] == _route.NO_PLACE_FOR_LINK
     assert_untouched(unsafe)

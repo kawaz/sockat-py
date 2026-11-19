@@ -1,9 +1,10 @@
-"""``bind_any`` (``sockat.any``): the default bind's routes, and past them,
-where the default bind is ``ENAMETOOLONG``, the symlink route: a symlink to
-the socket's directory in a place for it, the places only we can write to
-before the shared ones (hub SPEC "symlink", DR-0013). What each route loses
-(``losses``), the route taken and the routes skipped, on success and on
-the errors.
+"""``sockat.ex.bind`` (hub SPEC "_ex", DR-0015): the default bind's routes,
+and with ``last_resort`` past them, where the default bind is
+``ENAMETOOLONG``, symlink-dir: a symlink to the socket's directory in a
+place for it, the places only we can write to before the shared ones (hub
+SPEC "symlink-dir"). What each route loses (``losses``), the route taken and
+the routes skipped, on success and on the errors. ``discard`` is checked in
+``test_ex.py``, the connects of ``sockat.ex`` in ``test_ex_connect.py``.
 
 The configuration the public API reads from the environment
 (``Config.from_env``) is replaced where a test needs the default bind's
@@ -60,12 +61,17 @@ from _support import (
 )
 
 import sockat
+import sockat.ex
 from sockat import _route, _sys
-from sockat._route import BIND, CONNECT, OWN_DIR_PREFIX, RANDOM_LEN, Config, Route
+from sockat._route import BIND, CONNECT, OWN_DIR_PREFIX, RANDOM_LEN, Config, Request, Route
 from sockat._sys import DIRECT_MAX, IS_FREEBSD, IS_LINUX
-from sockat.any import AnyBinding, Loss, Skipped, bind_any
+from sockat.ex import Bound, Loss, Skipped
 
 IS_ROOT = os.geteuid() == 0
+
+BIND_LAST_RESORT = Request(_sys.Op.BIND, last_resort=True)
+"""A bind with the last resort, for the route order called with a
+configuration of the test's own."""
 
 NOBODY = 65534
 """Another user, for the root runs (docker's ``nobody``)."""
@@ -87,9 +93,9 @@ def far(tmp: TmpDirs) -> bytes:
     return p
 
 
-def any_cfg(places: tuple[bytes, ...]) -> Config:
+def last_resort_cfg(places: tuple[bytes, ...]) -> Config:
     """No route of the default bind usable (:func:`_support.fallback_cfg`),
-    and ``places`` as the places for ``bind_any``'s symlink."""
+    and ``places`` as the places for symlink-dir's symlink."""
     c = fallback_cfg()
     return Config(
         own_dir_places=c.own_dir_places,
@@ -112,7 +118,7 @@ def env_cfg(monkeypatch: pytest.MonkeyPatch) -> list[Config]:
 
 
 def skipped_before_the_symlink() -> list[str]:
-    """The routes :func:`any_cfg` makes ``bind_any`` skip, in order: the
+    """The routes :func:`last_resort_cfg` makes ``sockat.ex.bind`` skip, in order: the
     standard (the path is too long), symlink-file where a bind tries it
     (every system but Linux; no place for its symlink), the routes through D
     this system has (unusable: turned off, /proc absent), then the fork route
@@ -135,12 +141,12 @@ def names(skipped: tuple[Skipped, ...]) -> list[str]:
 
 
 def premise_default_unreachable(p: bytes, places: tuple[bytes, ...]) -> None:
-    """The default bind is ``ENAMETOOLONG`` at ``p`` with :func:`any_cfg`,
+    """The default bind is ``ENAMETOOLONG`` at ``p`` with :func:`last_resort_cfg`,
     and leaves ``places`` (marked untouched here) untouched."""
     for d in places:
         mark_untouched(d)
     with raises_errno(errno.ENAMETOOLONG):
-        _route.run_long(BIND, p, any_cfg(places))[0].close()
+        _route.run_long(BIND, p, last_resort_cfg(places))[0].close()
     for d in places:
         assert_untouched(d)
 
@@ -156,12 +162,12 @@ def assert_through(listener: socket.socket, place_dir: bytes, p: bytes) -> None:
 
 
 def raised(path: bytes) -> OSError:
-    """The error ``bind_any(path)`` raises."""
+    """The error ``sockat.ex.bind(path, last_resort=True)`` raises."""
     try:
-        bind_any(path).listener.close()
+        sockat.ex.bind(path, last_resort=True).listener.close()
     except OSError as e:
         return e
-    raise AssertionError("bind_any did not raise")
+    raise AssertionError("sockat.ex.bind did not raise")
 
 
 def connect_here(p: bytes) -> socket.socket:
@@ -174,16 +180,24 @@ def connect_here(p: bytes) -> socket.socket:
 # ----- the module and the names -----
 
 
-# The any operations are a choice: `import sockat` neither imports
-# sockat.any nor shows bind_any, and importing sockat.any is what makes it
-# available. A fresh interpreter, so nothing imported by the tests counts.
-def test_import_sockat_does_not_import_sockat_any() -> None:
+# The _ex calls are a choice: `import sockat` neither imports sockat.ex nor
+# shows it, and importing sockat.ex is what makes it available, with its
+# bind, connect and connect_nonblocking. Neither the any operations nor a
+# top-level bind_ex exist (DR-0015). A fresh interpreter, so nothing
+# imported by the tests counts.
+def test_import_sockat_does_not_import_sockat_ex() -> None:
     code = (
         "import sys, sockat\n"
-        "assert 'sockat.any' not in sys.modules, 'sockat.any was imported'\n"
-        "assert not hasattr(sockat, 'bind_any') and not hasattr(sockat, 'any')\n"
-        "from sockat.any import bind_any\n"
-        "assert 'sockat.any' in sys.modules\n"
+        "assert 'sockat.ex' not in sys.modules, 'sockat.ex was imported'\n"
+        "assert not hasattr(sockat, 'ex')\n"
+        "assert sockat.__all__ == ['bind', 'connect', 'connect_nonblocking'], sockat.__all__\n"
+        "for gone in ('bind_ex', 'bind_any', 'any'):\n"
+        "    assert not hasattr(sockat, gone), gone\n"
+        "import sockat.ex\n"
+        "assert 'sockat.ex' in sys.modules\n"
+        "assert {'bind', 'connect', 'connect_nonblocking'} <= set(sockat.ex.__all__)\n"
+        "import importlib.util\n"
+        "assert importlib.util.find_spec('sockat.any') is None\n"
     )
     env = dict(os.environ, PYTHONPATH=str(SRC_DIR))
     out = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True, check=False)
@@ -218,15 +232,25 @@ def test_the_names_are_the_specs() -> None:
     assert {r.value for r in Route} == spec_routes
 
 
-# What bind_any returns: listener, losses, route, skipped, by name or by
-# position.
-def test_what_bind_any_returns(tmp: TmpDirs) -> None:
+# What sockat.ex.bind returns: listener, discard, losses, route, skipped, by
+# name or by position; the same with the last resort or without.
+@pytest.mark.parametrize("last_resort", [False, True])
+def test_what_bind_returns(tmp: TmpDirs, last_resort: bool) -> None:
     p = nest(tmp.new(), 60)
-    bound = bind_any(p)
-    listener, losses, route, skipped = bound
+    bound = sockat.ex.bind(p, last_resort=last_resort)
+    listener, discard, losses, route, skipped = bound
     with listener:
-        assert isinstance(bound, AnyBinding)
-        assert (bound.listener, bound.losses, bound.route, bound.skipped) == (listener, losses, route, skipped)
+        assert isinstance(bound, Bound)
+        assert (bound.listener, bound.discard, bound.losses, bound.route, bound.skipped) == (
+            listener,
+            discard,
+            losses,
+            route,
+            skipped,
+        )
+        assert (losses, route, skipped) == ((), "standard", ())
+    discard()
+    assert not os.path.lexists(p)
 
 
 # ----- the default bind's routes -----
@@ -236,7 +260,7 @@ def test_what_bind_any_returns(tmp: TmpDirs) -> None:
 # route, nothing lost, no route skipped, the standard's socket.
 def test_a_short_absolute_path_loses_nothing(tmp: TmpDirs) -> None:
     p = nest(tmp.new(), DIRECT_MAX)
-    listener, losses, route, skipped = bind_any(p)
+    listener, _, losses, route, skipped = sockat.ex.bind(p, last_resort=True)
     with listener:
         assert (losses, route, skipped) == ((), "standard", ())
         assert type(listener) is socket.socket
@@ -254,7 +278,7 @@ def test_a_relative_path_loses_cwd_relative_on_the_standard_only(tmp: TmpDirs) -
     short = os.path.relpath(os.fsdecode(nest(tmp.new(), 60)))
     assert not short.startswith("/"), short
     assert len(os.fsencode(short)) <= DIRECT_MAX, short
-    listener, losses, route, _ = bind_any(short)
+    listener, _, losses, route, _ = sockat.ex.bind(short, last_resort=True)
     with listener:
         assert (losses, route) == ((Loss.CWD_RELATIVE,), "standard")
         assert listener.getsockname() == short
@@ -263,7 +287,7 @@ def test_a_relative_path_loses_cwd_relative_on_the_standard_only(tmp: TmpDirs) -
     long = os.path.relpath(os.fsdecode(nest(tmp.new(), 400)))
     assert not long.startswith("/"), long
     assert len(os.fsencode(long)) > DIRECT_MAX, long
-    listener, losses, route, _ = bind_any(long)
+    listener, _, losses, route, _ = sockat.ex.bind(long, last_resort=True)
     with listener:
         assert losses == RESPELLED
         assert route != "standard"
@@ -274,12 +298,12 @@ def test_a_relative_path_loses_cwd_relative_on_the_standard_only(tmp: TmpDirs) -
 @pytest.mark.skipif(not IS_LINUX, reason="the abstract namespace is Linux's")
 def test_an_abstract_address_loses_nothing() -> None:
     name = "\0sockat-test-" + secrets.token_hex(8)
-    listener, losses, route, skipped = bind_any(name)
+    listener, _, losses, route, skipped = sockat.ex.bind(name, last_resort=True)
     with listener:
         assert (losses, route, skipped) == ((), "standard", ())
 
 
-# Where the default bind reaches a long path, bind_any takes the same route
+# Where the default bind reaches a long path, sockat.ex.bind takes the same route
 # (through the public API, from the environment) and loses respelled: the
 # symlink-file route where the bind follows the link (macOS; SPEC: tried
 # right after the standard on every system but Linux), else the routes
@@ -291,7 +315,7 @@ def test_a_long_path_takes_the_default_bind_route(tmp: TmpDirs) -> None:
     p = nest(tmp.new(), 300)
     here = bind_route_here()
     assert here is not None
-    listener, losses, route, skipped = bind_any(p)
+    listener, _, losses, route, skipped = sockat.ex.bind(p, last_resort=True)
     with listener:
         assert (losses, route) == (RESPELLED, here.value)
         want = skipped_before_d_here() if here is not Route.SYMLINK_FILE else ["standard"]
@@ -304,13 +328,13 @@ def test_a_long_path_takes_the_default_bind_route(tmp: TmpDirs) -> None:
             accept_ping(listener, client)
 
 
-# Where D can be made nowhere, bind_any takes the form without D as the
+# Where D can be made nowhere, sockat.ex.bind takes the form without D as the
 # default bind does, and loses respelled. Skipped first: the standard,
 # symlink-file where a bind tries it (no place for its symlink here), every
 # route through D of this system (a usable one for want of a place for D),
 # the fork route; then the routes of the form without D before the one that
 # carries it.
-@needs_long_bind
+@pytest.mark.skipif(d_route_here() is None, reason="no means of the routes through D here")
 def test_where_d_can_be_made_nowhere_the_form_without_d_is_taken(tmp: TmpDirs, env_cfg: list[Config]) -> None:
     here = d_route_here()
     assert here is not None
@@ -321,7 +345,7 @@ def test_where_d_can_be_made_nowhere_the_form_without_d_is_taken(tmp: TmpDirs, e
     sockdir = {Route.AT: Route.AT_SOCKDIR, Route.THREAD_CWD: Route.THREAD_CWD_SOCKDIR, Route.PROC: Route.PROC_SOCKDIR}
     p = far(tmp)
     env_cfg.append(d_cfg(own=()))
-    listener, losses, route, skipped = bind_any(p)
+    listener, _, losses, route, skipped = sockat.ex.bind(p, last_resort=True)
     with listener:
         assert (losses, route) == (RESPELLED, sockdir[here].value)
         before = candidates[: candidates.index(here)]
@@ -349,8 +373,8 @@ def test_past_the_default_bind_a_place_of_our_own_carries_it(tmp: TmpDirs, env_c
     p = far(tmp)
     own = tmp.new()
     premise_default_unreachable(p, (own,))
-    env_cfg.append(any_cfg((own,)))
-    listener, losses, route, skipped = bind_any(p)
+    env_cfg.append(last_resort_cfg((own,)))
+    listener, _, losses, route, skipped = sockat.ex.bind(p, last_resort=True)
     with listener:
         assert (losses, route) == (RESPELLED, "symlink-dir")
         assert names(skipped) == skipped_before_the_symlink()
@@ -363,7 +387,7 @@ def test_past_the_default_bind_a_place_of_our_own_carries_it(tmp: TmpDirs, env_c
 
     def way(req: _route.Request) -> tuple[socket.socket, Route]:
         if req.op is _sys.Op.BIND:
-            return bind_any(p).listener, Route.SYMLINK_DIR
+            return sockat.ex.bind(p, last_resort=True).listener, Route.SYMLINK_DIR
         return _route.run_long(req, p, d_cfg())
 
     check_route(Forced("symlink", p, way, routes(Route.SYMLINK_DIR, connect_route)), [own])
@@ -380,8 +404,8 @@ def test_a_place_of_our_own_is_tried_before_a_shared_one(tmp: TmpDirs, env_cfg: 
     assert _route.place_kind(shared) is _route.PlaceKind.SHARED
     assert _route.place_kind(own) is _route.PlaceKind.OWN
     premise_default_unreachable(p, (shared, own))
-    env_cfg.append(any_cfg((shared, own)))
-    listener, losses, route, _ = bind_any(p)
+    env_cfg.append(last_resort_cfg((shared, own)))
+    listener, _, losses, route, _ = sockat.ex.bind(p, last_resort=True)
     with listener:
         assert (losses, route) == (RESPELLED, "symlink-dir")
         assert_through(listener, own, p)
@@ -397,8 +421,8 @@ def test_a_shared_place_alone_carries_it_with_a_recreatable_spelling(tmp: TmpDir
     shared = place(tmp.new(), b"shared", 0o1777)
     later = place(tmp.new(), b"later", 0o1777)
     premise_default_unreachable(p, (shared, later))
-    env_cfg.append(any_cfg((shared, later)))
-    listener, losses, route, _ = bind_any(p)
+    env_cfg.append(last_resort_cfg((shared, later)))
+    listener, _, losses, route, _ = sockat.ex.bind(p, last_resort=True)
     with listener:
         assert (losses, route) == (SHARED, "symlink-dir")
         assert_through(listener, shared, p)
@@ -430,8 +454,8 @@ def test_a_place_that_is_not_safe_is_passed_over(tmp: TmpDirs, env_cfg: list[Con
         assert _route.place_kind(d) is None, d
         mark_untouched(d)
     shared = place(tmp.new(), b"shared", 0o1777)
-    env_cfg.append(any_cfg((*unsafe, t + b"/missing", file, shared)))
-    listener, losses, route, _ = bind_any(p)
+    env_cfg.append(last_resort_cfg((*unsafe, t + b"/missing", file, shared)))
+    listener, _, losses, route, _ = sockat.ex.bind(p, last_resort=True)
     with listener:
         assert (losses, route) == (SHARED, "symlink-dir")
         assert_through(listener, shared, p)
@@ -452,8 +476,8 @@ def test_a_place_too_long_for_the_spelling_is_passed_over(tmp: TmpDirs, env_cfg:
     for d in (too_long, just):
         os.mkdir(d)
         mark_untouched(d)
-    env_cfg.append(any_cfg((too_long, just)))
-    listener, _, route, _ = bind_any(p)
+    env_cfg.append(last_resort_cfg((too_long, just)))
+    listener, _, _, route, _ = sockat.ex.bind(p, last_resort=True)
     with listener:
         assert route == "symlink-dir"
         assert_through(listener, just, p)
@@ -472,8 +496,8 @@ def test_a_place_where_the_symlink_cannot_be_created_is_passed_over(tmp: TmpDirs
     own = tmp.new()
     assert _route.place_kind(locked) is _route.PlaceKind.OWN
     premise_default_unreachable(p, (locked, own))
-    env_cfg.append(any_cfg((locked, own)))
-    listener, _, _, _ = bind_any(p)
+    env_cfg.append(last_resort_cfg((locked, own)))
+    listener, _, _, _, _ = sockat.ex.bind(p, last_resort=True)
     with listener:
         assert_through(listener, own, p)
     assert_untouched(locked)
@@ -544,7 +568,7 @@ def test_a_missing_directory_tells_no_route(tmp: TmpDirs) -> None:
 
 
 # A file name no route carries (too long for R/<name>, for the form without
-# D and for bind_any's symlink through /tmp) is ENAMETOOLONG with every route
+# D and for symlink-dir's symlink through /tmp) is ENAMETOOLONG with every route
 # skipped, through the public API from the environment with no place for
 # symlink-file (which carries any file name where the bind follows the link,
 # as on macOS): the standard, symlink-file where a bind tries it, the routes
@@ -581,7 +605,7 @@ def test_a_failure_through_the_symlink_is_not_retried(tmp: TmpDirs, env_cfg: lis
     second = tmp.new()
     for d in (first, second):
         mark_untouched(d)
-    env_cfg.append(any_cfg((first, second)))
+    env_cfg.append(last_resort_cfg((first, second)))
     e = raised(p)
     assert e.errno == errno.EADDRINUSE
     assert getattr(e, "route") == "symlink-dir"  # noqa: B009
@@ -597,7 +621,7 @@ def test_a_failure_through_the_symlink_is_not_retried(tmp: TmpDirs, env_cfg: lis
 @forces_the_symlink_route
 def test_no_place_for_the_symlink_is_enametoolong(tmp: TmpDirs, env_cfg: list[Config]) -> None:
     p = far(tmp)
-    env_cfg.append(any_cfg(()))
+    env_cfg.append(last_resort_cfg(()))
     e = raised(p)
     assert e.errno == errno.ENAMETOOLONG
     assert getattr(e, "route") is None  # noqa: B009
@@ -605,19 +629,42 @@ def test_no_place_for_the_symlink_is_enametoolong(tmp: TmpDirs, env_cfg: list[Co
     assert listing(parent(p)) == []
 
 
+# Without the last resort, sockat.ex.bind takes the default bind's routes
+# only: where only symlink-dir would carry the path (a place of our own given
+# for it), it is ENAMETOOLONG as sockat.bind is, with every route of the
+# default bind skipped, symlink-dir not among them (not in the order), and
+# nothing made in the place.
+@forces_the_symlink_route
+def test_without_the_last_resort_it_is_the_default_bind(tmp: TmpDirs, env_cfg: list[Config]) -> None:
+    p = far(tmp)
+    own = tmp.new()
+    mark_untouched(own)
+    env_cfg.append(last_resort_cfg((own,)))
+    with pytest.raises(OSError, match="too long") as e:
+        sockat.ex.bind(p)
+    assert e.value.errno == errno.ENAMETOOLONG
+    assert getattr(e.value, "route") is None  # noqa: B009
+    assert names(getattr(e.value, "skipped")) == skipped_before_the_symlink()  # noqa: B009
+    assert_untouched(own)
+    assert listing(parent(p)) == []
+    listener, _, losses, route, _ = sockat.ex.bind(p, last_resort=True)
+    with listener:
+        assert (losses, route) == (RESPELLED, "symlink-dir")
+
+
 # An argument error (a NUL in the path) is the ValueError sockat.bind
 # raises, with nothing skipped and no route.
 def test_an_argument_error_is_the_value_error() -> None:
     with pytest.raises(ValueError, match="NUL") as e:
-        bind_any("/tmp/a\0b")
+        sockat.ex.bind("/tmp/a\0b", last_resort=True)
     assert (getattr(e.value, "route"), getattr(e.value, "skipped")) == (None, ())  # noqa: B009
 
 
 # ----- asyncio -----
 
 
-# The listener of bind_any is handed to asyncio as the standard's is: at a
-# long path from the environment, and through the symlink route.
+# The listener of sockat.ex.bind is handed to asyncio as the standard's is:
+# at a long path from the environment, and through symlink-dir.
 @needs_long_bind
 def test_the_listener_is_served_by_asyncio(tmp: TmpDirs) -> None:
     p = nest(tmp.new(), 400)
@@ -625,12 +672,13 @@ def test_the_listener_is_served_by_asyncio(tmp: TmpDirs) -> None:
     def connect(req: _route.Request) -> socket.socket:
         return sockat.connect_nonblocking(p) if req.nonblocking else sockat.connect(p)
 
-    asyncio.run(serve_asyncio("bind_any", bind_any(p).listener, connect, os.fsdecode(p), served=True))
-    assert_cleaned_up_as_asyncio_does("bind_any", p)
+    listener = sockat.ex.bind(p, last_resort=True).listener
+    asyncio.run(serve_asyncio("sockat.ex.bind", listener, connect, os.fsdecode(p), served=True))
+    assert_cleaned_up_as_asyncio_does("sockat.ex.bind", p)
     if IS_FREEBSD:
         return
     own = tmp.new()
-    listener = _route.run_long(_route.BIND_ANY, p, any_cfg((own,)))[0]
-    asyncio.run(serve_asyncio("symlink", listener, connect, os.fsdecode(p), served=True))
-    assert_cleaned_up_as_asyncio_does("symlink", p)
+    listener = _route.run_long(BIND_LAST_RESORT, p, last_resort_cfg((own,)))[0]
+    asyncio.run(serve_asyncio("symlink-dir", listener, connect, os.fsdecode(p), served=True))
+    assert_cleaned_up_as_asyncio_does("symlink-dir", p)
     assert_empty(own)

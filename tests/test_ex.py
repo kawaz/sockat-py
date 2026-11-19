@@ -1,6 +1,8 @@
-"""``sockat.bind_ex``: the listener of :func:`sockat.bind` and ``discard``,
-which removes the socket file the bind made and nothing else (the SPEC's
-``_ex``). ``discard`` does not close the listener."""
+"""``sockat.ex.bind``'s listener (that of :func:`sockat.bind`) and
+``discard``, which removes the socket file the bind made and nothing else
+(the SPEC's ``_ex``). ``discard`` does not close the listener. What the bind
+went through (``losses``, ``route``, ``skipped``) is checked in
+``test_ex_bind.py``."""
 
 from __future__ import annotations
 
@@ -23,6 +25,7 @@ from _support import (
 )
 
 import sockat
+import sockat.ex
 from sockat import _route, _socket_file
 from sockat._sockets import PathSocket
 from sockat._sys import DIRECT_MAX
@@ -30,14 +33,13 @@ from sockat._sys import DIRECT_MAX
 LENGTHS = [pytest.param(60, id="short"), pytest.param(300, id="long", marks=needs_long_bind)]
 
 
-# bind_ex is public, next to bind, and its listener is what bind returns for
-# the same length: a plain socket.socket for a path the socket module takes,
-# a PathSocket past that, listening, reporting the path.
+# sockat.ex.bind's listener is what sockat.bind returns for the same length:
+# a plain socket.socket for a path the socket module takes, a PathSocket
+# past that, listening, reporting the path.
 @pytest.mark.parametrize("total", LENGTHS)
 def test_the_listener_is_binds(tmp: TmpDirs, total: int) -> None:
-    assert "bind_ex" in sockat.__all__
     p = nest(tmp.new(), total)
-    listener, discard = sockat.bind_ex(p)
+    listener, discard, *_ = sockat.ex.bind(p)
     with listener:
         assert type(listener) is (socket.socket if total <= DIRECT_MAX else PathSocket)
         assert listener.getsockname() == os.fsdecode(p)
@@ -54,7 +56,7 @@ def test_the_listener_is_binds(tmp: TmpDirs, total: int) -> None:
 @pytest.mark.parametrize("total", LENGTHS)
 def test_discard_removes_the_file_and_leaves_the_listener_open(tmp: TmpDirs, total: int) -> None:
     p = nest(tmp.new(), total)
-    listener, discard = sockat.bind_ex(p)
+    listener, discard, *_ = sockat.ex.bind(p)
     with listener:
         client = sockat.connect(p)
         with client:
@@ -74,7 +76,7 @@ def test_discard_removes_the_file_and_leaves_the_listener_open(tmp: TmpDirs, tot
 @pytest.mark.parametrize("total", LENGTHS)
 def test_discard_leaves_a_replacement_alone(tmp: TmpDirs, total: int) -> None:
     p = nest(tmp.new(), total)
-    listener, discard = sockat.bind_ex(p)
+    listener, discard, *_ = sockat.ex.bind(p)
     listener.close()
     os.unlink(p)
     with open(p, "wb") as f:
@@ -100,7 +102,7 @@ def test_discard_follows_the_realpath_taken_at_the_bind(tmp: TmpDirs, total: int
     os.mkdir(other)
     os.symlink(t + b"/real", t + b"/link")
     p = t + b"/link" + real[len(t + b"/real") :] + b"/s.sock"
-    listener, discard = sockat.bind_ex(p)
+    listener, discard, *_ = sockat.ex.bind(p)
     listener.close()
     assert is_socket(real + b"/s.sock")
     os.makedirs(other + real[len(t + b"/real") :])
@@ -124,7 +126,7 @@ def test_discard_follows_the_realpath_taken_at_the_bind(tmp: TmpDirs, total: int
 @pytest.mark.parametrize("when", ["while serving", "after"])
 def test_discard_works_with_asyncio(tmp: TmpDirs, total: int, when: str) -> None:
     p = nest(tmp.new(), total)
-    listener, discard = sockat.bind_ex(p)
+    listener, discard, *_ = sockat.ex.bind(p)
 
     async def echo(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         writer.write(await reader.readexactly(4))
@@ -156,7 +158,7 @@ def test_discard_works_with_asyncio(tmp: TmpDirs, total: int, when: str) -> None
 @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="the abstract namespace is Linux's")
 def test_discard_of_an_abstract_address_does_nothing() -> None:
     addr = b"\0sockat-test-ex-" + os.urandom(8).hex().encode()
-    listener, discard = sockat.bind_ex(addr)
+    listener, discard, *_ = sockat.ex.bind(addr)
     with listener:
         discard()
         with sockat.connect(addr) as client:
@@ -165,7 +167,7 @@ def test_discard_of_an_abstract_address_does_nothing() -> None:
 
 # The socket file is remembered right after the bind goes through, inside the
 # route and before the listen and the return (SPEC: remembering it after
-# bind_ex got the listener back could take in a file put at the path in
+# sockat.ex.bind got the listener back could take in a file put at the path in
 # between). Checked by the order of the calls: remembering comes before the
 # listen, and what it finds at the path then is the socket the bind made.
 @pytest.mark.parametrize("total", LENGTHS)
@@ -187,7 +189,7 @@ def test_the_file_is_remembered_before_the_listener_is_returned(
 
     monkeypatch.setattr(_socket_file, "remember", remember)
     monkeypatch.setattr(socket.socket, "listen", listen)
-    listener, discard = sockat.bind_ex(p)
+    listener, discard, *_ = sockat.ex.bind(p)
     monkeypatch.setattr(socket.socket, "listen", real_listen)
     with listener:
         assert events == ["remember", "listen"], events
@@ -195,7 +197,7 @@ def test_the_file_is_remembered_before_the_listener_is_returned(
     assert not os.path.exists(p)
 
 
-# When the socket file cannot be remembered, bind_ex closes the listener and
+# When the socket file cannot be remembered, sockat.ex.bind closes the listener and
 # raises, leaving the file where it is: a discard that could not remove the
 # file must not be handed back as if it could.
 @pytest.mark.parametrize("total", LENGTHS)
@@ -217,7 +219,7 @@ def test_a_file_that_cannot_be_remembered_fails_the_bind_and_closes_the_listener
     monkeypatch.setattr(_route, "new_socket", new_socket)
     monkeypatch.setattr(_socket_file, "remember", remember)
     with pytest.raises(PermissionError):
-        sockat.bind_ex(p)
+        sockat.ex.bind(p)
     assert made
     assert all(s.fileno() == -1 for s in made)
     assert stat.S_ISSOCK(os.lstat(p).st_mode)
@@ -230,7 +232,7 @@ def test_a_file_that_cannot_be_remembered_fails_the_bind_and_closes_the_listener
 def test_discard_succeeds_when_a_directory_on_the_way_is_gone(tmp: TmpDirs) -> None:
     base = tmp.new()
     p = nest(base, 300)
-    listener, discard = sockat.bind_ex(p)
+    listener, discard, *_ = sockat.ex.bind(p)
     listener.close()
     top = base + b"/" + os.path.relpath(p, base).split(b"/")[0]
     aside = tmp.new() + b"/aside"
@@ -242,7 +244,7 @@ def test_discard_succeeds_when_a_directory_on_the_way_is_gone(tmp: TmpDirs) -> N
     assert os.path.isfile(top)
 
 
-# bind_ex reads the path once and binds and remembers that one value: a
+# sockat.ex.bind reads the path once and binds and remembers that one value: a
 # path-like object may answer differently each time it is asked, and taking
 # one answer to bind and another to remember would make discard remove an
 # unrelated file. Stood in for by a path-like object that names an unrelated
@@ -264,7 +266,7 @@ def test_a_path_like_object_is_read_once(tmp: TmpDirs, total: int) -> None:
     with open(victim, "wb"):
         pass
     try:
-        listener, discard = sockat.bind_ex(_Shifting(victim, p))
+        listener, discard, *_ = sockat.ex.bind(_Shifting(victim, p))
     except OSError:
         pass  # the one answer read names the existing file: EADDRINUSE
     else:
