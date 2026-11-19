@@ -52,11 +52,11 @@ A longer path is tried on the routes below, in this order per OS, and bound / co
 
 | OS | `bind` | `connect` / `connect_nonblocking` |
 |---|---|---|
-| Linux / Android (`/proc` usable) | thread-cwd → proc | proc-direct → thread-cwd → proc → proc-held → symlink |
-| Linux / Android (`/proc` not usable) | thread-cwd | relative → thread-cwd → symlink |
-| FreeBSD | at | at-direct → at |
-| macOS / iOS | thread-cwd | relative → widened → thread-cwd → symlink |
-| NetBSD / OpenBSD / illumos / other Unix | none (`ENAMETOOLONG`) | relative → symlink |
+| Linux / Android (`/proc` usable) | thread-cwd → proc | proc-direct → thread-cwd → proc → proc-held → symlink-file |
+| Linux / Android (`/proc` not usable) | thread-cwd | relative → thread-cwd → symlink-file |
+| FreeBSD | symlink-file → at | at-direct → at |
+| macOS / iOS | symlink-file → thread-cwd | relative → widened → thread-cwd → symlink-file |
+| NetBSD / OpenBSD / illumos / other Unix | symlink-file | relative → symlink-file |
 | Windows | not supported (`ImportError` on import) | the same |
 
 | Route | How |
@@ -70,20 +70,22 @@ A longer path is tried on the routes below, in this order per OS, and bound / co
 | proc-held | connects only. Create a symlink `s` to the socket file inside D, and pass `/proc/self/fd/<fd of D>/s` |
 | relative | connects only. Pass the path relative to the cwd. Only the string is rewritten; the cwd is never changed |
 | widened | connects only. Pass a sockaddr carrying up to 253 bytes, which the macOS kernel accepts |
-| symlink | a connect creates a short symlink to the socket file under `TMPDIR` or `/tmp` where no other user can replace it, goes through it, and removes it at once. Of the binds, only `bind_any` ([below](#bind-that-reaches-even-by-losing-something)) |
+| symlink-file | create a short symlink to the socket file under `TMPDIR` or `/tmp` where no other user can replace it, go through it, and remove it at once. The spelling holds no file name. A bind goes through it only where a bind follows a symlink in the last component (confirmed on macOS; Linux / Android do not follow it, so it is not tried there), and goes on to the next route where it is not followed |
+| symlink-dir | `bind_any` only. Create a short symlink to the socket's directory in a place, go through it, and remove it at once ([below](#bind-that-reaches-even-by-losing-something)) |
 | at-direct | connects only. Pass the fd of the socket's directory and the file name to `connectat(2)` (FreeBSD) |
-| fork, fork-sockdir, fork-direct | **none** (the specification's fork routes are not built. Neither are the specification's `connect_any` variants) |
+| fork-cwd, fork-cwd-sockdir, fork-cwd-direct | **none** (the specification's fork routes are not built. Neither are the specification's `connect_any` variants) |
 
 - None of the routes changes the cwd of the calling process or thread, so they can be used from multi-threaded programs
 - A connect tries the routes that need neither a write (creating D, R or a symlink) nor a thread (proc-direct, relative, widened, at-direct) first, and the routes that create D or start a thread after them. D is created at most once per connect and shared by the routes that use it (thread-cwd, at, proc, proc-held). When it can be created nowhere, every route that uses it is skipped
-- A bind reaches a path at any directory depth as long as the file name is within 96 bytes (92 on macOS / FreeBSD, about 79 with proc), shorter than the standard library's limit by `R/`. When D can be created nowhere, the form without D reaches up to 88 bytes (84 on macOS / FreeBSD, about 72 with proc-sockdir)
-- On NetBSD / OpenBSD / illumos, and where no means of the routes through D can be used (Linux without `/proc` under a seccomp filter, and the like), a `bind` of a long path gets `ENAMETOOLONG` (where the specification reaches it through the fork route, which Python does not have; ruled by kawaz in the hub's D12-Q3). To reach it even there, use `bind_any` ([below](#bind-that-reaches-even-by-losing-something))
+- On macOS a bind reaches a path through symlink-file whatever the length of its file name (losing only `respelled`)
+- A bind through the routes through D reaches a path at any directory depth as long as the file name is within 96 bytes (92 on macOS / FreeBSD, about 79 with proc), shorter than the standard library's limit by `R/`. When D can be created nowhere, the form without D reaches up to 88 bytes (84 on macOS / FreeBSD, about 72 with proc-sockdir)
+- On NetBSD / OpenBSD / illumos (when their bind does not follow symlink-file's link), and where no means of the routes through D can be used (Linux without `/proc` under a seccomp filter, and the like), a `bind` of a long path gets `ENAMETOOLONG` (where the specification reaches it through the fork-cwd route, which Python does not have; ruled by kawaz in the hub's D12-Q3). To reach it even there, use `bind_any` ([below](#bind-that-reaches-even-by-losing-something))
 - A path that fits no route gets `ENAMETOOLONG` (an `OSError` with errno), as a path too long for the standard library does
 - The conditions of each route, and where a path stops being reached, are in [docs/MANUAL.md](./docs/MANUAL.md#how-a-long-path-is-reached)
 
 ## What differs from the standard library for a long path
 
-- `getsockname()` of a listener (and of an accepted socket) and `getpeername()` of a connected socket return the original path. What the kernel returns is `R/<file name>` (`/proc/self/fd/<fd>/R/<file name>` with proc, R being `.sockat.XXXXXXXXXX` in the form without D; R is gone, so it names nothing), but the sockets sockat returns replace it with the original path
+- `getsockname()` of a listener (and of an accepted socket) and `getpeername()` of a connected socket return the original path. What the kernel returns is `R/<file name>` (`/proc/self/fd/<fd>/R/<file name>` with proc, R being `.sockat.XXXXXXXXXX` in the form without D, `<place>/sockat.XXXXXXXXXX` with symlink-file; R and the symlink are gone, so it names nothing), but the sockets sockat returns replace it with the original path
 - A path too long for the standard library that does not end with a name (ending in `dir/`, `dir/.`, `..`) is a `ValueError`
 - A path containing a NUL anywhere but at its start is a `ValueError` at any length (the standard library silently truncates at the NUL). On Linux a path starting with a NUL (abstract namespace) is handed to the standard library unchanged
 - In a socket's directory that is not sticky and that others can write to, R of the form without D can be replaced between its creation and the bind, so the bind may go to another directory (a name already there gives `EADDRINUSE`; nothing is overwritten). R inside D cannot be replaced, D being 0700
@@ -111,7 +113,7 @@ from sockat.any import bind_any
 listener, losses, route, skipped = bind_any(path)
 ```
 
-- It tries the same routes as `bind`, and where `bind` gets `ENAMETOOLONG` (no route can be used), it tries last a symlink in a place: it creates in the place `sockat.XXXXXXXXXX` pointing to the socket's directory, binds with `<place>/sockat.XXXXXXXXXX/<file name>`, and removes it at once
+- It tries the same routes as `bind`, and where `bind` gets `ENAMETOOLONG` (no route can be used), it tries last symlink-dir: it creates in a place `sockat.XXXXXXXXXX` pointing to the socket's directory, binds with `<place>/sockat.XXXXXXXXXX/<file name>`, and removes it at once
 - The candidate places are `XDG_RUNTIME_DIR`, `TMPDIR` (each when an absolute path), then `/tmp`. All the places only the owner can write to (owned by the calling user, no write permission for group and others) are tried first, then the shared ones (sticky, owned by root or the calling user)
 - `losses` is what the route taken lost (`Loss`'s `respelled`, `recreatable-spelling`, `cwd-relative`; empty when nothing was lost). Through a shared place it includes `recreatable-spelling`: after the symlink is removed, other users can recreate the spelling the kernel keeps. Remove the socket file by the original path, not by the spelling (the address the kernel reports)
 - `route` is the name of the route taken, `skipped` the routes tried that could not be used (`name` and `reason`), in order. Both are for diagnosis, and their contents are not promised. When it fails, the error (of the same type and `errno` as from `bind`) gets the attributes `skipped` and `route`

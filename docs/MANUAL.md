@@ -67,7 +67,7 @@ if Loss.RECREATABLE_SPELLING in losses:
 server = await asyncio.start_unix_server(handle, sock=listener)
 ```
 
-It tries the same routes as `bind`, and where `bind` gets `ENAMETOOLONG` (no route can be used), it tries last a route that reaches the path even by losing something, [symlink](#symlink-bind_any) ([DR-0005](./decisions/DR-0005-bind-any.md), the hub's [DR-0013](https://github.com/kawaz/sockat/blob/main/docs/decisions/DR-0013-any-means-reach-at-any-cost.md), in Japanese).
+It tries the same routes as `bind`, and where `bind` gets `ENAMETOOLONG` (no route can be used), it tries last a route that reaches the path even by losing something, [symlink-dir](#symlink-dir-bind_any) ([DR-0005](./decisions/DR-0005-bind-any.md), the hub's [DR-0013](https://github.com/kawaz/sockat/blob/main/docs/decisions/DR-0013-any-means-reach-at-any-cost.md), in Japanese).
 
 - `import sockat` does not load `sockat.any`. Whoever uses it chooses it with `from sockat.any import bind_any` (the effort of choosing it is the statement that what is lost is accepted)
 - Where `bind` reaches the path, it takes the same route as `bind` and returns the same listener
@@ -79,7 +79,7 @@ The result is an `AnyBinding` (a `NamedTuple`).
 |---|---|
 | `listener` | a listening `socket.socket`. As with `bind`, for a long path it reports the address as the original path |
 | `losses` | what the route taken lost (a `tuple[Loss, ...]`). Empty when nothing was lost. Branch on this |
-| `route` | the name of the route taken (a `str`), from [the specification's route names](https://github.com/kawaz/sockat/blob/main/docs/SPEC.md#route-names) (`"standard"`, `"thread-cwd"`, `"symlink"`, ...) |
+| `route` | the name of the route taken (a `str`), from [the specification's route names](https://github.com/kawaz/sockat/blob/main/docs/SPEC.md#route-names) (`"standard"`, `"symlink-file"`, `"thread-cwd"`, `"symlink-dir"`, ...) |
 | `skipped` | the routes tried before `route` that could not be used, in the order tried. Each item is a `Skipped(name, reason)`: `name` is the route's name, `reason` why it could not be used, a short English phrase (`"path too long"`, `"seccomp filter"`, `"/proc unusable"`, `"no place for D"`, ...) |
 
 `Loss` is an `enum.StrEnum`; as a string (`str()`, `.value`) it is the name in [the specification's "What is lost"](https://github.com/kawaz/sockat/blob/main/docs/SPEC.md#what-is-lost).
@@ -87,23 +87,24 @@ The result is an `AnyBinding` (a `NamedTuple`).
 | `Loss` | Name | What is lost | When |
 |---|---|---|---|
 | `RESPELLED` | `respelled` | the address the kernel reports is not the original path. The spelling may be seen by other users (Linux's `/proc/net/unix`), so where the process's cwd is a place others can write to, removing a file by the spelling after one of them recreated it may remove a file of the same name in a directory of their choosing. Removing by the original path is safe | a route other than standard was taken |
-| `RECREATABLE_SPELLING` | `recreatable-spelling` | the spelling the kernel reports goes through a shared place (`/tmp` and the like). Removing a file by the spelling after another user saw and recreated it may remove a file of the same name in a directory of their choosing. Removing by the original path is safe | the symlink went through a shared place |
+| `RECREATABLE_SPELLING` | `recreatable-spelling` | the spelling the kernel reports goes through a shared place (`/tmp` and the like). Removing a file by the spelling after another user saw and recreated it may remove a file of the same name in a directory of their choosing. Removing by the original path is safe | symlink-dir went through a shared place |
 | `CWD_RELATIVE` | `cwd-relative` | the spelling the kernel keeps is relative to the cwd. Removing or looking up by it after the cwd changed reaches another place (a danger the standard library has of its own). Removing by the original path made absolute is safe | a relative path went through standard (never for an abstract address) |
 | `FORKED` | `forked` | the side effects of a fork | never in sockat-py, which has no fork route |
 
 - There is no order of size or inclusion between the names. The names are promised and only ever added to. Read a name you do not know as "something was lost"
 - `route` and `skipped` are for diagnosis, and their contents are not promised (routes are added and changed)
 - Every route tried before `route` could not be used (a route that actually binds and fails raises there, and nothing after it is tried)
-- The specification's fork routes (`fork`, `fork-sockdir`) appear in `skipped` at their place in the order, with the reason that sockat-py does not have them
+- The specification's fork routes (`fork-cwd`, `fork-cwd-sockdir`) appear in `skipped` at their place in the order, with the reason that sockat-py does not have them
 
 | Example (macOS) | `losses` | `route` | `name`s in `skipped` |
 |---|---|---|---|
 | a short absolute path | (empty) | `standard` | (none) |
 | a short relative path | `cwd-relative` | `standard` | (none) |
-| a long path | `respelled` | `thread-cwd` | `standard` |
-| a long path, D can be created nowhere | `respelled` | `thread-cwd-sockdir` | `standard`, `thread-cwd`, `fork` |
-| a long path, thread cwd cannot be used, a place only the owner can write to exists | `respelled` | `symlink` | `standard`, `thread-cwd`, `fork` |
-| the same, only a shared place exists | `respelled`, `recreatable-spelling` | `symlink` | `standard`, `thread-cwd`, `fork` |
+| a long path | `respelled` | `symlink-file` | `standard` |
+| a long path, no place for symlink-file | `respelled` | `thread-cwd` | `standard`, `symlink-file` |
+| the same, and D can be created nowhere | `respelled` | `thread-cwd-sockdir` | `standard`, `symlink-file`, `thread-cwd`, `fork-cwd` |
+| the same, thread cwd cannot be used either, and symlink-dir has a place only the owner can write to (`XDG_RUNTIME_DIR` and the like) | `respelled` | `symlink-dir` | `standard`, `symlink-file`, `thread-cwd`, `fork-cwd` |
+| the same, only a shared place exists | `respelled`, `recreatable-spelling` | `symlink-dir` | `standard`, `symlink-file`, `thread-cwd`, `fork-cwd` |
 
 When it fails, it raises the same error as `bind` (its type and `errno` unchanged) with two attributes added.
 
@@ -119,7 +120,7 @@ except OSError as e:
     print(e.errno, getattr(e, "route", None), getattr(e, "skipped", ()))
 ```
 
-### symlink (bind_any)
+### symlink-dir (bind_any)
 
 1. Gather the candidate places: `XDG_RUNTIME_DIR`, `TMPDIR` (each when a non-empty absolute path), then `/tmp`. One spelled the same as `/tmp` or an earlier candidate, component by component, is skipped
 2. `stat` each candidate, following symlinks, and order those only the owner can write to (a directory, owned by the calling user, `mode & 0o022 == 0`) first, the shared ones (a directory, sticky, owned by root or the calling user) after. A candidate of neither kind is not used
@@ -144,16 +145,17 @@ For a longer path, the socket's directory is looked up first (`ENOENT` if it doe
 
 | OS | `bind` | `connect` / `connect_nonblocking` |
 |---|---|---|
-| Linux / Android (`/proc` usable) | [thread-cwd](#the-routes-through-d) → [proc](#the-routes-through-d) | [proc-direct](#routes-only-a-connect-takes) → [thread-cwd](#the-routes-through-d) → [proc](#the-routes-through-d) → [proc-held](#routes-only-a-connect-takes) → [symlink](#routes-only-a-connect-takes) |
-| Linux / Android (`/proc` not usable) | [thread-cwd](#the-routes-through-d) | [relative](#routes-only-a-connect-takes) → [thread-cwd](#the-routes-through-d) → [symlink](#routes-only-a-connect-takes) |
-| FreeBSD | [at](#the-routes-through-d) | [at-direct](#routes-only-a-connect-takes) → [at](#the-routes-through-d) |
-| macOS / iOS | [thread-cwd](#the-routes-through-d) | [relative](#routes-only-a-connect-takes) → [widened](#routes-only-a-connect-takes) → [thread-cwd](#the-routes-through-d) → [symlink](#routes-only-a-connect-takes) |
-| NetBSD / OpenBSD / illumos / other Unix | none (`ENAMETOOLONG`) | [relative](#routes-only-a-connect-takes) → [symlink](#routes-only-a-connect-takes) |
+| Linux / Android (`/proc` usable) | [thread-cwd](#the-routes-through-d) → [proc](#the-routes-through-d) | [proc-direct](#routes-only-a-connect-takes) → [thread-cwd](#the-routes-through-d) → [proc](#the-routes-through-d) → [proc-held](#routes-only-a-connect-takes) → [symlink-file](#symlink-file) |
+| Linux / Android (`/proc` not usable) | [thread-cwd](#the-routes-through-d) | [relative](#routes-only-a-connect-takes) → [thread-cwd](#the-routes-through-d) → [symlink-file](#symlink-file) |
+| FreeBSD | [symlink-file](#symlink-file) → [at](#the-routes-through-d) | [at-direct](#routes-only-a-connect-takes) → [at](#the-routes-through-d) |
+| macOS / iOS | [symlink-file](#symlink-file) → [thread-cwd](#the-routes-through-d) | [relative](#routes-only-a-connect-takes) → [widened](#routes-only-a-connect-takes) → [thread-cwd](#the-routes-through-d) → [symlink-file](#symlink-file) |
+| NetBSD / OpenBSD / illumos / other Unix | [symlink-file](#symlink-file) | [relative](#routes-only-a-connect-takes) → [symlink-file](#symlink-file) |
 
+- A bind tries [symlink-file](#symlink-file) right after the standard everywhere but Linux / Android. Where a bind follows a symlink (confirmed on macOS), it reaches a path whatever the length of its file name. Where the link is not followed, the next route is tried
 - A connect tries the routes that need neither a write (creating D, R or a symlink) nor a thread (proc-direct, relative, widened, at-direct) first, and the routes that create D or start a thread after them. The routes that need neither are fast, and relative and widened reach further than the routes through D in some cases
 - D is created at most once per call and shared by the routes that use it (thread-cwd, at, proc, proc-held). When it can be created nowhere, every route that uses it is skipped as unusable, and D is not tried again
 - When D can be created nowhere, a bind tries the same means in [the form without D](#the-form-without-d) (thread-cwd-sockdir, at-sockdir, proc-sockdir)
-- The specification's fork routes (fork, fork-sockdir, fork-direct) are not built. A child forked from Python runs Python, so it cannot satisfy the specification's requirement that the child's span be async-signal-safe ([DR-0001](./decisions/DR-0001-python-port-design.md)). Where the specification has a bind go on to fork, the bind gets `ENAMETOOLONG` (ruled by kawaz in the hub's D12-Q3). To reach the path even there, use [`bind_any`](#bind_any)
+- The specification's fork routes (fork-cwd, fork-cwd-sockdir, fork-cwd-direct) are not built. A child forked from Python runs Python, so it cannot satisfy the specification's requirement that the child's span be async-signal-safe ([DR-0001](./decisions/DR-0001-python-port-design.md)). Where the specification has a bind go on to fork-cwd, the bind gets `ENAMETOOLONG` (ruled by kawaz in the hub's D12-Q3). To reach the path even there, use [`bind_any`](#bind_any)
 - A path that no route in the order reaches gets `ENAMETOOLONG`
 
 ### The routes through D
@@ -164,12 +166,13 @@ thread-cwd, at and proc.
 2. Check with `fstat` that D is ours (a directory, owned by the calling user, no permission for group and others), and set it to 0700
 3. Inside D, create R, a symlink with a 10-character random name pointing to the realpath of the socket's directory
 4. Bind / connect to `R/<file name>` relative to D's fd
-5. Remove R and D, on success and on failure alike
+5. At the end of the call, remove R and D, on success and on failure alike (D is created at most once per call and shared by the routes that use it)
 
 - A path is reached at any directory depth. A file name fits the spelling `R/<file name>` up to 96 bytes on Linux, 92 on Apple's OSes / FreeBSD
 - A D that fails the check is taken to be someone else's and is left alone, contents and all
 - When the D just created cannot be opened (a umask took off the owner's bits: the search bit on macOS, the read bit on the OSes that open it `O_RDONLY`), it is looked up by name with `stat` (not following a symlink), removed with `rmdir` if it meets the same conditions as step 2, and the place counts as one where D cannot be created, so the next is tried. Even if it is swapped between the check by name and the removal, `rmdir` removes only an empty directory (the hub's D12-Q5)
 - The length and whether a means can be used are checked before D is created. If not, nothing is created and the next step is tried
+- The length of proc's spelling depends on the number of D's fd, so it is estimated before D is created and checked again once D is open. When it does not fit, proc cannot be used and the next route is tried. D is shared with the later routes and removed once, at the end of the call
 
 #### Where D is created
 
@@ -217,20 +220,29 @@ Only connects use these routes. They are tried in the order per OS (the table in
 | proc-held | in the D shared with the routes through D (created if there is none yet), create a symlink `s` to the socket file, connect to `/proc/self/fd/<fd of D>/s`, then remove them | Linux / Android. D can be created somewhere and `s` in it ([DR-0002](./decisions/DR-0002-unsafe-base-held-by-fd.md), in Japanese) |
 | relative | pass the path relative to the cwd to the standard library. Only the string is rewritten; there is no `chdir` | the path given is absolute, and the relative path is a length the standard library accepts |
 | widened | pass the original path (failing that, the relative path) to libc's `connect(2)` through ctypes in a sockaddr that carries up to 253 bytes past `sun_path` | macOS / iOS. The path is at most 253 bytes, and the kernel accepts it |
-| symlink | create `sockat.XXXXXXXXXX` pointing to the socket file in a place, pass it, and remove it at once | a safe place exists and the spelling fits (on macOS up to 253 bytes with the widened sockaddr) |
 | at-direct | ctypes `connectat(2)` with the fd of the socket's directory and the file name | FreeBSD. The socket's directory can be opened, and the file name is at most 103 bytes |
 
 - relative: if the path is below the cwd (`getcwd`, or a `$PWD` that names the same directory as the cwd), the prefix is cut off. Otherwise both sides are resolved to real paths and a spelling that climbs with `..` is made. The shorter one is used
 - relative: the spelling is checked to name the same directory as the path before it is used, and the cwd is checked to be unchanged after the connect ([below](#relative-is-exposed-to-another-threads-chdir))
-- The places tried for the symlink are `TMPDIR` (when it is an absolute path other than `/tmp`), then `/tmp`
-- **A safe place** for the symlink is a directory that is one of the following. Nothing is created in a place that is not; the next one is tried
+- `bind` does not use proc-direct, relative, widened or symlink-dir. Their spelling later hits an unrelated file (proc-direct through a reused fd number, relative through a changed cwd), or the listener's address is cut short and the standard library's `getsockname` reads past it (widened), or the routes through D are enough (symlink-dir) ([DR-0004](./decisions/DR-0004-own-directory-route.md), in Japanese). Only `bind_any` uses symlink-dir, last ([below](#symlink-dir-bind_any))
+
+### symlink-file
+
+Binds (everywhere but Linux / Android) and connects use it.
+
+1. Look at the places `TMPDIR` (when it is an absolute path other than `/tmp`), then `/tmp`, and in the first where the spelling `<place>/sockat.XXXXXXXXXX` fits `sun_path` (for a connect on macOS, up to 253 bytes with the widened sockaddr) and which is a safe place, create `sockat.XXXXXXXXXX` (10 random characters; on `EEXIST` another, up to 16 tries) pointing to the path of the socket file (with the cwd in front for a relative path). Nothing is created in a place where it does not fit, that is not safe, or where it cannot be created; the next one is tried
+2. Bind / connect with that spelling, and remove the symlink on success and on failure alike
+
+- **A safe place** is a directory that is one of the following
   - sticky and owned by root or by the calling user (as `/tmp` is)
   - owned by the calling user with no write permission for group and others (as macOS's `$TMPDIR` is)
-- `bind` does not use proc-direct, relative, widened or symlink. Their spelling later hits an unrelated file (proc-direct through a reused fd number, relative through a changed cwd), or the listener's address is cut short and the standard library's `getsockname` reads past it (widened), or the routes through D are enough (symlink) ([DR-0004](./decisions/DR-0004-own-directory-route.md), in Japanese). Only `bind_any` uses symlink, last ([below](#symlink-bind_any))
+- Neither the file name nor the directory goes into the spelling, so a path is reached whatever the length of its file name
+- A bind goes through it only on an OS whose bind follows a symlink in the last component (confirmed on macOS; Linux / Android do not follow it, so it is not tried there; other OSes are not confirmed). When the bind fails, the original path is looked up with `lstat`: if something is there, that error (`EADDRINUSE` and the like) is returned and nothing more is tried; if nothing is there, or it cannot be told, the kernel is taken not to have followed the link, so the route cannot be used and the next route is tried (the hub's [DR-0016](https://github.com/kawaz/sockat/blob/main/docs/decisions/DR-0016-bind-through-file-symlink.md), in Japanese)
+- A bind through it loses only `respelled`. The address the kernel reports is the symlink's spelling; unlinking that spelling removes at most an entry in the place (the symlink is already gone), so it cannot be made to remove an unrelated file
 
 ### How a failing route is treated
 
-When a route actually binds / connects and fails (`ENOENT`, `EADDRINUSE`, `ECONNREFUSED`, ...), that error is returned and neither the next route nor the next place is tried. The next one is tried only when a route cannot be used at all (the spelling does not fit, D or R cannot be created, the means cannot be used, `/proc` is not usable, the kernel refuses the widened sockaddr, the symlink's place is not safe or the symlink cannot be created).
+When a route actually binds / connects and fails (`ENOENT`, `EADDRINUSE`, `ECONNREFUSED`, ...), that error is returned and neither the next route nor the next place is tried. The next one is tried only when a route cannot be used at all (the spelling does not fit, D or R cannot be created, the means cannot be used, `/proc` is not usable, the kernel refuses the widened sockaddr, the symlink's place is not safe or the symlink cannot be created, a bind through symlink-file failed with nothing at the original path).
 
 ### Where a path stops being reached
 
@@ -239,15 +251,16 @@ When a path longer than the standard library accepts is `ENAMETOOLONG` (given th
 | OS | `bind` | `connect` / `connect_nonblocking` |
 |---|---|---|
 | Linux / Android (`/proc` usable) | file name > 96 (about 79 when thread-cwd cannot be used) | reached (proc-held) |
-| Linux / Android (`/proc` not usable) | file name > 96, or thread-cwd cannot be used | relative > 107, thread-cwd cannot be used (file name > 96 or thread-cwd unusable), and symlink cannot be used |
-| FreeBSD | file name > 92 | file name > 103 |
-| macOS / iOS | file name > 92, or thread-cwd cannot be used | both the original and the relative path > 253, thread-cwd cannot be used (file name > 92 or thread-cwd unusable), and symlink cannot be used |
-| NetBSD / OpenBSD | every long path | relative > 103, and symlink cannot be used |
-| illumos | every long path | relative > 107, and symlink cannot be used |
+| Linux / Android (`/proc` not usable) | file name > 96, or thread-cwd cannot be used | relative > 107, thread-cwd cannot be used (file name > 96 or thread-cwd unusable), and symlink-file cannot be used |
+| FreeBSD | file name > 92 (symlink-file not counted) | file name > 103 |
+| macOS / iOS | macOS: reached (symlink-file). When symlink-file cannot be used, file name > 92, or thread-cwd cannot be used<br>other Apple OSes: file name > 92, or thread-cwd cannot be used | both the original and the relative path > 253, thread-cwd cannot be used (file name > 92 or thread-cwd unusable), and symlink-file cannot be used |
+| NetBSD / OpenBSD | every long path (symlink-file not counted) | relative > 103, and symlink-file cannot be used |
+| illumos | every long path (symlink-file not counted) | relative > 107, and symlink-file cannot be used |
 
-- When D can be created nowhere, a bind reaches a file name of up to 88 bytes (84 on macOS / FreeBSD, about 72 with proc-sockdir alone) through [the form without D](#the-form-without-d) (when the socket's directory can be opened and R created in it; where no means can be used, nothing is reached, as in the table above). A connect gets as far as the routes in its order that do not use D reach (proc-direct, relative, widened, at-direct, symlink; proc-held cannot be used either)
-- `bind_any` reaches the path even where `bind` gets `ENAMETOOLONG`, when the spelling of [symlink](#symlink-bind_any), `<place>/sockat.XXXXXXXXXX/<file name>`, fits `sun_path` and a usable place exists
-- symlink cannot be used when there is no safe place where the symlink can be created (a sandbox where neither `TMPDIR` nor `/tmp` can be used, and the like)
+- When D can be created nowhere, a bind reaches a file name of up to 88 bytes (84 on macOS / FreeBSD, about 72 with proc-sockdir alone) through [the form without D](#the-form-without-d) (when the socket's directory can be opened and R created in it; where no means can be used, nothing is reached, as in the table above). A connect gets as far as the routes in its order that do not use D reach (proc-direct, relative, widened, at-direct, symlink-file; proc-held cannot be used either)
+- In the bind column, symlink-file is counted on macOS only. Linux / Android do not try it, their bind not following a symlink. Whether the other OSes follow it is not confirmed
+- `bind_any` reaches the path even where `bind` gets `ENAMETOOLONG`, when the spelling of [symlink-dir](#symlink-dir-bind_any), `<place>/sockat.XXXXXXXXXX/<file name>`, fits `sun_path` and a usable place exists
+- symlink-file and symlink-dir cannot be used when there is no safe place where the symlink can be created (a sandbox where neither `TMPDIR` nor `/tmp` can be used, and the like)
 - A path longer than `PATH_MAX` as a whole (1024 bytes on macOS, 4096 on Linux) is `ENAMETOOLONG` on every route (no other system call opens it either; it is outside what sockat handles)
 
 ## What differs from the standard library for a long path
@@ -266,7 +279,7 @@ For a long path, the address the kernel reports (`getsockname(2)` / `getpeername
 - A `dup()`ed socket reports it the same way. A socket rebuilt from an fd with `socket.fromfd` or the like is of the standard type, so it reports the kernel's spelling
 - So what reads the address back (asyncio's cleanup, `repr`, logs) works with the original path ([DR-0003](./decisions/DR-0003-report-the-given-path.md), in Japanese)
 
-The spellings the kernel reports are as follows (visible by calling the standard implementation, as in `socket.socket.getsockname(s)`). R and the symlink are gone after the bind, so the spelling resolved later names nothing as a rule. The spelling may be seen by other users, though (Linux's `/proc/net/unix`), so when the process's cwd is a place others can write to, and through the symlink in a shared place, other users can recreate it ([`losses` of `bind_any`](#bind_any)). Remove the socket file by the original path, not by the spelling. R has a random name to avoid hitting something of the same name that happens to be there, not as a defence against other users.
+The spellings the kernel reports are as follows (visible by calling the standard implementation, as in `socket.socket.getsockname(s)`). R and the symlink are gone after the bind, so the spelling resolved later names nothing as a rule. The spelling may be seen by other users, though (Linux's `/proc/net/unix`), so when the process's cwd is a place others can write to, and through symlink-dir in a shared place, other users can recreate it ([`losses` of `bind_any`](#bind_any)). Remove the socket file by the original path, not by the spelling. R has a random name to avoid hitting something of the same name that happens to be there, not as a defence against other users.
 
 | Route of the bind | Reported |
 |---|---|
@@ -274,7 +287,8 @@ The spellings the kernel reports are as follows (visible by calling the standard
 | proc | `/proc/self/fd/<fd>/R/<file name>` |
 | thread-cwd-sockdir, at-sockdir | `.sockat.XXXXXXXXXX/<file name>` |
 | proc-sockdir | `/proc/self/fd/<fd>/.sockat.XXXXXXXXXX/<file name>` |
-| symlink (`bind_any`) | `<place>/sockat.XXXXXXXXXX/<file name>`. In a shared place, other users can recreate it |
+| symlink-file | `<place>/sockat.XXXXXXXXXX`. Unlinking that spelling removes at most an entry in the place, never an unrelated file |
+| symlink-dir (`bind_any`) | `<place>/sockat.XXXXXXXXXX/<file name>`. In a shared place, other users can recreate it |
 
 The `getpeername()` of a connect to a listener that another program bound with a widened sockaddr (Node.js on macOS, for example) is a truncated path, and on CPython for macOS unrelated bytes may follow the cut (the behaviour of the standard library's `getpeername`; getting it never raises; [cause, in Japanese](./findings/2026-11-18-cpython-getsockname-widened-sockaddr.md)).
 
@@ -288,7 +302,7 @@ A path containing a NUL anywhere but at its start gets a `ValueError` at any len
 
 ### The directory is looked up slightly before the call
 
-The routes through D, the form without D and `bind_any`'s symlink resolve the socket's directory to a real path when they create R or the symlink, and the connect routes proc-direct, relative and at-direct look the directory up first (open it, or resolve it to a real path), then bind / connect by the file name. If a directory along the path is renamed, or a symlink along it repointed, in between, the socket is created in the directory as it was when looked up. widened, a connect's symlink and proc-held behave as the standard library does.
+The routes through D, the form without D and `bind_any`'s symlink-dir resolve the socket's directory to a real path when they create R or the symlink, and the connect routes proc-direct, relative and at-direct look the directory up first (open it, or resolve it to a real path), then bind / connect by the file name. If a directory along the path is renamed, or a symlink along it repointed, in between, the socket is created in the directory as it was when looked up. widened, symlink-file and proc-held behave as the standard library does.
 
 ### relative is exposed to another thread's chdir
 
@@ -304,7 +318,7 @@ If the process dies between creating and removing them, the following are left.
 
 | Where | What is left |
 |---|---|
-| the place (`TMPDIR` or `/tmp`; for `bind_any` also `XDG_RUNTIME_DIR`) | `sockat.XXXXXXXXXX` (D, or the symlink of a connect or of `bind_any`) |
+| the place (`TMPDIR` or `/tmp`; for `bind_any` also `XDG_RUNTIME_DIR`) | `sockat.XXXXXXXXXX` (D, or the symlink of symlink-file or of `bind_any`'s symlink-dir) |
 | the socket's directory | `.sockat.XXXXXXXXXX` (D, or R of the form without D) |
 
 ## Errors
@@ -345,4 +359,5 @@ reader, writer = await asyncio.open_unix_connection(sock=sockat.connect_nonblock
 - Android and iOS have not been run. They use the same routes as Linux / macOS
 - FreeBSD, NetBSD, OpenBSD and illumos run the tests on VMs in CI
 - The error a nonblocking connect returns for a full backlog was checked only on Linux and macOS
-- No test takes `bind_any`'s symlink on FreeBSD (at cannot be made unusable, so a bind that goes on to symlink cannot be set up)
+- No test takes `bind_any`'s symlink-dir on FreeBSD (at cannot be made unusable, so a bind that goes on to symlink-dir cannot be set up)
+- Whether the bind of FreeBSD, NetBSD, OpenBSD and illumos follows symlink-file's link is not confirmed (the tests on the CI VMs tell)

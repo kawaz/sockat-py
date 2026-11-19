@@ -5,9 +5,9 @@
 
 ## Context
 
-- ハブの [DR-0013](https://github.com/kawaz/sockat/blob/main/docs/decisions/DR-0013-any-means-reach-at-any-cost.md) が、any 系を「何かを失ってでも届かせる」opt-in の API にした。`bind_any` は既定の bind の経路を全部試した後、最後に置き場の symlink を試し、標準の listener と一緒に、失ったものの名前の並び (`losses`)、通った経路の名前 (`route`)、試して使えなかった経路の並び (`skipped`、各要素は `{name, reason}`) を返す。失敗した時もエラーに `skipped` (と、実際に bind して失敗した経路の名前) を付ける
+- ハブの [DR-0013](https://github.com/kawaz/sockat/blob/main/docs/decisions/DR-0013-any-means-reach-at-any-cost.md) が、any 系を「何かを失ってでも届かせる」opt-in の API にした。`bind_any` は既定の bind の経路を全部試した後、最後に置き場の symlink (symlink-dir) を試し、標準の listener と一緒に、失ったものの名前の並び (`losses`)、通った経路の名前 (`route`)、試して使えなかった経路の並び (`skipped`、各要素は `{name, reason}`) を返す。失敗した時もエラーに `skipped` (と、実際に bind して失敗した経路の名前) を付ける
 - any 系は既定の API に出さず、使う人が選んで有効にする仕組みの後ろに置く。Python の置き場は各言語の DR で決める
-- Python 版の既定の `bind` は、D を通す経路と D 無しの形が使えない所で `ENAMETOOLONG` になる (fork の経路が無い。[DR-0001](DR-0001-python-port-design.md)、[DR-0004](DR-0004-own-directory-route.md) の決定 4)。NetBSD / OpenBSD / illumos の長いパス全部と、スレッド cwd も `/proc` も使えない Linux がそこに入る
+- Python 版の既定の `bind` は、D を通す経路と D 無しの形が使えない所で `ENAMETOOLONG` になる (fork-cwd の経路が無い。[DR-0001](DR-0001-python-port-design.md)、[DR-0004](DR-0004-own-directory-route.md) の決定 4)。NetBSD / OpenBSD / illumos の長いパス全部と、スレッド cwd も `/proc` も使えない Linux がそこに入る
 
 ## Decision
 
@@ -31,9 +31,9 @@
 | 順 | 経路 |
 |---|---|
 | 1〜 | 既定の `bind` と同じ (`_route.routes`。経路も失敗の扱いも変えない) |
-| 最後 | symlink: 既定の `bind` が `ENAMETOOLONG` になる所 (`_route.bind_past_d` の最後) でだけ試す (`_route.bind_symlink_route`) |
+| 最後 | symlink-dir: 既定の `bind` が `ENAMETOOLONG` になる所 (`_route.bind_past_d` の最後) でだけ試す (`_route.symlink_dir_route`) |
 
-symlink:
+symlink-dir:
 
 | 手順 | Python での作り方 |
 |---|---|
@@ -46,7 +46,7 @@ symlink:
 | 届かない | `ENAMETOOLONG` |
 
 - 長いパスの listener は、既定の `bind` と同じく元のパスを返す `PathSocket` ([DR-0003](DR-0003-report-the-given-path.md))
-- 経路の名前は `_route.Route.SYMLINK` (connect の symlink と同じ名前。SPEC の「経路の名前」で bind と connect の両方に出る symlink)
+- 経路の名前は `_route.Route.SYMLINK_DIR` (SPEC の symlink-dir。ソケットのファイルを指す symlink-file とは別の経路)
 
 ### 3. 戻り値
 
@@ -84,8 +84,9 @@ class Loss(enum.StrEnum):
 | standard (絶対パス、abstract のアドレス) | 空 |
 | standard (相対パス) | `cwd-relative` |
 | thread-cwd、at、proc、thread-cwd-sockdir、at-sockdir、proc-sockdir | `respelled` |
-| symlink (持ち主だけが書ける置き場) | `respelled` |
-| symlink (共有の置き場) | `respelled`、`recreatable-spelling` |
+| symlink-file | `respelled` |
+| symlink-dir (持ち主だけが書ける置き場) | `respelled` |
+| symlink-dir (共有の置き場) | `respelled`、`recreatable-spelling` |
 
 - 長い相対パスは D を通る経路に進むので `respelled` だけ (カーネルが覚えるのは `R/<ファイル名>` で、渡した相対パスではない)
 
@@ -94,13 +95,14 @@ class Loss(enum.StrEnum):
 | 位置 | 経路 | 理由の例 |
 |---|---|---|
 | 最初 | standard | `path too long` |
+| 次 (Linux / Android 以外) | symlink-file | `no place for the symlink`、`symlink not followed by bind` |
 | D を通す経路 | この OS にある経路 (Linux は thread-cwd、proc。Apple の OS は thread-cwd。FreeBSD は at) | `spelling too long`、`seccomp filter`、`no pthread_fchdir_np`、`thread cwd turned off`、`/proc unusable`、`thread cwd refused`、`no place for D` |
-| fork | fork | `no fork route in sockat-py` |
+| fork-cwd | fork-cwd | `no fork route in sockat-py` |
 | D 無しの形 (D をどこにも作れない時だけ) | thread-cwd-sockdir (FreeBSD は at-sockdir)、proc-sockdir | 上と同じ、`socket directory not opened`、`R not created` |
-| fork | fork-sockdir (D 無しの形も使えない時) | `no fork route in sockat-py` |
+| fork-cwd | fork-cwd-sockdir (D 無しの形も使えない時) | `no fork route in sockat-py` |
 
 - 理由は短い英語の句で、診断用。中身は約束しない
-- fork と fork-sockdir は、SPEC の順でその位置に来た時に「sockat-py に無い」理由で入れる。SPEC の他の言語では fork で届く所に来たことが、利用者の手元で分かる
+- fork-cwd と fork-cwd-sockdir は、SPEC の順でその位置に来た時に「sockat-py に無い」理由で入れる。SPEC の他の言語では fork-cwd で届く所に来たことが、利用者の手元で分かる
 - connect も同じ形で経路を積む (`_route.connect_routes`、[DR-0004](DR-0004-own-directory-route.md) の決定 5)。公開 API で読む口は無く (Python に `connect_any` は無い)、試験と適合試験の CLI (`conformance/cli.py`) が読む
 - 内部は `_route.reach` / `_route.reach_long` が `Reached(sock, route, losses, skipped)` を返し、`run` / `run_long` はその socket と route だけを返す (既定の API の振る舞いは変えない)
 
@@ -147,7 +149,7 @@ class Loss(enum.StrEnum):
 ## Consequences
 
 - NetBSD / OpenBSD / illumos と、D を通す経路の手段を使えない Linux / Apple の OS でも、置き場に収まる長さのファイル名なら `bind_any` で届く
-- 試験は `tests/test_any.py`。symlink を通す試験は、公開 API が環境から読む設定 (`_route.Config.from_env`) を、既定の `bind` の経路を全部使えなくする設定 (D の置き場なし・スレッド cwd を切る・`/proc` を無いことにする) に差し替えて行う。FreeBSD では at を使えなくできないので行わない
+- 試験は `tests/test_any.py`。symlink-dir を通す試験は、公開 API が環境から読む設定 (`_route.Config.from_env`) を、既定の `bind` の経路を全部使えなくする設定 (symlink-file の置き場なし・D の置き場なし・スレッド cwd を切る・`/proc` を無いことにする) に差し替えて行う。FreeBSD では at を使えなくできないので行わない
 
 ## 未確定
 
@@ -156,5 +158,5 @@ class Loss(enum.StrEnum):
 ## 関連
 
 - [ハブの DR-0013](https://github.com/kawaz/sockat/blob/main/docs/decisions/DR-0013-any-means-reach-at-any-cost.md)
-- [ハブの SPEC](https://github.com/kawaz/sockat/blob/main/docs/SPEC-ja.md) (「公開する操作」「symlink」「symlink の置き場と名前」)
+- [ハブの SPEC](https://github.com/kawaz/sockat/blob/main/docs/SPEC-ja.md) (「公開する操作」「symlink-dir」「symlink の置き場と名前」)
 - [DR-0001](DR-0001-python-port-design.md)、[DR-0003](DR-0003-report-the-given-path.md)、[DR-0004](DR-0004-own-directory-route.md)

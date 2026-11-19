@@ -5,7 +5,7 @@
 
 ## Context
 
-- ハブの [DR-0012](https://github.com/kawaz/sockat/blob/main/docs/decisions/DR-0012-own-directory-and-thread-cwd.md) の connect の順は、`/proc` を使える Linux / Android で proc-direct → thread-cwd → proc → proc-held → symlink
+- ハブの [DR-0012](https://github.com/kawaz/sockat/blob/main/docs/decisions/DR-0012-own-directory-and-thread-cwd.md) の connect の順は、`/proc` を使える Linux / Android で proc-direct → thread-cwd → proc → proc-held → symlink-file
 - proc-held は、proc-direct の綴りに収まらず、thread-cwd も proc も使えない (seccomp の filter の下でファイル名が proc に収まらない等) connect を、ファイル名の長さによらず届かせる
 
 ## Decision
@@ -19,11 +19,11 @@
 
 - 使うのは、ソケットのディレクトリの fd の `/proc/self/fd/<fd>` を引ける Linux / Android の connect 系だけ。bind は使わない
 - `s` の先はソケットのファイルのパスそのもの (realpath にしない) なので、カーネルは元のパスと同じに解決する
-- D をどこにも作れない時、`s` を作れない時は使えないとして symlink の経路に進む。D をどこにも作れなかったことが前の経路で分かっていれば、作り直さない
+- D をどこにも作れない時、`s` を作れない時は使えないとして symlink-file の経路に進む。D をどこにも作れなかったことが前の経路で分かっていれば、作り直さない
 
 ## Alternatives Considered
 
-- 案 A: 置き場の安全を確かめ、安全な置き場には symlink、安全でない置き場にだけこの形を使う
+- 案 A: 置き場の安全を確かめ、安全な置き場には symlink-file、安全でない置き場にだけこの形を使う
   - 不採用理由: D を fd で掴めば置き場の安全は関係しない (ハブの DR-0012)。処理と試験が増えるだけ
 - 案 B: D の中に R (ソケットのディレクトリを指す symlink) を作って `/proc/self/fd/<D>/R/<ファイル名>` で connect する
   - 不採用理由: それは D を通す経路の proc で、ファイル名が収まらない時にここへ来る。ソケットのファイルを指す `s` なら綴りがファイル名の長さによらない

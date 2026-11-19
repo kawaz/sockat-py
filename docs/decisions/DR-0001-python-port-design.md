@@ -23,12 +23,13 @@
 | proc-held (connect だけ) | [DR-0002](DR-0002-unsafe-base-held-by-fd.md) | Linux / Android |
 | relative (connect だけ) | 文字列を書き直して標準に渡す | FreeBSD 以外で `/proc` を使えない時 |
 | widened (connect だけ) | ctypes で libc の `connect(2)` に手で組んだ sockaddr を渡す | Apple の OS |
-| symlink (connect、`bind_any` の最後) | `os.symlink` で作り、標準に渡し、消す ([DR-0005](DR-0005-bind-any.md)) | connect は FreeBSD 以外、`bind_any` は全部 |
+| symlink-file (connect、Linux / Android 以外の bind) | `os.symlink` で作り、標準に渡し、消す ([DR-0004](DR-0004-own-directory-route.md) の決定 8) | connect は FreeBSD 以外、bind は Linux / Android 以外 |
+| symlink-dir (`bind_any` の最後) | `os.symlink` で作り、標準に渡し、消す ([DR-0005](DR-0005-bind-any.md)) | 全部 |
 | at-direct (connect だけ) | ctypes で `connectat(2)` にソケットのディレクトリの fd とファイル名 | FreeBSD |
-| fork、fork-sockdir、fork-direct | 作らない (kawaz 裁定) | — |
+| fork-cwd、fork-cwd-sockdir、fork-cwd-direct | 作らない (kawaz 裁定) | — |
 
 - 経路の順番、使える条件、失敗をやり直さない扱い、D・R・symlink の置き場と名前は SPEC のとおり。Python での作り方は [DR-0004](DR-0004-own-directory-route.md)
-- 長いパスは最初にソケットのディレクトリを `stat` で引く (無ければ `ENOENT`)。bind が fork の経路の場所に来たら `ENAMETOOLONG` を返す
+- 長いパスは最初にソケットのディレクトリを `stat` で引く (無ければ `ENOENT`)。bind が fork-cwd の経路の場所に来たら `ENAMETOOLONG` を返す
 - thread-cwd は CPython の 1 スレッド = 1 OS スレッドに頼る。他のスレッドの `os.getcwd()` が変わらないことを macOS と Linux で確かめた
 - ctypes を使う呼び出しは `src/sockat/_sys.py` にだけ置き、最初に要った時に import する
 
@@ -47,7 +48,7 @@
 - `connect_any` 系は出さない (fork の経路が無いため)
 - 長いパスでは、戻り値は `socket.socket` の subclass で、アドレスを元のパスで返す ([DR-0003](DR-0003-report-the-given-path.md))
 - `path` は `str` / `bytes` / `os.PathLike`。標準の `socket.bind` は `os.PathLike` を受けない (3.11〜3.15 で確認) が、Python のファイル API の慣習に合わせて受け、`os.fspath` した値を標準に渡す
-- 経路 (`_route.Route`) は公開しない (`bind_any` が経路の名前の文字列を診断用に返すだけ)。試験はパッケージの中から各経路の関数を呼ぶ。環境を読む部分 (D の置き場、symlink の置き場の候補、macOS で広げた sockaddr を試すか、`/proc/self/fd` の場所、thread-cwd を試すか、`bind_any` の symlink の置き場の候補) は `_route.Config` にして試験から差し替える
+- 経路 (`_route.Route`) は公開しない (`bind_any` が経路の名前の文字列を診断用に返すだけ)。試験はパッケージの中から各経路の関数を呼ぶ。環境を読む部分 (D の置き場、symlink-file の置き場の候補、bind で symlink-file を試すか、macOS で広げた sockaddr を試すか、`/proc/self/fd` の場所、thread-cwd を試すか、`bind_any` の symlink-dir の置き場の候補) は `_route.Config` にして試験から差し替える
 
 ### 3. 標準に揃える点
 
