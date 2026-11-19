@@ -356,6 +356,36 @@ def test_a_leading_nul_on_linux_is_an_abstract_address_for_the_standard() -> Non
         sockat.bind(over)
 
 
+# Where the kernel has no abstract namespace (every system but Linux /
+# Android: Apple, the BSDs, illumos), a leading NUL is no address but a NUL
+# byte in a path, and so an argument error (ValueError) at any length (SPEC,
+# "short paths"), before anything is handed to the kernel: the standard would
+# pass it on and get the kernel's error (illumos: ENOENT) instead. Shown with
+# a short address, one of the longest the standard takes, one over that, and
+# a long one, through every public call, sockat.ex included.
+@pytest.mark.skipif(
+    sys.platform.startswith("linux") or sys.platform == "android",
+    reason="a leading NUL is an abstract address on Linux / Android",
+)
+def test_a_leading_nul_where_there_is_no_abstract_namespace_is_a_value_error() -> None:
+    import sockat.ex
+
+    calls: list[Callable[[bytes], object]] = [
+        sockat.bind,
+        sockat.connect,
+        sockat.connect_nonblocking,
+        sockat.ex.bind,
+        sockat.ex.connect,
+        sockat.ex.connect_nonblocking,
+    ]
+    for n in (8, DIRECT_MAX, DIRECT_MAX + 1, 300):
+        addr = b"\0" + b"x" * (n - 1)
+        assert len(addr) == n
+        for call in calls:
+            with pytest.raises(ValueError, match="NUL"):
+                call(addr)
+
+
 # ----- the returned sockets are the standard's -----
 
 
