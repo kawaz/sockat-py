@@ -47,7 +47,7 @@ from _support import (
 )
 
 import sockat
-from sockat import _route
+from sockat import _errors, _route
 from sockat._route import BIND, CONNECT, CONNECT_NONBLOCKING, SOCKET_DIR, Config, OwnDirPlace, Request, Route
 from sockat._sys import DIRECT_MAX, WIDE_PATH_MAX
 
@@ -365,7 +365,7 @@ def cwd_changed() -> None:
         connect_error = e
     else:
         raise AssertionError("a connect to another directory was returned")
-    assert type(connect_error) is _route.CwdChanged, repr(connect_error)
+    assert type(connect_error) is _errors.CwdChanged, repr(connect_error)
     assert connect_error.errno is None
     # The stream that did connect to the listener in the other directory was
     # closed, which that listener sees as end of file.
@@ -444,6 +444,91 @@ def deleted_cwd() -> None:
     report(**results)
 
 
+def ex_bind_cwd_changed() -> None:
+    """``sockat.ex.bind`` of the relative path REL (from the cwd, A) with the
+    cwd changed to OTHER (B) partway, at the point MODE names, standing in for
+    another thread: ``before-bind`` just before the standard's bind (a short
+    path), ``after-realpath`` right after the route order takes the realpath
+    of the socket's directory (a long path, before its bind), ``after-bind``
+    right after the bind, before the socket file is remembered. Reports the
+    error (its type, errno and route), whether every socket made was closed,
+    and what is at REL under A and under B afterwards."""
+    import sockat.ex
+    from sockat import _socket_file
+
+    rel = arg("REL")
+    a = os.getcwd()
+    b = arg("OTHER")
+    mode = os.fsdecode(arg("MODE"))
+    made: list[socket.socket] = []
+    real_new_socket = _route.new_socket
+
+    def new_socket(req: Request, *, standard: bool = False) -> socket.socket:
+        sock = real_new_socket(req, standard=standard)
+        made.append(sock)
+        return sock
+
+    _route.new_socket = new_socket
+    moved: list[bool] = []
+
+    def move() -> None:
+        if not moved:
+            moved.append(True)
+            os.chdir(b)
+
+    if mode == "before-bind":
+        real_plain_op = _route.plain_op
+
+        def plain_op(req: Request, spelling: str | bytes, *, standard: bool = False) -> socket.socket:
+            move()
+            return real_plain_op(req, spelling, standard=standard)
+
+        _route.plain_op = plain_op
+    elif mode == "after-realpath":
+        real_realpath = os.path.realpath
+
+        def realpath(p: str | bytes, *, strict: bool = False) -> str | bytes:
+            out = real_realpath(p, strict=strict)
+            move()
+            return out
+
+        os.path.realpath = realpath  # type: ignore[assignment]
+    else:
+        assert mode == "after-bind", mode
+        real_remember = _socket_file.remember
+
+        def remember(path: str | bytes) -> Callable[[], None]:
+            move()
+            return real_remember(path)
+
+        _socket_file.remember = remember
+    try:
+        sockat.ex.bind(rel)
+    except OSError as e:
+        error = e
+    else:
+        raise AssertionError("the bind went through")
+
+    def what(base: str | bytes) -> str:
+        p = os.path.join(os.fsencode(base), rel)
+        if not os.path.lexists(p):
+            return "nothing"
+        if is_socket(p):
+            return "socket"
+        with open(p, "rb") as f:
+            return "file:" + f.read().decode()
+
+    report(
+        moved=str(bool(moved)),
+        type=type(error).__name__,
+        errno=str(error.errno),
+        route=str(getattr(error, "route")),  # noqa: B009
+        closed=str(bool(made) and all(s.fileno() == -1 for s in made)),
+        a=what(a),
+        b=what(b),
+    )
+
+
 SCENARIOS: dict[str, Callable[[], None]] = {
     f.__name__: f
     for f in (
@@ -461,6 +546,7 @@ SCENARIOS: dict[str, Callable[[], None]] = {
         cwd_changed,
         default_backlog,
         deleted_cwd,
+        ex_bind_cwd_changed,
     )
 }
 

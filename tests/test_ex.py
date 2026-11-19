@@ -17,11 +17,13 @@ import pytest
 from _support import (
     TmpDirs,
     accept_ping,
+    bind_route_here,
     is_socket,
     listing,
     needs_long_bind,
     nest,
     parent,
+    run_child,
 )
 
 import sockat
@@ -273,3 +275,51 @@ def test_a_path_like_object_is_read_once(tmp: TmpDirs, total: int) -> None:
         with listener:
             discard()
     assert os.path.exists(victim)
+
+
+# For a relative path, sockat.ex.bind compares the cwd before anything is
+# resolved with the cwd after the bind (and the realpath taken to remember
+# the file), and when they differ treats it as a socket file that cannot be
+# remembered (SPEC): the listener is closed, the error raised (the general
+# error, an OSError without errno, carrying the route that bound and the
+# routes skipped), and no discard is handed back, so the file is left where
+# the bind made it. Otherwise the bind would go to one cwd and the file be
+# remembered under another, where discard could remove an unrelated file of
+# the same name. The change is made from inside the call (in a child, as a
+# chdir is process-wide), standing in for another thread, at three points:
+#
+# * before-bind: a short path, just before the standard's bind: the bind is
+#   made under the new cwd (B), where the socket file is left; the file of
+#   the same name in the old cwd (A) is left alone;
+# * after-realpath: a long path, after the realpath of its directory was
+#   taken and before the route's bind: the socket file is left under
+#   whichever cwd the route bound it (macOS's symlink-file under B, the
+#   routes through D under A, R pointing to the realpath taken before);
+# * after-bind: right after the bind, before the file is remembered: the
+#   socket file is left under A, and the file of the same name under B, the
+#   one that would have been remembered, is left alone.
+@pytest.mark.parametrize("mode", ["before-bind", "after-realpath", "after-bind"])
+def test_a_cwd_changed_during_a_relative_bind_fails_it_and_leaves_the_files(tmp: TmpDirs, mode: str) -> None:
+    a, b = tmp.new(), tmp.new()
+    if mode == "after-realpath":
+        if bind_route_here() is None:
+            pytest.skip("no route of the default bind for a long path here")
+        rel = nest(a, len(a) + 1 + 200)[len(a) + 1 :]
+        os.makedirs(os.path.dirname(b + b"/" + rel))
+    else:
+        rel = b"server.sock"
+    unrelated_in = {"before-bind": a, "after-bind": b}.get(mode)
+    if unrelated_in is not None:
+        with open(unrelated_in + b"/" + rel, "wb") as f:
+            f.write(b"unrelated")
+    out = run_child("ex_bind_cwd_changed", a, {"REL": rel, "OTHER": b, "MODE": mode.encode()})
+    assert out["moved"] == "True", out
+    assert (out["type"], out["errno"]) == ("CwdChanged", "None"), out
+    assert out["route"] not in ("None", ""), out
+    assert out["closed"] == "True", out
+    if mode == "before-bind":
+        assert (out["a"], out["b"]) == ("file:unrelated", "socket"), out
+    elif mode == "after-bind":
+        assert (out["a"], out["b"]) == ("socket", "file:unrelated"), out
+    else:
+        assert sorted([out["a"], out["b"]]) == ["nothing", "socket"], out
