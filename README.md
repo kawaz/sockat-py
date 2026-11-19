@@ -113,6 +113,29 @@ sock, losses, route, skipped = sockat.ex.connect(path)
 - When a call fails, the error (of the same type and `errno` as the plain call's) gets the attributes `skipped` and `route`
 - Details are in [docs/MANUAL.md](./docs/MANUAL.md#sockatex)
 
+## What is lost
+
+The names in `losses` of `sockat.ex` and how to avoid each. What happens, what to watch out for, and the recommended code are in [docs/MANUAL.md](./docs/MANUAL.md#what-is-lost) (the recommended code is run as a test).
+
+| Name | What happens | How to avoid |
+|---|---|---|
+| [respelled](./docs/MANUAL.md#respelled) | for a long path, the address the kernel reports is not the original path | remove by the original path (`os.unlink(path)`) or `discard()` |
+| [cwd-relative](./docs/MANUAL.md#cwd-relative) | binding with a relative path makes the kernel keep a spelling relative to the cwd | make the path absolute with `os.path.abspath(path)` before the bind |
+| [forked](./docs/MANUAL.md#forked) | never attached: sockat-py has no fork route | — |
+| [recreatable-spelling](./docs/MANUAL.md#recreatable-spelling) | the last resort symlink-dir goes through a shared place, and other users can recreate the spelling | remove by the original path or `discard()`. Prepare a place only the owner can write to (`$XDG_RUNTIME_DIR` and the like) |
+
+## Patterns not to use
+
+Ways of writing it that remove an unrelated file or fail to remove the file. The details and the code to write instead are in [docs/MANUAL.md](./docs/MANUAL.md#patterns-not-to-use).
+
+| Pattern | Instead |
+|---|---|
+| `os.unlink(socket.socket.getsockname(listener))` (removing by the spelling the kernel reports) | `os.unlink(path)` (the original path) or `discard()` |
+| `sockat.bind("server.sock")` → `os.chdir(...)` → `os.unlink("server.sock")` | `os.path.abspath(path)` before the bind. `discard()` |
+| ending the cleanup with `listener.close()` alone | `discard()` or `os.unlink(path)` |
+| calling `discard()` alone without closing the listener | `close()` the listener too |
+| `if route == "symlink-dir":` (branching on `route`, `skipped` or `reason`) | `if sockat.ex.Loss.RECREATABLE_SPELLING in losses:` (branching on `losses`) |
+
 ## asyncio
 
 ```python

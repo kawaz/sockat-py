@@ -100,10 +100,10 @@ if sockat.ex.Loss.RECREATABLE_SPELLING in losses:
 
 | `Loss` | Name | What is lost | When |
 |---|---|---|---|
-| `RESPELLED` | `respelled` | the address the kernel reports is not the original path. The spelling may be seen by other users (Linux's `/proc/net/unix`), so where the process's cwd is a place others can write to, removing a file by the spelling after one of them recreated it may remove a file of the same name in a directory of their choosing. Removing by the original path is safe | a route other than standard was taken |
-| `RECREATABLE_SPELLING` | `recreatable-spelling` | the spelling the kernel reports goes through a shared place (`/tmp` and the like). Removing a file by the spelling after another user saw and recreated it may remove a file of the same name in a directory of their choosing. Removing by the original path is safe | symlink-dir went through a shared place |
-| `CWD_RELATIVE` | `cwd-relative` | the spelling the kernel keeps is relative to the cwd. Removing or looking up by it after the cwd changed reaches another place (a danger the standard library has of its own). Removing by the original path made absolute is safe | a relative path went through standard (never for an abstract address) |
-| `FORKED` | `forked` | the side effects of a fork | never in sockat-py, which has no fork route |
+| `RESPELLED` | [`respelled`](#respelled) | the address the kernel reports is not the original path. The spelling may be seen by other users (Linux's `/proc/net/unix`), so where the process's cwd is a place others can write to, removing a file by the spelling after one of them recreated it may remove a file of the same name in a directory of their choosing. Removing by the original path is safe | a route other than standard was taken |
+| `RECREATABLE_SPELLING` | [`recreatable-spelling`](#recreatable-spelling) | the spelling the kernel reports goes through a shared place (`/tmp` and the like). Removing a file by the spelling after another user saw and recreated it may remove a file of the same name in a directory of their choosing. Removing by the original path is safe | symlink-dir went through a shared place |
+| `CWD_RELATIVE` | [`cwd-relative`](#cwd-relative) | the spelling the kernel keeps is relative to the cwd. Removing or looking up by it after the cwd changed reaches another place (a danger the standard library has of its own). Removing by the original path made absolute is safe | a relative path went through standard (never for an abstract address) |
+| `FORKED` | [`forked`](#forked) | the side effects of a fork | never in sockat-py, which has no fork route |
 
 - There is no order of size or inclusion between the names. The names are promised and only ever added to. Read a name you do not know as "something was lost"
 - `route` and `skipped` are for diagnosis, and their contents are not promised (routes are added and changed)
@@ -148,6 +148,70 @@ The last resort of `sockat.ex.bind(path, last_resort=True)`.
 - Through a place only the owner can write to, only the calling user can recreate the spelling, so after the symlink is removed the kernel's spelling names nothing
 - Through a shared place, after the symlink is removed another user can recreate the same spelling (the spelling is visible in Linux's `/proc/net/unix` and the like). Code that removes a file by the kernel's spelling may then remove a file of the same name in a directory of the other user's choosing. sockat's listener reports the original path, so asyncio's cleanup removes by the original path
 - A file name is reached up to `sun_path` − 1 − (the length of the place's spelling + 19) bytes (with `/tmp`, 84 on Linux, 80 on macOS / the BSDs)
+
+## What is lost
+
+What taking a route loses compared with the standard library ([the specification's "What is lost"](https://github.com/kawaz/sockat/blob/main/docs/SPEC.md#what-is-lost)). `losses` of `sockat.ex` is a sequence of these names ([What was lost](#what-was-lost)). The tests (`tests/test_docs.py`) read the code of the ways to avoid each out of this document and run it. `path` is the socket's path.
+
+### respelled
+
+- What happens: the address the kernel reports (seen by calling the standard implementation, as in `socket.socket.getsockname(listener)`) is a spelling that is not the original path ([What differs from the standard library for a long path](#what-differs-from-the-standard-library-for-a-long-path)). `getsockname()` / `getpeername()` of the sockets sockat returns report the original path
+- Watch out for: do not unlink / `stat` the file by the spelling the kernel reports. The random name R in the spelling has been removed, so normally it hits nothing, but the spelling may be visible to other users (Linux's `/proc/net/unix`). If the process's cwd is a place others can write to (`/tmp` etc.), after another user sees and recreates it, unlinking by that spelling may remove a same-named file in a directory that user chose
+- How to avoid: keep the original path and use it when removing. Use `discard()` of `sockat.ex.bind`
+
+```python
+import os
+
+import sockat
+import sockat.ex
+
+listener = sockat.bind(path)
+...
+listener.close()
+os.unlink(path)
+
+listener, discard, losses, route, skipped = sockat.ex.bind(path)
+...
+listener.close()
+discard()
+```
+
+### cwd-relative
+
+- What happens: the given relative path goes to the standard library unchanged, and the kernel keeps a relative spelling
+- Watch out for: unlinking / `stat`ing by that spelling (or by the given relative path) after the cwd changes hits another place. A hazard the standard library already has rather than one a route introduced, but it is reported
+- How to avoid: make the path absolute before the bind. Remove by the absolute path or `discard()` as well
+
+```python
+import os
+
+import sockat
+
+path = os.path.abspath(path)
+listener = sockat.bind(path)
+...
+listener.close()
+os.unlink(path)
+```
+
+### forked
+
+Never attached: sockat-py has no fork route.
+
+### recreatable-spelling
+
+- What happens: `sockat.ex.bind` with the last resort goes through [symlink-dir](#symlink-dir) in a shared place (`/tmp` etc.), and the spelling the kernel reports is `<place>/sockat.XXXXXXXXXX/<file name>`
+- Watch out for: the name is random, so it cannot be guessed in advance, but after the bind other users may see it (Linux's `/proc/net/unix`). If another user recreates it and then it is unlinked by that spelling, a same-named file in a directory the other user chose may be removed. The name's length is not the defense (the name is visible after the bind)
+- How to avoid: do not remove by the spelling the kernel reports; remove by the original path or `discard()`. If you prepare a place only the owner can write to (`$XDG_RUNTIME_DIR`, or a `$TMPDIR` only the owner can write to), that place is used first and this name is not attached
+
+```python
+import sockat.ex
+
+listener, discard, losses, route, skipped = sockat.ex.bind(path, last_resort=True)
+...
+listener.close()
+discard()
+```
 
 ## How a long path is reached
 
@@ -337,6 +401,96 @@ If the process dies between creating and removing them, the following are left.
 |---|---|
 | the place (`TMPDIR` or `/tmp`; for symlink-dir also `XDG_RUNTIME_DIR`) | `sockat.XXXXXXXXXX` (D, or the symlink of symlink-file or of symlink-dir) |
 | the socket's directory | `.sockat.XXXXXXXXXX` (D, or R of the form without D) |
+
+## Patterns not to use
+
+Ways of using sockat that remove an unrelated file or fail to remove the file ([the specification's "Patterns not to use"](https://github.com/kawaz/sockat/blob/main/docs/SPEC.md#patterns-not-to-use)). The tests (`tests/test_docs.py`) read the code of the ways to write it instead out of this document and run it. `path` is the socket's path.
+
+### Removing by the spelling the kernel reports
+
+- The pattern: unlinking / `stat`ing the socket file by the spelling the kernel reports, as in `os.unlink(socket.socket.getsockname(listener))`
+- Why not: for a long path it is not the original path ([respelled](#respelled)). Depending on the cwd or a shared place, it may hit another file someone recreated ([cwd-relative](#cwd-relative), [recreatable-spelling](#recreatable-spelling))
+- Instead: keep the original path and use it. `discard()` of `sockat.ex.bind`
+
+```python
+import os
+
+import sockat
+
+listener = sockat.bind(path)
+...
+listener.close()
+os.unlink(path)
+```
+
+### Binding with a relative path and removing by it after the cwd changes
+
+- The pattern: `sockat.bind("server.sock")`, then `os.chdir(...)`, then `os.unlink("server.sock")`
+- Why not: it hits a file in another place ([cwd-relative](#cwd-relative))
+- Instead: make the path absolute before the bind. `discard()`
+
+```python
+import os
+
+import sockat
+
+path = os.path.abspath(path)
+listener = sockat.bind(path)
+os.chdir("/")
+...
+listener.close()
+os.unlink(path)
+```
+
+### Relying on closing the listener to remove the socket file
+
+- The pattern: ending the cleanup with `listener.close()` alone
+- Why not: for a long path it is not removed, even in a language whose standard library removes it ([respelled](#respelled)). Python's standard library does not remove it even for a short path
+- Instead: `discard()`, or remove by the original path
+
+```python
+import sockat.ex
+
+listener, discard, losses, route, skipped = sockat.ex.bind(path)
+...
+listener.close()
+discard()
+```
+
+### Relying on discard() to close the listener too
+
+- The pattern: calling `discard()` alone without closing the listener
+- Why not: `discard()` only removes the file (the hub's [DR-0015](https://github.com/kawaz/sockat/blob/main/docs/decisions/DR-0015-ex-with-last-resort-and-diagnostics.md), in Japanese)
+- Instead: close the listener yourself
+
+```python
+import sockat.ex
+
+listener, discard, losses, route, skipped = sockat.ex.bind(path)
+...
+discard()
+listener.close()
+```
+
+### Branching on the strings of route, skipped or reason
+
+- The pattern: branching on the strings of `route`, `skipped` or `reason` of `sockat.ex`, as in `if route == "symlink-dir":`
+- Why not: they are for diagnosis and promise nothing (routes are added and changed)
+- Instead: branch on `losses`
+
+```python
+import sockat.ex
+
+listener, discard, losses, route, skipped = sockat.ex.bind(path)
+if sockat.ex.Loss.RECREATABLE_SPELLING in losses:
+    ...
+listener.close()
+discard()
+```
+
+### Reaping children with waitpid(-1) in another thread of a program that goes through a fork
+
+Never happens: sockat-py has no fork route ([forked](#forked)).
 
 ## Errors
 

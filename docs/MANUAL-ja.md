@@ -100,10 +100,10 @@ if sockat.ex.Loss.RECREATABLE_SPELLING in losses:
 
 | `Loss` | 名前 | 失うもの | 付く時 |
 |---|---|---|---|
-| `RESPELLED` | `respelled` | カーネルが返すアドレスが元のパスでない。綴りは他の利用者に見えうる (Linux の `/proc/net/unix`) ので、プロセスの cwd が他人も書ける場所だと、相手が作り直した後にその綴りで消すと相手の選んだディレクトリの同じ名前のファイルを消しうる。元のパスで消せば当たらない | standard 以外の経路を通った |
-| `RECREATABLE_SPELLING` | `recreatable-spelling` | カーネルが返す綴りが共有の置き場 (`/tmp` 等) を通る。他の利用者が綴りを見て作り直した後にその綴りで消すと、相手の選んだディレクトリの同じ名前のファイルを消しうる。元のパスで消せば当たらない | symlink-dir が共有の置き場を通った |
-| `CWD_RELATIVE` | `cwd-relative` | カーネルが覚えた綴りが cwd からの相対パス。cwd を変えた後にその綴りで消す・引くと別の場所に当たる (標準が元から持つ危険)。元のパスを絶対パスにして消せば当たらない | 相対パスで standard を通った (abstract のアドレスには付かない) |
-| `FORKED` | `forked` | fork の副作用 | sockat-py には fork の経路が無いので付かない |
+| `RESPELLED` | [`respelled`](#respelled) | カーネルが返すアドレスが元のパスでない。綴りは他の利用者に見えうる (Linux の `/proc/net/unix`) ので、プロセスの cwd が他人も書ける場所だと、相手が作り直した後にその綴りで消すと相手の選んだディレクトリの同じ名前のファイルを消しうる。元のパスで消せば当たらない | standard 以外の経路を通った |
+| `RECREATABLE_SPELLING` | [`recreatable-spelling`](#recreatable-spelling) | カーネルが返す綴りが共有の置き場 (`/tmp` 等) を通る。他の利用者が綴りを見て作り直した後にその綴りで消すと、相手の選んだディレクトリの同じ名前のファイルを消しうる。元のパスで消せば当たらない | symlink-dir が共有の置き場を通った |
+| `CWD_RELATIVE` | [`cwd-relative`](#cwd-relative) | カーネルが覚えた綴りが cwd からの相対パス。cwd を変えた後にその綴りで消す・引くと別の場所に当たる (標準が元から持つ危険)。元のパスを絶対パスにして消せば当たらない | 相対パスで standard を通った (abstract のアドレスには付かない) |
+| `FORKED` | [`forked`](#forked) | fork の副作用 | sockat-py には fork の経路が無いので付かない |
 
 - 名前の間に大小や包含の関係は無い。名前は約束で、変えずに足すだけ。知らない名前は「何かを失った」とだけ読む
 - `route`・`skipped` は診断用で、中身を約束しない (経路は増えたり変わったりする)
@@ -148,6 +148,70 @@ except OSError as e:
 - 持ち主だけが書ける置き場を通った時、綴りを作り直せるのは自分だけなので、symlink を消した後のカーネルの綴りは何にも当たらない
 - 共有の置き場を通った時、symlink を消した後に他の利用者が同じ綴りを作り直せる (Linux の `/proc/net/unix` 等で綴りが見える)。カーネルの綴りでファイルを消す処理は、相手の選んだディレクトリの同じ名前のファイルを消しうる。sockat の listener は元のパスを返すので、asyncio の後始末は元のパスで消す
 - 届くファイル名は `sun_path` − 1 − (置き場の綴りの長さ + 19) バイトまで (`/tmp` なら Linux 84、macOS / BSD 80)
+
+## 失うもの
+
+経路を通ったことで、標準と比べて何を失うか ([仕様の「失うもの」](https://github.com/kawaz/sockat/blob/main/docs/SPEC-ja.md#失うもの))。`sockat.ex` の `losses` はこの名前の並びで返す ([何を失ったか](#何を失ったか))。下の避け方のコードは試験 (`tests/test_docs.py`) がこの文書から読み出して動かす。`path` はソケットのパス。
+
+### respelled
+
+- 起きること: カーネルが返すアドレス (`socket.socket.getsockname(listener)` のように標準の実装を呼ぶと見える) が元のパスでない綴りになる ([長いパスで標準と違う点](#長いパスで標準と違う点))。sockat が返すソケットの `getsockname()` / `getpeername()` は元のパスを返す
+- 注意すること: カーネルが返す綴りでファイルを unlink / stat しない。綴りの中の乱数の名前 R は消してあるので普段は何にも当たらないが、綴りは他の利用者に見えうる (Linux の `/proc/net/unix`)。プロセスの cwd が他人も書ける場所 (`/tmp` 等) だと、相手が見て作り直した後にその綴りで unlink すると、相手の選んだディレクトリの同じ名前のファイルを消しうる
+- 避け方: 元のパスを持っておき、消す時はそれを使う。`sockat.ex.bind` の `discard()` を使う
+
+```python
+import os
+
+import sockat
+import sockat.ex
+
+listener = sockat.bind(path)
+...
+listener.close()
+os.unlink(path)
+
+listener, discard, losses, route, skipped = sockat.ex.bind(path)
+...
+listener.close()
+discard()
+```
+
+### cwd-relative
+
+- 起きること: 渡した相対パスがそのまま標準に渡り、カーネルが相対の綴りを覚える
+- 注意すること: cwd を変えた後に、その綴り (や渡した相対パス) で unlink / stat すると別の場所に当たる。sockat が経路で失わせたものでなく標準が元から持つ危険だが、知らせる
+- 避け方: bind の前にパスを絶対パスにする。消す時も絶対パスか `discard()` を使う
+
+```python
+import os
+
+import sockat
+
+path = os.path.abspath(path)
+listener = sockat.bind(path)
+...
+listener.close()
+os.unlink(path)
+```
+
+### forked
+
+sockat-py には fork の経路が無いので付かない。
+
+### recreatable-spelling
+
+- 起きること: 最終手段を使う `sockat.ex.bind` が共有の置き場 (`/tmp` 等) の [symlink-dir](#symlink-dir) を通り、カーネルが返す綴りが `<置き場>/sockat.XXXXXXXXXX/<ファイル名>` になる
+- 注意すること: 名前は乱数なので事前には当てられないが、bind の後は他の利用者に見えうる (Linux の `/proc/net/unix`)。他の利用者がそれを作り直した後にその綴りで unlink すると、相手の選んだディレクトリの同じ名前のファイルを消しうる。名前の長さは防御でない (名前は bind の後に見える)
+- 避け方: カーネルが返す綴りで消さず、元のパスか `discard()` で消す。持ち主だけが書ける置き場 (`$XDG_RUNTIME_DIR` や、持ち主だけが書ける `$TMPDIR`) を用意すれば、そちらが先に使われてこの名前は付かない
+
+```python
+import sockat.ex
+
+listener, discard, losses, route, skipped = sockat.ex.bind(path, last_resort=True)
+...
+listener.close()
+discard()
+```
 
 ## 長いパスへの届き方
 
@@ -337,6 +401,96 @@ sticky でなく他人も書けるソケットのディレクトリでは、D �
 |---|---|
 | 置き場 (`TMPDIR` か `/tmp`。symlink-dir は `XDG_RUNTIME_DIR` も) | `sockat.XXXXXXXXXX` (D か、symlink-file や symlink-dir の symlink) |
 | ソケットのディレクトリ | `.sockat.XXXXXXXXXX` (D か、D 無しの形の R) |
+
+## 使ってはいけない書き方
+
+sockat を使う時に、無関係なファイルを消したり、ファイルを消し損ねたりする書き方 ([仕様の「使ってはいけない書き方」](https://github.com/kawaz/sockat/blob/main/docs/SPEC-ja.md#使ってはいけない書き方))。代わりの書き方のコードは試験 (`tests/test_docs.py`) がこの文書から読み出して動かす。`path` はソケットのパス。
+
+### カーネルが返す綴りで消す
+
+- 書き方: `os.unlink(socket.socket.getsockname(listener))` のように、カーネルが返す綴りでソケットのファイルを unlink / stat する
+- なぜいけないか: 長いパスでは元のパスでない ([respelled](#respelled))。cwd や共有の置き場しだいで、作り直された別のファイルに当たりうる ([cwd-relative](#cwd-relative)、[recreatable-spelling](#recreatable-spelling))
+- 代わりに: 元のパスを持っておいて使う。`sockat.ex.bind` の `discard()`
+
+```python
+import os
+
+import sockat
+
+listener = sockat.bind(path)
+...
+listener.close()
+os.unlink(path)
+```
+
+### 相対パスで bind し、cwd を変えた後にその相対パスで消す
+
+- 書き方: `sockat.bind("server.sock")` の後に `os.chdir(...)` し、`os.unlink("server.sock")` で消す
+- なぜいけないか: 別の場所のファイルに当たる ([cwd-relative](#cwd-relative))
+- 代わりに: bind の前に絶対パスにする。`discard()`
+
+```python
+import os
+
+import sockat
+
+path = os.path.abspath(path)
+listener = sockat.bind(path)
+os.chdir("/")
+...
+listener.close()
+os.unlink(path)
+```
+
+### listener を閉じればソケットのファイルが消えると当てにする
+
+- 書き方: `listener.close()` だけで後始末を終える
+- なぜいけないか: 長いパスでは、標準が消す言語でも消えない ([respelled](#respelled))。Python の標準は短いパスでも消さない
+- 代わりに: `discard()` か、元のパスで消す
+
+```python
+import sockat.ex
+
+listener, discard, losses, route, skipped = sockat.ex.bind(path)
+...
+listener.close()
+discard()
+```
+
+### discard() で listener も閉じると当てにする
+
+- 書き方: `discard()` だけを呼んで listener を閉じない
+- なぜいけないか: `discard()` はファイルを消すだけ (ハブの [DR-0015](https://github.com/kawaz/sockat/blob/main/docs/decisions/DR-0015-ex-with-last-resort-and-diagnostics.md))
+- 代わりに: listener は自分で閉じる
+
+```python
+import sockat.ex
+
+listener, discard, losses, route, skipped = sockat.ex.bind(path)
+...
+discard()
+listener.close()
+```
+
+### route・skipped・reason の文字列で分岐する
+
+- 書き方: `if route == "symlink-dir":` のように、`sockat.ex` の `route`・`skipped`・`reason` の文字列で分岐する
+- なぜいけないか: 診断用で、中身を約束しない (経路は増えたり変わったりする)
+- 代わりに: `losses` で分岐する
+
+```python
+import sockat.ex
+
+listener, discard, losses, route, skipped = sockat.ex.bind(path)
+if sockat.ex.Loss.RECREATABLE_SPELLING in losses:
+    ...
+listener.close()
+discard()
+```
+
+### fork を通るプログラムで、他のスレッドが waitpid(-1) で子を刈る
+
+sockat-py には fork の経路が無いので起きない ([forked](#forked))。
 
 ## エラー
 

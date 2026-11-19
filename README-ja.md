@@ -113,6 +113,29 @@ sock, losses, route, skipped = sockat.ex.connect(path)
 - 失敗した時は、例外 (型と `errno` は既定の呼び出しと同じ) に `skipped` と `route` の属性を付ける
 - 詳細は [docs/MANUAL-ja.md](./docs/MANUAL-ja.md#sockatex)
 
+## 失うもの
+
+`sockat.ex` の `losses` に入る名前と避け方。起きること・注意すること・避け方の推奨コードは [docs/MANUAL-ja.md](./docs/MANUAL-ja.md#失うもの) にある (推奨コードは試験として動かしている)。
+
+| 名前 | 起きること | 避け方 |
+|---|---|---|
+| [respelled](./docs/MANUAL-ja.md#respelled) | 長いパスで、カーネルが返すアドレスが元のパスでない | 元のパス (`os.unlink(path)`) か `discard()` で消す |
+| [cwd-relative](./docs/MANUAL-ja.md#cwd-relative) | 相対パスで bind すると、カーネルが cwd からの相対の綴りを覚える | bind の前に `os.path.abspath(path)` で絶対パスにする |
+| [forked](./docs/MANUAL-ja.md#forked) | sockat-py には fork の経路が無いので付かない | — |
+| [recreatable-spelling](./docs/MANUAL-ja.md#recreatable-spelling) | 最終手段の symlink-dir が共有の置き場を通り、綴りを他の利用者が作り直せる | 元のパスか `discard()` で消す。持ち主だけが書ける置き場 (`$XDG_RUNTIME_DIR` 等) を用意する |
+
+## 使ってはいけない書き方
+
+無関係なファイルを消したり、ファイルを消し損ねたりする書き方。詳細と代わりの書き方のコードは [docs/MANUAL-ja.md](./docs/MANUAL-ja.md#使ってはいけない書き方) にある。
+
+| 書き方 | 代わりに |
+|---|---|
+| `os.unlink(socket.socket.getsockname(listener))` (カーネルが返す綴りで消す) | `os.unlink(path)` (元のパス) か `discard()` |
+| `sockat.bind("server.sock")` → `os.chdir(...)` → `os.unlink("server.sock")` | bind の前に `os.path.abspath(path)`。`discard()` |
+| `listener.close()` だけで後始末を終える | `discard()` か `os.unlink(path)` |
+| `discard()` だけを呼び listener を閉じない | listener も `close()` する |
+| `if route == "symlink-dir":` (`route`・`skipped`・`reason` で分岐する) | `if sockat.ex.Loss.RECREATABLE_SPELLING in losses:` (`losses` で分岐する) |
+
 ## asyncio
 
 ```python
