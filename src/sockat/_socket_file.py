@@ -1,5 +1,5 @@
 """The socket file a bind made, remembered so that it can be removed later
-without removing anything else (``bind_ex``, the SPEC's ``_ex``)."""
+without removing anything else (:func:`sockat.ex.bind`, the SPEC's ``_ex``)."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from contextvars import ContextVar
 
 
 class _Recorder:
-    """What ``bind_ex`` asks the bind to remember: the path given, and, once
+    """What :func:`sockat.ex.bind` asks the bind to remember: the path given, and, once
     the bind has gone through, ``discard`` for the file it made."""
 
     def __init__(self, path: str | bytes) -> None:
@@ -19,7 +19,7 @@ class _Recorder:
         self.discard: Callable[[], None] | None = None
 
 
-_recording: ContextVar[_Recorder | None] = ContextVar("sockat_bind_ex_recording", default=None)
+_recording: ContextVar[_Recorder | None] = ContextVar("sockat_ex_bind_recording", default=None)
 
 
 @contextlib.contextmanager
@@ -37,7 +37,7 @@ def recording(path: str | bytes) -> Iterator[_Recorder]:
 
 def bound() -> None:
     """Called by every route right after its bind went through (before the
-    listen): when a ``bind_ex`` is recording, remember the socket file now,
+    listen): when :func:`sockat.ex.bind` is recording, remember the socket file now,
     so a file put at the path after the bind returned cannot be remembered
     in its place. A failure to remember is raised, and the route closes the
     socket (a ``discard`` that could not remove the file must not look like

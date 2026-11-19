@@ -8,14 +8,6 @@ socket and call ``bind`` + ``listen`` / ``connect`` on it::
     listener = sockat.bind("/a/very/deep/directory/.../server.sock")
     client = sockat.connect("/a/very/deep/directory/.../server.sock")
 
-:func:`bind_ex` also gives a function that removes the socket file it made,
-and nothing else::
-
-    listener, discard = sockat.bind_ex("/a/very/deep/directory/.../server.sock")
-    ...
-    listener.close()
-    discard()
-
 * The return value is a :class:`socket.socket`. For a long path it is a
   subclass whose ``getsockname()`` (listener, accepted sockets) and
   ``getpeername()`` (connected stream) report the path given, as the
@@ -38,25 +30,24 @@ the socket file (it does on macOS, whatever the file name; not on Linux), a
 file name longer than the routes through D carry (or, on systems where they
 have no means, any long path).
 
-:mod:`sockat.any` (imported only when asked for:
-``from sockat.any import bind_any``) binds even where :func:`bind` is
-``ENAMETOOLONG``, by a route that loses something.
+:mod:`sockat.ex` (imported only when asked for: ``import sockat.ex``) has
+the same three calls with what they went through: the route taken, what it
+lost and the routes skipped, a function that removes the socket file the
+bind made and nothing else, and, when asked, a last resort that reaches the
+path even by losing something.
 """
 
 from __future__ import annotations
 
-import os
 import socket
 import sys
-from collections.abc import Callable
 
 if sys.platform == "win32":  # pragma: no cover
     raise ImportError("sockat supports Unix systems only")
 
-from . import _socket_file
 from ._route import BIND, CONNECT, CONNECT_NONBLOCKING, StrOrBytesPath, run
 
-__all__ = ["bind", "bind_ex", "connect", "connect_nonblocking"]
+__all__ = ["bind", "connect", "connect_nonblocking"]
 
 
 def bind(path: StrOrBytesPath) -> socket.socket:
@@ -69,36 +60,6 @@ def bind(path: StrOrBytesPath) -> socket.socket:
     library); remove it with ``os.unlink(path)``.
     """
     return run(BIND, path)[0]
-
-
-def bind_ex(path: StrOrBytesPath) -> tuple[socket.socket, Callable[[], None]]:
-    """:func:`bind`, and a function ``discard`` that removes the socket file
-    the bind made: ``listener, discard = sockat.bind_ex(path)``.
-
-    Right after the bind goes through, before the listener is returned, the
-    realpath of the socket file and its ``(st_dev, st_ino)`` are remembered
-    (when that fails, the listener is closed and the error raised). ``discard()`` removes the file at
-    that realpath only while it is still that file: when it is gone, or has
-    been replaced by another file, it does nothing. It may be called any
-    number of times. It does not close the listener (close it yourself, or
-    let asyncio close it when it serves it). Errors other than the file being
-    gone are raised as :class:`OSError`.
-
-    For a long path, the standard library's own ways of removing the socket
-    file (asyncio's server cleanup reads the listener's address) work too,
-    since the listener reports the path given; ``discard`` is the way that
-    does not depend on the reader.
-    """
-    # The path is read once (os.fspath), and that one value is what is bound
-    # and remembered: a path-like object may answer differently each time.
-    spelled = os.fspath(path)
-    with _socket_file.recording(spelled) as recorder:
-        listener = bind(spelled)
-    discard = recorder.discard
-    if discard is None:  # every route records right after its bind
-        listener.close()
-        raise RuntimeError("the bind did not record the socket file it made")
-    return listener, discard
 
 
 def connect(path: StrOrBytesPath) -> socket.socket:

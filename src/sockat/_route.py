@@ -50,15 +50,16 @@ class Request:
     once: Linux answers ``EAGAIN``, macOS ``ECONNREFUSED``. A Unix-domain
     connect completes or fails within the call even on a nonblocking socket
     (neither Linux nor XNU answers ``EINPROGRESS``)."""
-    at_any_cost: bool = False
-    """Reach the path even by losing something (``bind_any``, the SPEC's any
-    operations): where every route of the default bind is unusable (and it
-    would answer ``ENAMETOOLONG``), the bind goes on to the symlink route
-    (:func:`symlink_dir_route`)."""
+    last_resort: bool = False
+    """Use the last resort (the SPEC's ``_ex`` with the last resort on):
+    reach the path even by losing something where every route of the
+    default order is unusable (and it would answer ``ENAMETOOLONG``). A
+    bind goes on to symlink-dir (:func:`symlink_dir_route`); a connect to
+    fork-cwd-direct, which this implementation does not have, so it is noted
+    as skipped and the connect answers ``ENAMETOOLONG`` all the same."""
 
 
 BIND = Request(Op.BIND)
-BIND_ANY = Request(Op.BIND, at_any_cost=True)
 CONNECT = Request(Op.CONNECT)
 CONNECT_NONBLOCKING = Request(Op.CONNECT, nonblocking=True)
 
@@ -66,7 +67,7 @@ CONNECT_NONBLOCKING = Request(Op.CONNECT, nonblocking=True)
 class Route(Enum):
     """Which route a bind / connect went by, named as the SPEC names it (its
     "route names"; the value is that name). For diagnosis only: the routes
-    may be added to or changed. Only ``bind_any`` shows it (the value)."""
+    may be added to or changed. Only :mod:`sockat.ex` shows it (the value)."""
 
     STANDARD = "standard"
     """The path itself, through the ``socket`` module."""
@@ -117,7 +118,7 @@ class Route(Enum):
     follows a symlink in the last component of a bind (every system but
     Linux / Android, told at run time)."""
     SYMLINK_DIR = "symlink-dir"
-    """The last resort of ``bind_any``: a short temporary symlink to the
+    """The last resort of a bind (:func:`sockat.ex.bind`): a short temporary symlink to the
     socket's directory in a place for it, the bind through
     ``<place>/sockat.XXXXXXXXXX/<name>``."""
     AT_DIRECT = "at-direct"
@@ -204,7 +205,7 @@ class Config:
     go, in the order tried: ``TMPDIR`` when it is set to an absolute path,
     then ``/tmp``."""
     bind_link_places: tuple[bytes, ...] = ()
-    """Where ``bind_any``'s temporary symlink may go, the candidates in the
+    """Where symlink-dir's temporary symlink (a bind's last resort) may go, the candidates in the
     order given: ``XDG_RUNTIME_DIR`` and ``TMPDIR`` when they are set to an
     absolute path, then ``/tmp``, each spelling once. Which of them are
     tried first is decided by what they are (:func:`symlink_dir_route`)."""
@@ -249,7 +250,7 @@ class Config:
         not ``/tmp`` itself (a relative one would make the link's place
         depend on the cwd), then ``/tmp``.
 
-        Places for ``bind_any``'s symlink: ``XDG_RUNTIME_DIR``, then
+        Places for symlink-dir's symlink: ``XDG_RUNTIME_DIR``, then
         ``TMPDIR``, when absolute, then ``/tmp``; a place spelled as an
         earlier one is left out."""
         first = tmpdir or b"/tmp"
@@ -379,13 +380,13 @@ def routes(req: Request, path: bytes, cfg: Config, trail: Trail) -> Reached:
        D reached by its fd through a thread's own cwd (Linux, Apple) or
        ``bindat`` (FreeBSD), then through /proc (Linux); where they cannot be
        used, :func:`bind_past_d` (the form without D where D could be made
-       nowhere, and for ``bind_any`` the symlink route);
+       nowhere, and with the last resort symlink-dir);
     3. a connect: the SPEC's connect order for this system
        (:func:`connect_routes`), the routes that need neither a write nor a
        thread first.
 
-    A bind through any of them loses :attr:`Loss.RESPELLED` (``bind_any``'s
-    symlink in a shared place :attr:`Loss.RECREATABLE_SPELLING` too); a
+    A bind through any of them loses :attr:`Loss.RESPELLED` (symlink-dir
+    in a shared place :attr:`Loss.RECREATABLE_SPELLING` too); a
     connect loses nothing. The routes are noted in ``trail`` from the
     standard on (it takes no path this long), once the directory has been
     looked up: a failure before that (no such directory, ...) notes nothing
@@ -460,7 +461,7 @@ def bind_past_d(
     carried the bind, the SPEC tries the fork routes, which this
     implementation does not have (DR-0001): the default bind answers what a
     plain bind of a path longer than ``sun_path`` answers, ``ENAMETOOLONG``
-    (hub QUESTIONS D12-Q3), and ``bind_any`` (``req.at_any_cost``) goes on to
+    (hub QUESTIONS D12-Q3), and a bind with the last resort (``req.last_resort``) goes on to
     the symlink route (:func:`symlink_dir_route`), whose ``ENAMETOOLONG``
     ends it where no place carries it either."""
     trail.skip(Route.FORK_CWD, NO_FORK)
@@ -469,7 +470,7 @@ def bind_past_d(
         if done is not None:
             return Reached(*done, (Loss.RESPELLED,), tuple(trail.skipped))
         trail.skip(Route.FORK_CWD_SOCKDIR, NO_FORK)
-    if req.at_any_cost:
+    if req.last_resort:
         trail.attempt(Route.SYMLINK_DIR)
         done_any = symlink_dir_route(req, real_dir, name, cfg.bind_link_places)
         if done_any is not None:
@@ -1314,8 +1315,10 @@ def connect_routes(call: ConnectCall, trail: Trail) -> Reached:
     is the outcome, raised with the route noted as the one that failed), as
     skipped with why when it cannot be used. Past the last one:
     ``ENAMETOOLONG`` (the SPEC's answer for ``connect`` where only the fork
-    route would reach). D, when a route made it, is removed again whatever
-    the outcome.
+    route would reach), with the last resort fork-cwd-direct noted as
+    skipped first when the request asks for it (``req.last_resort``: this
+    implementation has no fork route). D, when a route made it, is removed
+    again whatever the outcome.
 
     The spellings carry no random part beyond R (a connected socket is not
     bound, so its spelling is left nowhere), and a connect loses nothing."""
@@ -1327,6 +1330,8 @@ def connect_routes(call: ConnectCall, trail: Trail) -> Reached:
             if isinstance(outcome, socket.socket):
                 return Reached(outcome, route, (), tuple(trail.skipped))
             trail.skip(route, outcome)
+        if call.req.last_resort:
+            trail.skip(Route.FORK_CWD_DIRECT, NO_FORK)
         raise _enametoolong()
     finally:
         call.close()
@@ -1705,7 +1710,7 @@ def bind_symlink_file(req: Request, path: bytes, cfg: Config) -> socket.socket |
 def symlink_dir_route(
     req: Request, real_dir: bytes, name: bytes, places: tuple[bytes, ...]
 ) -> tuple[socket.socket, tuple[Loss, ...]] | None:
-    """``bind_any``'s symlink route, its last: bind ``<place>/sockat.XXXXXXXXXX/<name>``
+    """symlink-dir, a bind's last resort: bind ``<place>/sockat.XXXXXXXXXX/<name>``
     through a symlink to ``real_dir`` (the realpath of the socket's
     directory) made in one of ``places`` and removed again whatever the
     outcome.
