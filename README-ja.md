@@ -52,10 +52,10 @@ pip install sockat
 
 | OS | `bind` | `connect` / `connect_nonblocking` |
 |---|---|---|
-| Linux / Android (`/proc` を使える) | thread-cwd → proc | thread-cwd → proc → proc-direct → proc-held → symlink |
-| Linux / Android (`/proc` を使えない) | thread-cwd | thread-cwd → relative → symlink |
-| FreeBSD | at | at → at-direct |
-| macOS / iOS | thread-cwd | thread-cwd → relative → widened → symlink |
+| Linux / Android (`/proc` を使える) | thread-cwd → proc | proc-direct → thread-cwd → proc → proc-held → symlink |
+| Linux / Android (`/proc` を使えない) | thread-cwd | relative → thread-cwd → symlink |
+| FreeBSD | at | at-direct → at |
+| macOS / iOS | thread-cwd | relative → widened → thread-cwd → symlink |
 | NetBSD / OpenBSD / illumos / その他の Unix | なし (`ENAMETOOLONG`) | relative → symlink |
 | Windows | 対象外 (import で `ImportError`) | 同左 |
 
@@ -75,6 +75,7 @@ pip install sockat
 | fork、fork-sockdir、fork-direct | **無い** (仕様の fork の経路は作っていない。仕様の `connect_any` 系も無い) |
 
 - どの経路も呼び出し元のプロセスとスレッドの cwd を変えないので、マルチスレッドのプログラムから使える
+- connect は、書き込み (D・R・symlink を作る) もスレッドも要らない経路 (proc-direct、relative、widened、at-direct) を先に試し、D を作る経路とスレッドを立てる経路をその後にする。D は 1 回の connect で 1 度だけ作り、D を使う経路 (thread-cwd、at、proc、proc-held) で共有する。どこにも作れなければ、D を使う経路はどれも飛ばす
 - bind はディレクトリの深さによらず、ファイル名が 96 バイト (macOS / FreeBSD は 92、proc はおよそ 79) まで届く (`R/` の分、標準より短い)。D をどこにも作れない時は D 無しの形で 88 バイト (macOS / FreeBSD は 84、proc-sockdir はおよそ 72) まで
 - NetBSD / OpenBSD / illumos と、D を通す経路の手段を使えない環境 (seccomp の filter の下で `/proc` の無い Linux 等) では、長いパスの `bind` は `ENAMETOOLONG` になる (仕様では fork の経路で届く所。Python には fork の経路が無い。ハブの D12-Q3 で kawaz 裁定)。そこでも届かせたい時は `bind_any` ([後述](#何かを失ってでも届く-bind))
 - どの経路にも収まらないパスは、標準で長すぎるパスと同じく `ENAMETOOLONG` (errno 付きの `OSError`) になる

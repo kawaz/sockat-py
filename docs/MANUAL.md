@@ -144,12 +144,14 @@ For a longer path, the socket's directory is looked up first (`ENOENT` if it doe
 
 | OS | `bind` | `connect` / `connect_nonblocking` |
 |---|---|---|
-| Linux / Android (`/proc` usable) | [thread-cwd](#the-routes-through-d) → [proc](#the-routes-through-d) | [thread-cwd](#the-routes-through-d) → [proc](#the-routes-through-d) → [proc-direct](#fallback-routes) → [proc-held](#fallback-routes) → [symlink](#fallback-routes) |
-| Linux / Android (`/proc` not usable) | [thread-cwd](#the-routes-through-d) | [thread-cwd](#the-routes-through-d) → [relative](#fallback-routes) → [symlink](#fallback-routes) |
-| FreeBSD | [at](#the-routes-through-d) | [at](#the-routes-through-d) → [at-direct](#fallback-routes) |
-| macOS / iOS | [thread-cwd](#the-routes-through-d) | [thread-cwd](#the-routes-through-d) → [relative](#fallback-routes) → [widened](#fallback-routes) → [symlink](#fallback-routes) |
-| NetBSD / OpenBSD / illumos / other Unix | none (`ENAMETOOLONG`) | [relative](#fallback-routes) → [symlink](#fallback-routes) |
+| Linux / Android (`/proc` usable) | [thread-cwd](#the-routes-through-d) → [proc](#the-routes-through-d) | [proc-direct](#routes-only-a-connect-takes) → [thread-cwd](#the-routes-through-d) → [proc](#the-routes-through-d) → [proc-held](#routes-only-a-connect-takes) → [symlink](#routes-only-a-connect-takes) |
+| Linux / Android (`/proc` not usable) | [thread-cwd](#the-routes-through-d) | [relative](#routes-only-a-connect-takes) → [thread-cwd](#the-routes-through-d) → [symlink](#routes-only-a-connect-takes) |
+| FreeBSD | [at](#the-routes-through-d) | [at-direct](#routes-only-a-connect-takes) → [at](#the-routes-through-d) |
+| macOS / iOS | [thread-cwd](#the-routes-through-d) | [relative](#routes-only-a-connect-takes) → [widened](#routes-only-a-connect-takes) → [thread-cwd](#the-routes-through-d) → [symlink](#routes-only-a-connect-takes) |
+| NetBSD / OpenBSD / illumos / other Unix | none (`ENAMETOOLONG`) | [relative](#routes-only-a-connect-takes) → [symlink](#routes-only-a-connect-takes) |
 
+- A connect tries the routes that need neither a write (creating D, R or a symlink) nor a thread (proc-direct, relative, widened, at-direct) first, and the routes that create D or start a thread after them. The routes that need neither are fast, and relative and widened reach further than the routes through D in some cases
+- D is created at most once per call and shared by the routes that use it (thread-cwd, at, proc, proc-held). When it can be created nowhere, every route that uses it is skipped as unusable, and D is not tried again
 - When D can be created nowhere, a bind tries the same means in [the form without D](#the-form-without-d) (thread-cwd-sockdir, at-sockdir, proc-sockdir)
 - The specification's fork routes (fork, fork-sockdir, fork-direct) are not built. A child forked from Python runs Python, so it cannot satisfy the specification's requirement that the child's span be async-signal-safe ([DR-0001](./decisions/DR-0001-python-port-design.md)). Where the specification has a bind go on to fork, the bind gets `ENAMETOOLONG` (ruled by kawaz in the hub's D12-Q3). To reach the path even there, use [`bind_any`](#bind_any)
 - A path that no route in the order reaches gets `ENAMETOOLONG`
@@ -179,7 +181,7 @@ thread-cwd, at and proc.
 
 - Whether the place is safe (sticky and the like) and how long it is do not matter. D is held by its fd, and the place does not appear in the spelling
 - D is opened `O_PATH` on Linux, `O_SEARCH` on macOS (both open even when a umask took the owner's read bit off), `O_RDONLY` elsewhere
-- When D can be created nowhere, a bind goes on to [the form without D](#the-form-without-d), a connect to [the fallback routes](#fallback-routes)
+- When D can be created nowhere, a bind goes on to [the form without D](#the-form-without-d), and a connect skips the routes that use D and goes on to the next route in its order
 
 #### Means
 
@@ -205,14 +207,14 @@ Only a bind tries it, when D can be created nowhere. The routes are thread-cwd-s
 - When the socket's directory cannot be opened, no means can be used, or the spelling does not fit, nothing is created and the bind gets `ENAMETOOLONG`. So does a bind for which R cannot be created (16 name collisions in a row, and the like)
 - When D could be created but no means could be used, this form is not tried and the bind gets `ENAMETOOLONG`
 
-### Fallback routes
+### Routes only a connect takes
 
-Only connects try these, in the order per OS, when the routes through D cannot be used (no means, D cannot be created, the file name does not fit).
+Only connects use these routes. They are tried in the order per OS (the table in [how a long path is reached](#how-a-long-path-is-reached)), side by side with the routes through D.
 
 | Route | How | When it can be used |
 |---|---|---|
 | proc-direct | `/proc/self/fd/<fd>/<file name>` with the fd of the socket's directory, passed to the standard library | Linux / Android. The socket's directory can be opened, and the spelling is at most 107 bytes (a file name of up to about 90) |
-| proc-held | create the same D as the routes through D, create a symlink `s` to the socket file inside it, connect to `/proc/self/fd/<fd of D>/s`, then remove them | Linux / Android. D can be created somewhere ([DR-0002](./decisions/DR-0002-unsafe-base-held-by-fd.md), in Japanese) |
+| proc-held | in the D shared with the routes through D (created if there is none yet), create a symlink `s` to the socket file, connect to `/proc/self/fd/<fd of D>/s`, then remove them | Linux / Android. D can be created somewhere and `s` in it ([DR-0002](./decisions/DR-0002-unsafe-base-held-by-fd.md), in Japanese) |
 | relative | pass the path relative to the cwd to the standard library. Only the string is rewritten; there is no `chdir` | the path given is absolute, and the relative path is a length the standard library accepts |
 | widened | pass the original path (failing that, the relative path) to libc's `connect(2)` through ctypes in a sockaddr that carries up to 253 bytes past `sun_path` | macOS / iOS. The path is at most 253 bytes, and the kernel accepts it |
 | symlink | create `sockat.XXXXXXXXXX` pointing to the socket file in a place, pass it, and remove it at once | a safe place exists and the spelling fits (on macOS up to 253 bytes with the widened sockaddr) |
@@ -237,13 +239,13 @@ When a path longer than the standard library accepts is `ENAMETOOLONG` (given th
 | OS | `bind` | `connect` / `connect_nonblocking` |
 |---|---|---|
 | Linux / Android (`/proc` usable) | file name > 96 (about 79 when thread-cwd cannot be used) | reached (proc-held) |
-| Linux / Android (`/proc` not usable) | file name > 96, or thread-cwd cannot be used | the routes through D cannot be used (file name > 96 or thread-cwd unusable), relative > 107, and symlink cannot be used |
+| Linux / Android (`/proc` not usable) | file name > 96, or thread-cwd cannot be used | relative > 107, thread-cwd cannot be used (file name > 96 or thread-cwd unusable), and symlink cannot be used |
 | FreeBSD | file name > 92 | file name > 103 |
-| macOS / iOS | file name > 92, or thread-cwd cannot be used | the routes through D cannot be used (file name > 92 or thread-cwd unusable), both the original and the relative path > 253, and symlink cannot be used |
+| macOS / iOS | file name > 92, or thread-cwd cannot be used | both the original and the relative path > 253, thread-cwd cannot be used (file name > 92 or thread-cwd unusable), and symlink cannot be used |
 | NetBSD / OpenBSD | every long path | relative > 103, and symlink cannot be used |
 | illumos | every long path | relative > 107, and symlink cannot be used |
 
-- When D can be created nowhere, a bind reaches a file name of up to 88 bytes (84 on macOS / FreeBSD, about 72 with proc-sockdir alone) through [the form without D](#the-form-without-d) (when the socket's directory can be opened and R created in it; where no means can be used, nothing is reached, as in the table above). A connect gets as far as the fallback routes reach (proc-held cannot be used)
+- When D can be created nowhere, a bind reaches a file name of up to 88 bytes (84 on macOS / FreeBSD, about 72 with proc-sockdir alone) through [the form without D](#the-form-without-d) (when the socket's directory can be opened and R created in it; where no means can be used, nothing is reached, as in the table above). A connect gets as far as the routes in its order that do not use D reach (proc-direct, relative, widened, at-direct, symlink; proc-held cannot be used either)
 - `bind_any` reaches the path even where `bind` gets `ENAMETOOLONG`, when the spelling of [symlink](#symlink-bind_any), `<place>/sockat.XXXXXXXXXX/<file name>`, fits `sun_path` and a usable place exists
 - symlink cannot be used when there is no safe place where the symlink can be created (a sandbox where neither `TMPDIR` nor `/tmp` can be used, and the like)
 - A path longer than `PATH_MAX` as a whole (1024 bytes on macOS, 4096 on Linux) is `ENAMETOOLONG` on every route (no other system call opens it either; it is outside what sockat handles)
@@ -286,7 +288,7 @@ A path containing a NUL anywhere but at its start gets a `ValueError` at any len
 
 ### The directory is looked up slightly before the call
 
-The routes through D, the form without D and `bind_any`'s symlink resolve the socket's directory to a real path when they create R or the symlink, and the fallback routes proc-direct, relative and at-direct look the directory up first (open it, or resolve it to a real path), then bind / connect by the file name. If a directory along the path is renamed, or a symlink along it repointed, in between, the socket is created in the directory as it was when looked up. widened, a connect's symlink and proc-held behave as the standard library does.
+The routes through D, the form without D and `bind_any`'s symlink resolve the socket's directory to a real path when they create R or the symlink, and the connect routes proc-direct, relative and at-direct look the directory up first (open it, or resolve it to a real path), then bind / connect by the file name. If a directory along the path is renamed, or a symlink along it repointed, in between, the socket is created in the directory as it was when looked up. widened, a connect's symlink and proc-held behave as the standard library does.
 
 ### relative is exposed to another thread's chdir
 

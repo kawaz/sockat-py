@@ -1,25 +1,25 @@
-# DR-0002: proc-held (`/proc` を使える Linux の connect の予備の経路)
+# DR-0002: proc-held (`/proc` を使える Linux の connect の経路)
 
-- Status: Accepted (ハブの DR-0012 の予備の経路の Python での作り方。統括の判断 2026-11-19)
+- Status: Accepted (ハブの DR-0012 の connect の経路の Python での作り方。統括の判断 2026-11-19)
 - Date: 2026-11-19
 
 ## Context
 
-- ハブの [DR-0012](https://github.com/kawaz/sockat/blob/main/docs/decisions/DR-0012-own-directory-and-thread-cwd.md) の予備の経路 (connect 系) は、`/proc` を使える Linux / Android で proc-direct → proc-held → symlink の順
-- proc-held は、D を通す経路が使えず (seccomp の filter の下でファイル名が proc に収まらない等)、proc-direct の綴りにも収まらない connect を、ファイル名の長さによらず届かせる
+- ハブの [DR-0012](https://github.com/kawaz/sockat/blob/main/docs/decisions/DR-0012-own-directory-and-thread-cwd.md) の connect の順は、`/proc` を使える Linux / Android で proc-direct → thread-cwd → proc → proc-held → symlink
+- proc-held は、proc-direct の綴りに収まらず、thread-cwd も proc も使えない (seccomp の filter の下でファイル名が proc に収まらない等) connect を、ファイル名の長さによらず届かせる
 
 ## Decision
 
 | 手順 | Python での作り方 |
 |---|---|
-| D を作る | D を通す経路と同じ D を、同じ置き場の順に作る (作る・開く・確かめる・0700 にそろえる、[DR-0004](DR-0004-own-directory-route.md) の決定 2)。置き場の安全は問わない |
+| D を作る | 前の thread-cwd・proc が作った D があればそれを使う。無ければ D を通す経路と同じ置き場の順に作る (作る・開く・確かめる・0700 にそろえる、[DR-0004](DR-0004-own-directory-route.md) の決定 2 と決定 5)。置き場の安全は問わない |
 | symlink | `os.symlink(<ソケットのファイルのパス>, "s", dir_fd=<D>)`。相対パスなら cwd を前に付ける |
 | connect | `/proc/self/fd/<D>/s` を標準の `connect` に渡す |
-| 片付け | `s` を `os.unlink("s", dir_fd=<D>)`、D は D を通す経路と同じ条件で `os.rmdir`。成功でも失敗でもする |
+| 片付け | 自分が作れた `s` だけを `os.unlink("s", dir_fd=<D>)`。D は connect の最後に D を通す経路と同じ条件で `os.rmdir`。成功でも失敗でもする |
 
 - 使うのは、ソケットのディレクトリの fd の `/proc/self/fd/<fd>` を引ける Linux / Android の connect 系だけ。bind は使わない
 - `s` の先はソケットのファイルのパスそのもの (realpath にしない) なので、カーネルは元のパスと同じに解決する
-- D をどこにも作れない時は symlink の経路に進む
+- D をどこにも作れない時、`s` を作れない時は使えないとして symlink の経路に進む。D をどこにも作れなかったことが前の経路で分かっていれば、作り直さない
 
 ## Alternatives Considered
 

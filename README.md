@@ -52,10 +52,10 @@ A longer path is tried on the routes below, in this order per OS, and bound / co
 
 | OS | `bind` | `connect` / `connect_nonblocking` |
 |---|---|---|
-| Linux / Android (`/proc` usable) | thread-cwd → proc | thread-cwd → proc → proc-direct → proc-held → symlink |
-| Linux / Android (`/proc` not usable) | thread-cwd | thread-cwd → relative → symlink |
-| FreeBSD | at | at → at-direct |
-| macOS / iOS | thread-cwd | thread-cwd → relative → widened → symlink |
+| Linux / Android (`/proc` usable) | thread-cwd → proc | proc-direct → thread-cwd → proc → proc-held → symlink |
+| Linux / Android (`/proc` not usable) | thread-cwd | relative → thread-cwd → symlink |
+| FreeBSD | at | at-direct → at |
+| macOS / iOS | thread-cwd | relative → widened → thread-cwd → symlink |
 | NetBSD / OpenBSD / illumos / other Unix | none (`ENAMETOOLONG`) | relative → symlink |
 | Windows | not supported (`ImportError` on import) | the same |
 
@@ -75,6 +75,7 @@ A longer path is tried on the routes below, in this order per OS, and bound / co
 | fork, fork-sockdir, fork-direct | **none** (the specification's fork routes are not built. Neither are the specification's `connect_any` variants) |
 
 - None of the routes changes the cwd of the calling process or thread, so they can be used from multi-threaded programs
+- A connect tries the routes that need neither a write (creating D, R or a symlink) nor a thread (proc-direct, relative, widened, at-direct) first, and the routes that create D or start a thread after them. D is created at most once per connect and shared by the routes that use it (thread-cwd, at, proc, proc-held). When it can be created nowhere, every route that uses it is skipped
 - A bind reaches a path at any directory depth as long as the file name is within 96 bytes (92 on macOS / FreeBSD, about 79 with proc), shorter than the standard library's limit by `R/`. When D can be created nowhere, the form without D reaches up to 88 bytes (84 on macOS / FreeBSD, about 72 with proc-sockdir)
 - On NetBSD / OpenBSD / illumos, and where no means of the routes through D can be used (Linux without `/proc` under a seccomp filter, and the like), a `bind` of a long path gets `ENAMETOOLONG` (where the specification reaches it through the fork route, which Python does not have; ruled by kawaz in the hub's D12-Q3). To reach it even there, use `bind_any` ([below](#bind-that-reaches-even-by-losing-something))
 - A path that fits no route gets `ENAMETOOLONG` (an `OSError` with errno), as a path too long for the standard library does

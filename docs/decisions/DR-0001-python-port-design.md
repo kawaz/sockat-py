@@ -19,12 +19,12 @@
 | thread-cwd (D を通す経路) | sockat が作る使い捨ての `threading.Thread` で、ctypes の `unshare(CLONE_FS)` → `os.fchdir` (Linux。seccomp の filter が掛かっていれば `unshare` を呼ばずに使えないとみなす) / `pthread_fchdir_np` (Apple) をしてから、そのスレッドで `R/<ファイル名>` で bind / connect し、スレッドを捨てる | Linux / Android、Apple の OS |
 | at (D を通す経路) | ctypes で `bindat(2)` / `connectat(2)` | FreeBSD |
 | proc (D を通す経路) | `/proc/self/fd/<D の fd>/R/<ファイル名>` を標準に渡す | Linux / Android |
-| proc-direct (connect の予備) | `os.open(dir, O_PATH \| O_DIRECTORY)` の fd で `/proc/self/fd/<fd>/<ファイル名>` を標準に渡す | Linux / Android |
-| proc-held (connect の予備) | [DR-0002](DR-0002-unsafe-base-held-by-fd.md) | Linux / Android |
-| relative (connect の予備) | 文字列を書き直して標準に渡す | FreeBSD 以外で `/proc` を使えない時 |
-| widened (connect の予備) | ctypes で libc の `connect(2)` に手で組んだ sockaddr を渡す | Apple の OS |
-| symlink (connect の予備、`bind_any` の最後) | `os.symlink` で作り、標準に渡し、消す ([DR-0005](DR-0005-bind-any.md)) | connect は FreeBSD 以外、`bind_any` は全部 |
-| at-direct (connect の予備) | ctypes で `connectat(2)` にソケットのディレクトリの fd とファイル名 | FreeBSD |
+| proc-direct (connect だけ) | `os.open(dir, O_PATH \| O_DIRECTORY)` の fd で `/proc/self/fd/<fd>/<ファイル名>` を標準に渡す | Linux / Android |
+| proc-held (connect だけ) | [DR-0002](DR-0002-unsafe-base-held-by-fd.md) | Linux / Android |
+| relative (connect だけ) | 文字列を書き直して標準に渡す | FreeBSD 以外で `/proc` を使えない時 |
+| widened (connect だけ) | ctypes で libc の `connect(2)` に手で組んだ sockaddr を渡す | Apple の OS |
+| symlink (connect、`bind_any` の最後) | `os.symlink` で作り、標準に渡し、消す ([DR-0005](DR-0005-bind-any.md)) | connect は FreeBSD 以外、`bind_any` は全部 |
+| at-direct (connect だけ) | ctypes で `connectat(2)` にソケットのディレクトリの fd とファイル名 | FreeBSD |
 | fork、fork-sockdir、fork-direct | 作らない (kawaz 裁定) | — |
 
 - 経路の順番、使える条件、失敗をやり直さない扱い、D・R・symlink の置き場と名前は SPEC のとおり。Python での作り方は [DR-0004](DR-0004-own-directory-route.md)

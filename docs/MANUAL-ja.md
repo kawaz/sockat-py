@@ -144,12 +144,14 @@ except OSError as e:
 
 | OS | `bind` | `connect` / `connect_nonblocking` |
 |---|---|---|
-| Linux / Android (`/proc` を使える) | [thread-cwd](#d-を通す経路) → [proc](#d-を通す経路) | [thread-cwd](#d-を通す経路) → [proc](#d-を通す経路) → [proc-direct](#予備の経路) → [proc-held](#予備の経路) → [symlink](#予備の経路) |
-| Linux / Android (`/proc` を使えない) | [thread-cwd](#d-を通す経路) | [thread-cwd](#d-を通す経路) → [relative](#予備の経路) → [symlink](#予備の経路) |
-| FreeBSD | [at](#d-を通す経路) | [at](#d-を通す経路) → [at-direct](#予備の経路) |
-| macOS / iOS | [thread-cwd](#d-を通す経路) | [thread-cwd](#d-を通す経路) → [relative](#予備の経路) → [widened](#予備の経路) → [symlink](#予備の経路) |
-| NetBSD / OpenBSD / illumos / その他の Unix | なし (`ENAMETOOLONG`) | [relative](#予備の経路) → [symlink](#予備の経路) |
+| Linux / Android (`/proc` を使える) | [thread-cwd](#d-を通す経路) → [proc](#d-を通す経路) | [proc-direct](#connect-だけの経路) → [thread-cwd](#d-を通す経路) → [proc](#d-を通す経路) → [proc-held](#connect-だけの経路) → [symlink](#connect-だけの経路) |
+| Linux / Android (`/proc` を使えない) | [thread-cwd](#d-を通す経路) | [relative](#connect-だけの経路) → [thread-cwd](#d-を通す経路) → [symlink](#connect-だけの経路) |
+| FreeBSD | [at](#d-を通す経路) | [at-direct](#connect-だけの経路) → [at](#d-を通す経路) |
+| macOS / iOS | [thread-cwd](#d-を通す経路) | [relative](#connect-だけの経路) → [widened](#connect-だけの経路) → [thread-cwd](#d-を通す経路) → [symlink](#connect-だけの経路) |
+| NetBSD / OpenBSD / illumos / その他の Unix | なし (`ENAMETOOLONG`) | [relative](#connect-だけの経路) → [symlink](#connect-だけの経路) |
 
+- connect は、書き込み (D・R・symlink を作る) もスレッドも要らない経路 (proc-direct、relative、widened、at-direct) を先に、D を作る経路とスレッドを立てる経路をその後に試す。書き込みもスレッドも要らない経路は速く、relative や widened は D を通す経路より遠くまで届く場面がある
+- D は 1 回の呼び出しで 1 度だけ作り、D を使う経路 (thread-cwd、at、proc、proc-held) で共有する。どこにも作れなかったら、D を使う経路はどれも使えないとして飛ばし、作り直さない
 - D をどこにも作れない時、bind は同じ手段を [D 無しの形](#d-無しの形) (thread-cwd-sockdir、at-sockdir、proc-sockdir) で試す
 - 仕様の fork の経路 (fork、fork-sockdir、fork-direct) は作っていない。Python から fork した子は Python を実行するので、仕様が求める「子の区間は async-signal-safe」を満たせないため ([DR-0001](./decisions/DR-0001-python-port-design.md))。仕様で bind が fork に進む所は `ENAMETOOLONG` になる (ハブの D12-Q3 で kawaz 裁定)。そこでも届かせたい時は [`bind_any`](#bind_any)
 - 順番の最後まで届かなかったパスは `ENAMETOOLONG` になる
@@ -179,7 +181,7 @@ thread-cwd・at・proc。
 
 - 置き場の安全 (sticky 等) と長さは問わない。D を fd で掴み、綴りに置き場が出ないため
 - D の開き方は、Linux が `O_PATH`、macOS が `O_SEARCH` (umask が持ち主の読み取りを削っても開ける)、他は `O_RDONLY`
-- どこにも作れない時、bind は [D 無しの形](#d-無しの形)、connect は[予備の経路](#予備の経路)に進む
+- どこにも作れない時、bind は [D 無しの形](#d-無しの形)に進み、connect は D を使う経路を飛ばして順の次の経路に進む
 
 #### 手段
 
@@ -205,14 +207,14 @@ bind だけが、D をどこにも作れない時に試す。経路は thread-cw
 - ソケットのディレクトリを開けない、手段を使えない、綴りが収まらない時は、何も作らずに `ENAMETOOLONG`。R を作れない時 (名前の衝突が 16 回続いた等) も `ENAMETOOLONG`
 - D を作れて手段が全部使えなかった時は、この形を試さずに `ENAMETOOLONG`
 
-### 予備の経路
+### connect だけの経路
 
-connect 系だけが、D を通す経路を使えない時 (手段が無い、D を作れない、ファイル名が収まらない) に OS ごとの順で試す。
+connect 系だけが使う経路。OS ごとの順 ([長いパスへの届き方](#長いパスへの届き方)の表) で、D を通す経路と並べて試す。
 
 | 経路 | やり方 | 使える条件 |
 |---|---|---|
 | proc-direct | ソケットのディレクトリの fd で `/proc/self/fd/<fd>/<ファイル名>` を標準に渡す | Linux / Android。ソケットのディレクトリを開け、綴りが 107 バイト以内 (ファイル名およそ 90 まで) |
-| proc-held | D を通す経路と同じ D を作り、その中にソケットのファイルを指す symlink `s` を作って `/proc/self/fd/<D の fd>/s` で connect し、消す | Linux / Android。D をどこかに作れる ([DR-0002](./decisions/DR-0002-unsafe-base-held-by-fd.md)) |
+| proc-held | D を通す経路と共有する D (まだ無ければ作る) の中に、ソケットのファイルを指す symlink `s` を作って `/proc/self/fd/<D の fd>/s` で connect し、消す | Linux / Android。D をどこかに作れて、`s` を作れる ([DR-0002](./decisions/DR-0002-unsafe-base-held-by-fd.md)) |
 | relative | cwd からの相対パスを標準に渡す。文字列を書き直すだけで `chdir` しない | 元のパスが絶対パスで、相対パスが標準にそのまま渡せる長さ |
 | widened | ctypes で libc の `connect(2)` に、`sun_path` を超えて 253 バイトまで入る sockaddr で元のパス (無理なら相対パス) を渡す | macOS / iOS。パスが 253 バイト以内で、カーネルが受け付ける |
 | symlink | ソケットのファイルを指す `sockat.XXXXXXXXXX` を置き場に作り、それを渡して、すぐ消す | 安全な置き場があり、綴りが収まる (macOS は広げた sockaddr で 253 バイトまで) |
@@ -237,13 +239,13 @@ connect 系だけが、D を通す経路を使えない時 (手段が無い、D 
 | OS | `bind` | `connect` / `connect_nonblocking` |
 |---|---|---|
 | Linux / Android (`/proc` を使える) | ファイル名 > 96 (thread-cwd を使えなければおよそ 79) | 届く (proc-held) |
-| Linux / Android (`/proc` を使えない) | ファイル名 > 96、または thread-cwd を使えない | D を通す経路が使えず (ファイル名 > 96 か thread-cwd を使えない)、relative > 107、symlink も使えない |
+| Linux / Android (`/proc` を使えない) | ファイル名 > 96、または thread-cwd を使えない | relative > 107、thread-cwd が使えず (ファイル名 > 96 か thread-cwd を使えない)、symlink も使えない |
 | FreeBSD | ファイル名 > 92 | ファイル名 > 103 |
-| macOS / iOS | ファイル名 > 92、または thread-cwd を使えない | D を通す経路が使えず (ファイル名 > 92 か thread-cwd を使えない)、元のパスも相対パスも > 253、symlink も使えない |
+| macOS / iOS | ファイル名 > 92、または thread-cwd を使えない | 元のパスも相対パスも > 253、thread-cwd が使えず (ファイル名 > 92 か thread-cwd を使えない)、symlink も使えない |
 | NetBSD / OpenBSD | 長いパス全部 | relative > 103、symlink も使えない |
 | illumos | 長いパス全部 | relative > 107、symlink も使えない |
 
-- D をどこにも作れない時、bind は [D 無しの形](#d-無しの形)でファイル名 88 (macOS / FreeBSD 84、proc-sockdir だけならおよそ 72) まで届く (ソケットのディレクトリを開けて R を作れる時。手段を使えない環境は上の表と同じく届かない)。connect は予備の経路の分だけ届く (proc-held は使えない)
+- D をどこにも作れない時、bind は [D 無しの形](#d-無しの形)でファイル名 88 (macOS / FreeBSD 84、proc-sockdir だけならおよそ 72) まで届く (ソケットのディレクトリを開けて R を作れる時。手段を使えない環境は上の表と同じく届かない)。connect は順のうち D を使わない経路 (proc-direct、relative、widened、at-direct、symlink) の分だけ届く (proc-held も使えない)
 - `bind_any` は、`bind` が `ENAMETOOLONG` になる所でも、[symlink](#symlink-bind_any) の綴り `<置き場>/sockat.XXXXXXXXXX/<ファイル名>` が `sun_path` に収まり、使える置き場があれば届く
 - symlink を使えないのは、symlink を作れる安全な置き場が無い時 (`TMPDIR` も `/tmp` も使えないサンドボックス等)
 - パス全体が `PATH_MAX` (macOS 1024、Linux 4096 バイト) を超えるパスは、どの経路でも `ENAMETOOLONG` になる (他のシステムコールでも開けないパスで、sockat の対象外)
@@ -286,7 +288,7 @@ connect 系だけが、D を通す経路を使えない時 (手段が無い、D 
 
 ### ディレクトリは呼ぶ少し前に引かれる
 
-D を通す経路・D 無しの形・`bind_any` の symlink は R や symlink を作る時にソケットのディレクトリを実パスにし、予備の経路の proc-direct・relative・at-direct はディレクトリを先に引いて (開く、または実パスにする) から、ファイル名で bind / connect する。その間に途中のディレクトリが rename されたり symlink が張り替えられたりすると、引いた時点のディレクトリにソケットができる。widened・connect の symlink・proc-held は標準と同じに振る舞う。
+D を通す経路・D 無しの形・`bind_any` の symlink は R や symlink を作る時にソケットのディレクトリを実パスにし、connect だけの経路の proc-direct・relative・at-direct はディレクトリを先に引いて (開く、または実パスにする) から、ファイル名で bind / connect する。その間に途中のディレクトリが rename されたり symlink が張り替えられたりすると、引いた時点のディレクトリにソケットができる。widened・connect の symlink・proc-held は標準と同じに振る舞う。
 
 ### relative は他のスレッドの chdir に弱い
 

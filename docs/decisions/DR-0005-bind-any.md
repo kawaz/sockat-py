@@ -101,7 +101,7 @@ class Loss(enum.StrEnum):
 
 - 理由は短い英語の句で、診断用。中身は約束しない
 - fork と fork-sockdir は、SPEC の順でその位置に来た時に「sockat-py に無い」理由で入れる。SPEC の他の言語では fork で届く所に来たことが、利用者の手元で分かる
-- connect の予備の経路は積まない (Python に `connect_any` は無く、読む口が無い)
+- connect も同じ形で経路を積む (`_route.connect_routes`、[DR-0004](DR-0004-own-directory-route.md) の決定 5)。公開 API で読む口は無く (Python に `connect_any` は無い)、試験と適合試験の CLI (`conformance/cli.py`) が読む
 - 内部は `_route.reach` / `_route.reach_long` が `Reached(sock, route, losses, skipped)` を返し、`run` / `run_long` はその socket と route だけを返す (既定の API の振る舞いは変えない)
 
 ### 4. 失敗した時
