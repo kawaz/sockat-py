@@ -74,22 +74,31 @@ def test_discard_removes_the_file_and_leaves_the_listener_open(tmp: TmpDirs, tot
 
 # When the file at the path is no longer the one the bind made, discard
 # leaves it alone: replaced by a regular file, or by another socket bound at
-# the same path (after the first was removed by hand), it stays where it is.
+# the same path, it stays where it is. The replacements are made while the
+# listener is still open, and the listener is closed only after discard:
+# that is what discard promises (SPEC, the hub's DS-Q1 ruled a). While the
+# listener is open the kernel holds on to the socket file, so its number is
+# not reused and a replacement is a different (st_dev, st_ino). Something
+# removed and made again after the close may get the same number on a file
+# system that reuses numbers at once (ext4, BSD's UFS / FFS, as the CI runs
+# showed), and discard removes it then, as removing by the path would; that
+# is outside the promise, so the documents tell to call discard before
+# closing the listener.
 @pytest.mark.parametrize("total", LENGTHS)
 def test_discard_leaves_a_replacement_alone(tmp: TmpDirs, total: int) -> None:
     p = nest(tmp.new(), total)
     listener, discard, *_ = sockat.ex.bind(p)
-    listener.close()
-    os.unlink(p)
-    with open(p, "wb") as f:
-        f.write(b"theirs")
-    discard()
-    with open(p, "rb") as f:
-        assert f.read() == b"theirs"
-    os.unlink(p)
-    with sockat.bind(p):
+    with listener:
+        os.unlink(p)
+        with open(p, "wb") as f:
+            f.write(b"theirs")
         discard()
-        assert is_socket(p)
+        with open(p, "rb") as f:
+            assert f.read() == b"theirs"
+        os.unlink(p)
+        with sockat.bind(p):
+            discard()
+            assert is_socket(p)
 
 
 # The file is remembered by its realpath, taken right after the bind: a path
