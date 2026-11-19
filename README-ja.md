@@ -27,6 +27,7 @@ pip install sockat
 | `sockat.bind_ex(path)` | 同上 + ソケットファイルの後始末 | `(listener, discard)` ([後述](#後始末つきの-bind)) |
 | `sockat.connect(path)` | `socket()` → `connect(path)` | `socket.socket` |
 | `sockat.connect_nonblocking(path)` | `socket()` → `setblocking(False)` → `connect(path)` | 非ブロッキングの `socket.socket` |
+| `sockat.any.bind_any(path)` | `bind` と同じ + 届かない所は何かを失ってでも | `AnyBinding` ([後述](#何かを失ってでも届く-bind)) |
 
 - 戻り値は標準の `socket.socket` (長いパスでは、アドレスを元のパスで返す `socket.socket` の subclass)
 - 標準が受け付ける長さのパスは標準にそのまま渡すので、標準と同じに振る舞う
@@ -40,52 +41,52 @@ pip install sockat
 
 ## 長いパスへの届き方
 
-標準が受け付ける長さ (`sun_path` − 1) のパスは標準にそのまま渡す。
+標準が受け付ける長さ (`sun_path` − 1) のパスは標準にそのまま渡す (経路 standard)。
 
 | OS | 標準にそのまま渡す長さ |
 |---|---|
 | Linux / Android / illumos | 107 バイトまで |
 | macOS / iOS / FreeBSD / NetBSD / OpenBSD | 103 バイトまで |
 
-それを超えるパスは、OS ごとに次の順に試し、最初に使えた経路で bind / connect する。
+それを超えるパスは、OS ごとに次の順に経路を試し、最初に使えた経路で bind / connect する。経路は[仕様の「経路の名前」](https://github.com/kawaz/sockat/blob/main/docs/SPEC-ja.md#経路の名前)で呼ぶ。
 
 | OS | `bind` | `connect` / `connect_nonblocking` |
 |---|---|---|
-| Linux / Android (`/proc` を使える) | スレッド cwd → /proc 版 | スレッド cwd → /proc 版 → /proc → fd で掴む形 → symlink |
-| Linux / Android (`/proc` を使えない) | スレッド cwd | スレッド cwd → 相対パス → symlink |
-| FreeBSD | bindat | connectat → connectat (ソケットのディレクトリ) |
-| macOS / iOS | スレッド cwd | スレッド cwd → 相対パス → 広げた sockaddr → symlink |
-| NetBSD / OpenBSD / illumos / その他の Unix | なし (`ENAMETOOLONG`) | 相対パス → symlink |
+| Linux / Android (`/proc` を使える) | thread-cwd → proc | thread-cwd → proc → proc-direct → proc-held → symlink |
+| Linux / Android (`/proc` を使えない) | thread-cwd | thread-cwd → relative → symlink |
+| FreeBSD | at | at → at-direct |
+| macOS / iOS | thread-cwd | thread-cwd → relative → widened → symlink |
+| NetBSD / OpenBSD / illumos / その他の Unix | なし (`ENAMETOOLONG`) | relative → symlink |
 | Windows | 対象外 (import で `ImportError`) | 同左 |
 
 | 経路 | やり方 |
 |---|---|
-| 中心の経路 | 自分専用のディレクトリ D を作って fd で掴み、その中にソケットのディレクトリを指す乱数の symlink R を作り、D を基準に `R/<ファイル名>` で渡して、R と D を消す。D は `TMPDIR`、`/tmp`、ソケットのディレクトリの順に、作れた所に作る |
-| スレッド cwd | 中心の経路の手段。使い捨てのスレッドだけ cwd を D に移す (Linux / Android、macOS / iOS) |
-| bindat / connectat | 中心の経路の手段。`bindat(2)` / `connectat(2)` に D の fd を渡す (FreeBSD) |
-| /proc 版 | 中心の経路の手段。`/proc/self/fd/<D の fd>/R/<ファイル名>` で渡す (Linux / Android) |
-| D 無しの形 | bind だけ。D をどこにも作れない時、ソケットのディレクトリに R (`.sockat.XXXXXXXXXX`) を作り、ソケットのディレクトリを基準に同じ手段で `.sockat.XXXXXXXXXX/<ファイル名>` を渡して、R を消す |
-| /proc | connect だけ。`/proc/self/fd/<ソケットのディレクトリの fd>/<ファイル名>` で渡す |
-| fd で掴む形 | connect だけ。D の中にソケットのファイルを指す symlink `s` を作り、`/proc/self/fd/<D の fd>/s` で渡す |
-| 相対パス | connect だけ。cwd からの相対パスで渡す。文字列を書き直すだけで cwd は変えない |
-| 広げた sockaddr | connect だけ。macOS のカーネルが受け付ける、253 バイトまで入る sockaddr で渡す |
-| symlink | connect だけ。他人が差し替えられない `TMPDIR` か `/tmp` に、ソケットのファイルを指す短い symlink を作って通し、すぐ消す |
-| connectat (ソケットのディレクトリ) | connect だけ。`connectat(2)` にソケットのディレクトリの fd とファイル名を渡す (FreeBSD) |
-| fork | **無い** (仕様の fork の経路は作っていない。仕様の `connect_any` 系も無い) |
+| D を通す経路 (thread-cwd、at、proc) | 自分専用のディレクトリ D を作って fd で掴み、その中にソケットのディレクトリを指す乱数の symlink R を作り、D を基準に `R/<ファイル名>` で渡して、R と D を消す。D は `TMPDIR`、`/tmp`、ソケットのディレクトリの順に、作れた所に作る |
+| thread-cwd | D を通す経路。使い捨てのスレッドだけ cwd を D に移す (Linux / Android、macOS / iOS) |
+| at | D を通す経路。`bindat(2)` / `connectat(2)` に D の fd を渡す (FreeBSD) |
+| proc | D を通す経路。`/proc/self/fd/<D の fd>/R/<ファイル名>` で渡す (Linux / Android) |
+| thread-cwd-sockdir、at-sockdir、proc-sockdir | bind だけ。D をどこにも作れない時の D 無しの形。ソケットのディレクトリに R (`.sockat.XXXXXXXXXX`) を作り、ソケットのディレクトリを基準に同じ手段で `.sockat.XXXXXXXXXX/<ファイル名>` を渡して、R を消す |
+| proc-direct | connect だけ。`/proc/self/fd/<ソケットのディレクトリの fd>/<ファイル名>` で渡す |
+| proc-held | connect だけ。D の中にソケットのファイルを指す symlink `s` を作り、`/proc/self/fd/<D の fd>/s` で渡す |
+| relative | connect だけ。cwd からの相対パスで渡す。文字列を書き直すだけで cwd は変えない |
+| widened | connect だけ。macOS のカーネルが受け付ける、253 バイトまで入る sockaddr で渡す |
+| symlink | connect は、他人が差し替えられない `TMPDIR` か `/tmp` に、ソケットのファイルを指す短い symlink を作って通し、すぐ消す。bind は `bind_any` だけ ([後述](#何かを失ってでも届く-bind)) |
+| at-direct | connect だけ。`connectat(2)` にソケットのディレクトリの fd とファイル名を渡す (FreeBSD) |
+| fork、fork-sockdir、fork-direct | **無い** (仕様の fork の経路は作っていない。仕様の `connect_any` 系も無い) |
 
 - どの経路も呼び出し元のプロセスとスレッドの cwd を変えないので、マルチスレッドのプログラムから使える
-- bind はディレクトリの深さによらず、ファイル名が 96 バイト (macOS / FreeBSD は 92、/proc 版はおよそ 79) まで届く (`R/` の分、標準より短い)。D をどこにも作れない時は D 無しの形で 88 バイト (macOS / FreeBSD は 84、/proc 版はおよそ 72) まで
-- NetBSD / OpenBSD / illumos と、中心の経路の手段を使えない環境 (seccomp の filter の下で `/proc` の無い Linux 等) では、長いパスの bind は `ENAMETOOLONG` になる (仕様では fork の経路で届く所。Python には fork の経路が無い。ハブの D12-Q3 で kawaz 裁定)
+- bind はディレクトリの深さによらず、ファイル名が 96 バイト (macOS / FreeBSD は 92、proc はおよそ 79) まで届く (`R/` の分、標準より短い)。D をどこにも作れない時は D 無しの形で 88 バイト (macOS / FreeBSD は 84、proc-sockdir はおよそ 72) まで
+- NetBSD / OpenBSD / illumos と、D を通す経路の手段を使えない環境 (seccomp の filter の下で `/proc` の無い Linux 等) では、長いパスの `bind` は `ENAMETOOLONG` になる (仕様では fork の経路で届く所。Python には fork の経路が無い。ハブの D12-Q3 で kawaz 裁定)。そこでも届かせたい時は `bind_any` ([後述](#何かを失ってでも届く-bind))
 - どの経路にも収まらないパスは、標準で長すぎるパスと同じく `ENAMETOOLONG` (errno 付きの `OSError`) になる
 - 各経路の条件と、どこから届かなくなるかは [docs/MANUAL-ja.md](./docs/MANUAL-ja.md#長いパスへの届き方) にある
 
 ## 長いパスで標準と違う点
 
-- listener (と accept したソケット) の `getsockname()` と、connect したソケットの `getpeername()` は元のパスを返す。カーネルが返すのは `R/<ファイル名>` (/proc 版は `/proc/self/fd/<fd>/R/<ファイル名>`、D 無しの形は R が `.sockat.XXXXXXXXXX`。R はもう無いので何にも当たらない) だが、sockat が返すソケットはそれを元のパスに差し替える
+- listener (と accept したソケット) の `getsockname()` と、connect したソケットの `getpeername()` は元のパスを返す。カーネルが返すのは `R/<ファイル名>` (proc は `/proc/self/fd/<fd>/R/<ファイル名>`、D 無しの形は R が `.sockat.XXXXXXXXXX`。R はもう無いので何にも当たらない) だが、sockat が返すソケットはそれを元のパスに差し替える
 - 標準にそのまま渡せない長さのパスで、名前で終わらないもの (`dir/`、`dir/.`、`..` で終わるもの) は `ValueError` になる
 - 先頭以外に NUL を含むパスは、長さによらず `ValueError` になる (標準は NUL で黙って切り詰める)。Linux で先頭が NUL のパス (abstract namespace) は標準にそのまま渡す
 - sticky でなく他人も書けるソケットのディレクトリでは、D 無しの形の R を作ってから bind するまでの間に R を差し替えられ、別のディレクトリに bind しうる (同じ名前が既にあれば `EADDRINUSE` で、上書きはしない。D の中の R は D が 0700 なので差し替えられない)
-- 途中でプロセスが死ぬと、`TMPDIR` か `/tmp` に `sockat.XXXXXXXXXX`、ソケットのディレクトリに `.sockat.XXXXXXXXXX` が残ることがある
+- 途中でプロセスが死ぬと、置き場 (`TMPDIR`、`/tmp`、`bind_any` は `XDG_RUNTIME_DIR` も) に `sockat.XXXXXXXXXX`、ソケットのディレクトリに `.sockat.XXXXXXXXXX` が残ることがある
 - その他 (ディレクトリを先に引くこと等) は [docs/MANUAL-ja.md](./docs/MANUAL-ja.md#長いパスで標準と違う点)
 
 ## 後始末つきの bind
@@ -98,8 +99,23 @@ discard()
 ```
 
 - `discard()` は bind が作ったソケットファイルだけを消す (別のファイルに置き換わっていたら消さない)。何度呼んでもよい
-- `discard()` は listener を閉じない
-- 名前は仮。詳細は [docs/MANUAL-ja.md](./docs/MANUAL-ja.md#bind_ex)
+- `discard()` は listener を閉じない (閉じるのは利用者。ハブの DR-0014)
+- 詳細は [docs/MANUAL-ja.md](./docs/MANUAL-ja.md#bind_ex)
+
+## 何かを失ってでも届く bind
+
+```python
+from sockat.any import bind_any
+
+listener, losses, route, skipped = bind_any(path)
+```
+
+- `bind` と同じ経路を試し、`bind` が `ENAMETOOLONG` になる所 (経路が全部使えない所) では、最後に置き場の symlink を試す: 置き場にソケットのディレクトリを指す `sockat.XXXXXXXXXX` を作り、`<置き場>/sockat.XXXXXXXXXX/<ファイル名>` で bind して、すぐ消す
+- 置き場の候補は `XDG_RUNTIME_DIR`、`TMPDIR` (それぞれ絶対パスの時)、`/tmp`。持ち主だけが書ける置き場 (持ち主が自分で group と other に書き込み権限が無い) を先に全部試し、無ければ共有の置き場 (sticky で持ち主が root か自分) を試す
+- `losses` は通った経路で失ったものの並び (`Loss` の `respelled`、`recreatable-spelling`、`cwd-relative`。何も失わなければ空)。共有の置き場を通ると `recreatable-spelling` が付き、symlink を消した後に他の利用者がカーネルの覚えている綴りを作り直せる。ソケットファイルは綴り (カーネルが返すアドレス) でなく元のパスで消す
+- `route` は通った経路の名前、`skipped` は試して使えなかった経路 (`name` と `reason`) の並び。どちらも診断用で中身は約束しない。失敗した時は、例外 (型と `errno` は `bind` と同じ) に `skipped` と `route` の属性を付ける
+- `sockat.any` は `import sockat` では読み込まれない。使う人が `from sockat.any import bind_any` で選ぶ
+- 詳細は [docs/MANUAL-ja.md](./docs/MANUAL-ja.md#bind_any)
 
 ## asyncio
 
@@ -111,6 +127,7 @@ reader, writer = await asyncio.open_unix_connection(sock=sockat.connect_nonblock
 ```
 
 - 引数を足さずに短いパスと同じに動く (Python 3.13 以降は server を閉じる時に元のパスのソケットファイルを消す)
+- `bind_ex` と `bind_any` の listener も同じに渡せる
 
 ## ドキュメント
 

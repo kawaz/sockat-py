@@ -8,7 +8,7 @@
 - 長いパスでは、カーネルが返すアドレス (`getsockname(2)` / `getpeername(2)`) は bind に使った綴りで、元のパスではない (`/proc/self/fd/<fd>/<ファイル名>`、相対パス、もう無い symlink、ファイル名だけ)
 - Python 3.13 以降の asyncio の `start_unix_server(sock=)` は、既定の `cleanup_socket=True` で、開始時と閉じる時に listener の `getsockname()` を `os.stat` し、閉じる時に inode が一致すれば消す。長いパスの綴りでは次のように壊れる (実測)
   - /proc の綴り: 綴りの fd は bind の後に閉じていて、イベントループの epoll 等が同じ番号を使い回す。`sockat.bind(p)` をループより先に呼ぶと、`start_unix_server` が `NotADirectoryError` で必ず落ちる (Linux、Python 3.13 / 3.15)
-  - スレッド cwd の綴り: ファイル名だけなので、プロセスの cwd に同じ名前のファイルがあると閉じる時にそれを消す
+  - thread-cwd の綴り: ファイル名だけなので、プロセスの cwd に同じ名前のファイルがあると閉じる時にそれを消す
 - 利用者は `server = await asyncio.start_unix_server(handle, sock=sockat.bind(PATH))` と書き、引数を足さずに短いパスと同じに動く (閉じた時に元のパスのソケットファイルが消える) ことを期待している (kawaz)
 
 ## Decision
@@ -38,7 +38,7 @@
 - 案 A: 文書で `cleanup_socket=False` を案内し、ソケットファイルは利用者が消す
   - 不採用理由: 利用者に回避を強いる。案内を読まない利用者は Linux で落ちる (kawaz 裁定)
 - 案 B: bind で、カーネルの綴りがそのまま使える経路 (相対パス、symlink) を先に試す
-  - 不採用理由: /proc やスレッド cwd でしか届かないパスは残る。相対パスは cwd が変わると別の場所を指す
+  - 不採用理由: proc や thread-cwd でしか届かないパスは残る。相対パスは cwd が変わると別の場所を指す
 - 案 C: 短いパスも `PathSocket` で返す
   - 不採用理由: 振る舞いは同じだが、標準が受け付けるパスに何も足さない決まりに反する
 

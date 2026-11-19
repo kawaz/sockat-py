@@ -15,24 +15,24 @@
 
 | 経路 | 作り方 | 使う OS |
 |---|---|---|
-| 中心の経路 (D と R) | [DR-0004](DR-0004-own-directory-route.md) | 手段のある OS |
-| スレッド cwd (中心の経路の手段) | sockat が作る使い捨ての `threading.Thread` で、ctypes の `unshare(CLONE_FS)` → `os.fchdir` (Linux。seccomp の filter が掛かっていれば `unshare` を呼ばずに使えないとみなす) / `pthread_fchdir_np` (Apple) をしてから、そのスレッドで `R/<ファイル名>` で bind / connect し、スレッドを捨てる | Linux / Android、Apple の OS |
-| bindat / connectat (中心の経路の手段) | ctypes で `bindat(2)` / `connectat(2)` | FreeBSD |
-| /proc 版 (中心の経路の手段) | `/proc/self/fd/<D の fd>/R/<ファイル名>` を標準に渡す | Linux / Android |
-| /proc (connect の予備) | `os.open(dir, O_PATH \| O_DIRECTORY)` の fd で `/proc/self/fd/<fd>/<ファイル名>` を標準に渡す | Linux / Android |
-| fd で掴む形 (connect の予備) | [DR-0002](DR-0002-unsafe-base-held-by-fd.md) | Linux / Android |
-| 相対パス (connect の予備) | 文字列を書き直して標準に渡す | FreeBSD 以外で `/proc` を使えない時 |
-| 広げた sockaddr (connect の予備) | ctypes で libc の `connect(2)` に手で組んだ sockaddr を渡す | Apple の OS |
-| symlink (connect の予備) | `os.symlink` で作り、標準に渡し、消す | FreeBSD 以外 |
-| connectat (connect の予備) | ctypes で `connectat(2)` にソケットのディレクトリの fd とファイル名 | FreeBSD |
-| fork | 作らない (kawaz 裁定) | — |
+| D を通す経路 (D と R) | [DR-0004](DR-0004-own-directory-route.md) | 手段のある OS |
+| thread-cwd (D を通す経路) | sockat が作る使い捨ての `threading.Thread` で、ctypes の `unshare(CLONE_FS)` → `os.fchdir` (Linux。seccomp の filter が掛かっていれば `unshare` を呼ばずに使えないとみなす) / `pthread_fchdir_np` (Apple) をしてから、そのスレッドで `R/<ファイル名>` で bind / connect し、スレッドを捨てる | Linux / Android、Apple の OS |
+| at (D を通す経路) | ctypes で `bindat(2)` / `connectat(2)` | FreeBSD |
+| proc (D を通す経路) | `/proc/self/fd/<D の fd>/R/<ファイル名>` を標準に渡す | Linux / Android |
+| proc-direct (connect の予備) | `os.open(dir, O_PATH \| O_DIRECTORY)` の fd で `/proc/self/fd/<fd>/<ファイル名>` を標準に渡す | Linux / Android |
+| proc-held (connect の予備) | [DR-0002](DR-0002-unsafe-base-held-by-fd.md) | Linux / Android |
+| relative (connect の予備) | 文字列を書き直して標準に渡す | FreeBSD 以外で `/proc` を使えない時 |
+| widened (connect の予備) | ctypes で libc の `connect(2)` に手で組んだ sockaddr を渡す | Apple の OS |
+| symlink (connect の予備、`bind_any` の最後) | `os.symlink` で作り、標準に渡し、消す ([DR-0005](DR-0005-bind-any.md)) | connect は FreeBSD 以外、`bind_any` は全部 |
+| at-direct (connect の予備) | ctypes で `connectat(2)` にソケットのディレクトリの fd とファイル名 | FreeBSD |
+| fork、fork-sockdir、fork-direct | 作らない (kawaz 裁定) | — |
 
 - 経路の順番、使える条件、失敗をやり直さない扱い、D・R・symlink の置き場と名前は SPEC のとおり。Python での作り方は [DR-0004](DR-0004-own-directory-route.md)
 - 長いパスは最初にソケットのディレクトリを `stat` で引く (無ければ `ENOENT`)。bind が fork の経路の場所に来たら `ENAMETOOLONG` を返す
-- スレッド cwd の手段は CPython の 1 スレッド = 1 OS スレッドに頼る。他のスレッドの `os.getcwd()` が変わらないことを macOS と Linux で確かめた
+- thread-cwd は CPython の 1 スレッド = 1 OS スレッドに頼る。他のスレッドの `os.getcwd()` が変わらないことを macOS と Linux で確かめた
 - ctypes を使う呼び出しは `src/sockat/_sys.py` にだけ置き、最初に要った時に import する
 
-理由: Python から `os.fork()` した子は Python を実行するので、SPEC の「子の区間は async-signal-safe」を満たせない。満たすには C 拡張が要り、配布が OS × arch の wheel になる。純 Python で 1 つの wheel にする方を取る (kawaz 裁定)。fork の経路が無いことで bind が届かなくなる所は [DR-0004](DR-0004-own-directory-route.md) の決定 4 (ハブの D12-Q3 で kawaz 裁定待ち)。
+理由: Python から `os.fork()` した子は Python を実行するので、SPEC の「子の区間は async-signal-safe」を満たせない。満たすには C 拡張が要り、配布が OS × arch の wheel になる。純 Python で 1 つの wheel にする方を取る (kawaz 裁定)。fork の経路が無いことで bind が届かなくなる所は [DR-0004](DR-0004-own-directory-route.md) の決定 4 (ハブの D12-Q3 の kawaz 裁定で `ENAMETOOLONG`。届かせたい人は `bind_any`)。
 
 ### 2. 公開 API
 
@@ -42,11 +42,12 @@
 | `sockat.bind_ex(path)` | 後始末つきの bind | `(listener, discard)` ([DR-0004](DR-0004-own-directory-route.md) の決定 7) |
 | `sockat.connect(path)` | `connect` | `socket.socket` (ブロックする) |
 | `sockat.connect_nonblocking(path)` | `connect_nonblocking` | 非ブロッキングの `socket.socket` |
+| `sockat.any.bind_any(path)` | `bind_any` | `AnyBinding` ([DR-0005](DR-0005-bind-any.md)) |
 
 - `connect_any` 系は出さない (fork の経路が無いため)
 - 長いパスでは、戻り値は `socket.socket` の subclass で、アドレスを元のパスで返す ([DR-0003](DR-0003-report-the-given-path.md))
 - `path` は `str` / `bytes` / `os.PathLike`。標準の `socket.bind` は `os.PathLike` を受けない (3.11〜3.15 で確認) が、Python のファイル API の慣習に合わせて受け、`os.fspath` した値を標準に渡す
-- 経路 (`_route.Route`) は公開しない。試験はパッケージの中から各経路の関数を呼ぶ。環境を読む部分 (D の置き場、symlink の置き場の候補、macOS で広げた sockaddr を試すか、`/proc/self/fd` の場所、スレッド cwd を試すか) は `_route.Config` にして試験から差し替える
+- 経路 (`_route.Route`) は公開しない (`bind_any` が経路の名前の文字列を診断用に返すだけ)。試験はパッケージの中から各経路の関数を呼ぶ。環境を読む部分 (D の置き場、symlink の置き場の候補、macOS で広げた sockaddr を試すか、`/proc/self/fd` の場所、thread-cwd を試すか、`bind_any` の symlink の置き場の候補) は `_route.Config` にして試験から差し替える
 
 ### 3. 標準に揃える点
 
@@ -96,8 +97,8 @@
 
 ## Consequences
 
-- fork の経路でしか届かない所は、bind も connect も `ENAMETOOLONG` になる。bind では中心の経路が使えない所全部 (NetBSD / OpenBSD / illumos の長いパス全部を含む。[DR-0004](DR-0004-own-directory-route.md) の決定 4)。README の OS × 経路の表に「fork の経路なし」と書く
-- `connect_any` 系が欲しくなったら、他の言語の実装と同じく使う人が選んで有効にする別のもの (ハブの DR-0007。例: C 拡張を含む別の配布物が `sockat.any` を足す) として出す。既定の `sockat` は純 Python のまま変えない (kawaz 裁定 2026-11-18)
+- fork の経路でしか届かない所は、`bind` も connect も `ENAMETOOLONG` になる。`bind` では D を通す経路が使えない所全部 (NetBSD / OpenBSD / illumos の長いパス全部を含む。[DR-0004](DR-0004-own-directory-route.md) の決定 4)。README の OS × 経路の表に「fork の経路なし」と書く
+- `connect_any` 系が欲しくなったら、使う人が選んで有効にする別のもの (例: C 拡張を含む別の配布物) として出す。既定の `sockat` は純 Python のまま変えない (kawaz 裁定 2026-11-18)。any 系の置き場は `sockat.any` ([DR-0005](DR-0005-bind-any.md))
 - SPEC が変わったら、この実装と README / MANUAL を追従させる
 
 ## 関連

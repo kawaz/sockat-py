@@ -2,7 +2,7 @@
 
 > [English](./MANUAL.md) | 日本語
 
-sockat-py の使い方と、長いパスにどう届くか、長いパスで標準と違う点のリファレンス。言語によらない振る舞いの正本は [sockat の仕様](https://github.com/kawaz/sockat/blob/main/docs/SPEC-ja.md)、Python 版の設計の判断は [DR-0001](./decisions/DR-0001-python-port-design.md) と [DR-0004](./decisions/DR-0004-own-directory-route.md) にある。
+sockat-py の使い方と、長いパスにどう届くか、長いパスで標準と違う点のリファレンス。言語によらない振る舞いの正本は [sockat の仕様](https://github.com/kawaz/sockat/blob/main/docs/SPEC-ja.md)、Python 版の設計の判断は [DR-0001](./decisions/DR-0001-python-port-design.md)、[DR-0004](./decisions/DR-0004-own-directory-route.md)、[DR-0005](./decisions/DR-0005-bind-any.md) にある。
 
 ## 使い方
 
@@ -23,6 +23,7 @@ assert server.recv(4) == b"ping"
 | `sockat.bind_ex(path)` | 同上 + ソケットファイルの後始末 | `(listener, discard)` ([後述](#bind_ex)) |
 | `sockat.connect(path)` | `socket()` → `connect(path)` | `socket.socket` (ブロッキング) |
 | `sockat.connect_nonblocking(path)` | `socket()` → `setblocking(False)` → `connect(path)` | 非ブロッキングの `socket.socket` |
+| `sockat.any.bind_any(path)` | `bind` と同じ + 届かない所は何かを失ってでも | `AnyBinding` ([後述](#bind_any)) |
 
 - 標準が受け付ける長さのパスでは、戻り値は素の `socket.socket`。長いパスでは、アドレスを元のパスで返す `socket.socket` の subclass ([後述](#アドレスは元のパスを返す))
 - `path` は `str` / `bytes` / `os.PathLike` (標準の `bind` / `connect` は `os.PathLike` を受けないが、sockat は受ける)
@@ -51,35 +52,111 @@ finally:
 - bind が通った直後 (listen の前) に、ソケットファイルの realpath と `(st_dev, st_ino)` を覚える。覚えられなければ listener を閉じて例外を返す
 - `discard()` は、その realpath のファイルがまだ同じファイルの時だけ消す。無い時、別のファイルに置き換わっている時は何もしない
 - 確かめてから消すまでの間の置き換えは防げない (POSIX に inode を指定して消す手段が無い)
-- `discard()` は何度呼んでもよい。listener は閉じない (閉じるのは利用者。asyncio に渡したら asyncio)
+- `discard()` は何度呼んでもよい。listener は閉じない (閉じるのは利用者。asyncio に渡したら asyncio)。`discard` の名前と、listener を閉じない形はハブの [DR-0014](https://github.com/kawaz/sockat/blob/main/docs/decisions/DR-0014-discard-removes-only.md) で確定
 - ファイルが無い以外のエラー (ディレクトリの `EACCES` 等) は `OSError`
 - 短いパスでも同じに動く。Linux の abstract のアドレスでは何もしない
-- 名前は仮 ([DR-0004](./decisions/DR-0004-own-directory-route.md))
+
+## bind_any
+
+```python
+from sockat.any import Loss, bind_any
+
+listener, losses, route, skipped = bind_any(path)
+if Loss.RECREATABLE_SPELLING in losses:
+    ...  # ソケットファイルは元のパスで消す (discard 等)
+server = await asyncio.start_unix_server(handle, sock=listener)
+```
+
+`bind` と同じ経路を試し、`bind` が `ENAMETOOLONG` になる所 (経路が全部使えない所) では、最後に何かを失ってでも届かせる経路 [symlink](#symlink-bind_any) を試す ([DR-0005](./decisions/DR-0005-bind-any.md)、ハブの [DR-0013](https://github.com/kawaz/sockat/blob/main/docs/decisions/DR-0013-any-means-reach-at-any-cost.md))。
+
+- `sockat.any` は `import sockat` では読み込まれない。使う人が `from sockat.any import bind_any` で選ぶ (選ぶ手間が、失うものを受け入れる意思表示になる)
+- `bind` が届く所では `bind` と同じ経路で、同じ listener を返す
+- 仕様の `connect_any` は無い。足すのは fork の経路で、Python には fork の経路が無いので `connect` と変わらない
+
+戻り値は `AnyBinding` (`NamedTuple`)。
+
+| 項目 | 中身 |
+|---|---|
+| `listener` | listen 済みの `socket.socket`。`bind` と同じく、長いパスではアドレスを元のパスで返す |
+| `losses` | 通った経路で失ったものの並び (`tuple[Loss, ...]`)。何も失っていなければ空。分岐にはこれを使う |
+| `route` | 通った経路の名前 (`str`)。[仕様の「経路の名前」](https://github.com/kawaz/sockat/blob/main/docs/SPEC-ja.md#経路の名前) (`"standard"`、`"thread-cwd"`、`"symlink"` 等) |
+| `skipped` | `route` より前に試して使えなかった経路の並び (試した順)。各要素は `Skipped(name, reason)` で、`name` は経路の名前、`reason` は使えなかった理由の短い英語 (`"path too long"`、`"seccomp filter"`、`"/proc unusable"`、`"no place for D"` 等) |
+
+`Loss` は `enum.StrEnum` で、文字列にすると (`str()`、`.value`) [仕様の「失うもの」](https://github.com/kawaz/sockat/blob/main/docs/SPEC-ja.md#失うもの)の名前になる。
+
+| `Loss` | 名前 | 失うもの | 付く時 |
+|---|---|---|---|
+| `RESPELLED` | `respelled` | カーネルが返すアドレスが元のパスでない。綴りは他の利用者に見えうる (Linux の `/proc/net/unix`) ので、プロセスの cwd が他人も書ける場所だと、相手が作り直した後にその綴りで消すと相手の選んだディレクトリの同じ名前のファイルを消しうる。元のパスで消せば当たらない | standard 以外の経路を通った |
+| `RECREATABLE_SPELLING` | `recreatable-spelling` | カーネルが返す綴りが共有の置き場 (`/tmp` 等) を通る。他の利用者が綴りを見て作り直した後にその綴りで消すと、相手の選んだディレクトリの同じ名前のファイルを消しうる。元のパスで消せば当たらない | symlink が共有の置き場を通った |
+| `CWD_RELATIVE` | `cwd-relative` | カーネルが覚えた綴りが cwd からの相対パス。cwd を変えた後にその綴りで消す・引くと別の場所に当たる (標準が元から持つ危険)。元のパスを絶対パスにして消せば当たらない | 相対パスで standard を通った (abstract のアドレスには付かない) |
+| `FORKED` | `forked` | fork の副作用 | sockat-py には fork の経路が無いので付かない |
+
+- 名前の間に大小や包含の関係は無い。名前は約束で、変えずに足すだけ。知らない名前は「何かを失った」とだけ読む
+- `route`・`skipped` は診断用で、中身を約束しない (経路は増えたり変わったりする)
+- `route` より前に試した経路は、どれも使えなかったもの (実際に bind して失敗したら、そこで例外を返して次を試さない)
+- 仕様の fork の経路 (`fork`、`fork-sockdir`) は、試す順の位置に「sockat-py に無い」理由で `skipped` に入る
+
+| 例 (macOS) | `losses` | `route` | `skipped` の `name` |
+|---|---|---|---|
+| 短い絶対パス | (空) | `standard` | (無し) |
+| 短い相対パス | `cwd-relative` | `standard` | (無し) |
+| 長いパス | `respelled` | `thread-cwd` | `standard` |
+| 長いパスで、D をどこにも作れない | `respelled` | `thread-cwd-sockdir` | `standard`、`thread-cwd`、`fork` |
+| 長いパスで、スレッド cwd を使えず、持ち主だけが書ける置き場がある | `respelled` | `symlink` | `standard`、`thread-cwd`、`fork` |
+| 同、共有の置き場だけがある | `respelled`、`recreatable-spelling` | `symlink` | `standard`、`thread-cwd`、`fork` |
+
+失敗した時は `bind` と同じ例外 (型と `errno` はそのまま) に、次の 2 つの属性を付けて送出する。
+
+| 属性 | 中身 |
+|---|---|
+| `skipped` | 失敗するまでに試して使えなかった経路の並び (`AnyBinding.skipped` と同じ形) |
+| `route` | 実際に bind して失敗した経路の名前。そこまで進まなかった時 (ディレクトリが無い、どの経路も使えない `ENAMETOOLONG`、引数の誤り) は `None` |
+
+```python
+try:
+    bound = bind_any(path)
+except OSError as e:
+    print(e.errno, getattr(e, "route", None), getattr(e, "skipped", ()))
+```
+
+### symlink (bind_any)
+
+1. 置き場の候補を集める: `XDG_RUNTIME_DIR`、`TMPDIR` (それぞれ空でない絶対パスの時)、`/tmp` の順。`/tmp` か前の候補と区切り単位で同じ綴りは飛ばす
+2. 候補を symlink を辿って `stat` し、持ち主だけが書ける置き場 (ディレクトリ、持ち主が自分、`mode & 0o022 == 0`) を先に、共有の置き場 (ディレクトリ、sticky、持ち主が root か自分) を後に並べる。どちらでもない候補は使わない
+3. 順に、綴り `<置き場>/sockat.XXXXXXXXXX/<ファイル名>` が `sun_path` に収まるかを確かめ、収まれば置き場にソケットのディレクトリの realpath を指す `sockat.XXXXXXXXXX` (乱数 10 文字、`EEXIST` で引き直し 16 回で打ち切り) を作る。収まらない・作れない候補には何も残さずに次へ進む
+4. その綴りで bind し、成功でも失敗でも symlink を消す。bind が失敗したら (`EADDRINUSE` 等) その例外を返し、次の置き場を試さない
+5. どの候補でも届かなければ `ENAMETOOLONG`
+
+- 持ち主だけが書ける置き場を通った時、綴りを作り直せるのは自分だけなので、symlink を消した後のカーネルの綴りは何にも当たらない
+- 共有の置き場を通った時、symlink を消した後に他の利用者が同じ綴りを作り直せる (Linux の `/proc/net/unix` 等で綴りが見える)。カーネルの綴りでファイルを消す処理は、相手の選んだディレクトリの同じ名前のファイルを消しうる。sockat の listener は元のパスを返すので、asyncio の後始末は元のパスで消す
+- 届くファイル名は `sun_path` − 1 − (置き場の綴りの長さ + 19) バイトまで (`/tmp` なら Linux 84、macOS / BSD 80)
 
 ## 長いパスへの届き方
 
-標準が受け付ける長さ (`sun_path` − 1) のパスは標準にそのまま渡す。
+標準が受け付ける長さ (`sun_path` − 1) のパスは標準にそのまま渡す (経路 standard)。
 
 | OS | 標準にそのまま渡す長さ |
 |---|---|
 | Linux / Android / illumos | 107 バイトまで |
 | macOS / iOS / FreeBSD / NetBSD / OpenBSD | 103 バイトまで |
 
-それを超えるパスは、まずソケットのディレクトリを引き (無ければ `ENOENT`)、OS ごとに次の順に試し、最初に使えた経路で bind / connect する。どの経路も呼び出し元のプロセスの cwd も呼び出し元のスレッドの cwd も変えない。
+それを超えるパスは、まずソケットのディレクトリを引き (無ければ `ENOENT`)、OS ごとに次の順に経路を試し、最初に使えた経路で bind / connect する。どの経路も呼び出し元のプロセスの cwd も呼び出し元のスレッドの cwd も変えない。経路は[仕様の「経路の名前」](https://github.com/kawaz/sockat/blob/main/docs/SPEC-ja.md#経路の名前)で呼ぶ。
 
 | OS | `bind` | `connect` / `connect_nonblocking` |
 |---|---|---|
-| Linux / Android (`/proc` を使える) | [スレッド cwd](#手段) → [/proc 版](#手段) | [スレッド cwd](#手段) → [/proc 版](#手段) → [/proc](#予備の経路) → [fd で掴む形](#予備の経路) → [symlink](#予備の経路) |
-| Linux / Android (`/proc` を使えない) | [スレッド cwd](#手段) | [スレッド cwd](#手段) → [相対パス](#予備の経路) → [symlink](#予備の経路) |
-| FreeBSD | [bindat](#手段) | [connectat](#手段) → [connectat (ソケットのディレクトリ)](#予備の経路) |
-| macOS / iOS | [スレッド cwd](#手段) | [スレッド cwd](#手段) → [相対パス](#予備の経路) → [広げた sockaddr](#予備の経路) → [symlink](#予備の経路) |
-| NetBSD / OpenBSD / illumos / その他の Unix | なし (`ENAMETOOLONG`) | [相対パス](#予備の経路) → [symlink](#予備の経路) |
+| Linux / Android (`/proc` を使える) | [thread-cwd](#d-を通す経路) → [proc](#d-を通す経路) | [thread-cwd](#d-を通す経路) → [proc](#d-を通す経路) → [proc-direct](#予備の経路) → [proc-held](#予備の経路) → [symlink](#予備の経路) |
+| Linux / Android (`/proc` を使えない) | [thread-cwd](#d-を通す経路) | [thread-cwd](#d-を通す経路) → [relative](#予備の経路) → [symlink](#予備の経路) |
+| FreeBSD | [at](#d-を通す経路) | [at](#d-を通す経路) → [at-direct](#予備の経路) |
+| macOS / iOS | [thread-cwd](#d-を通す経路) | [thread-cwd](#d-を通す経路) → [relative](#予備の経路) → [widened](#予備の経路) → [symlink](#予備の経路) |
+| NetBSD / OpenBSD / illumos / その他の Unix | なし (`ENAMETOOLONG`) | [relative](#予備の経路) → [symlink](#予備の経路) |
 
-- スレッド cwd・/proc 版・bindat / connectat は[中心の経路](#中心の経路)の手段。D をどこにも作れない時、bind は同じ手段を [D 無しの形](#d-無しの形)で試す
-- 仕様の fork の経路は作っていない。Python から fork した子は Python を実行するので、仕様が求める「子の区間は async-signal-safe」を満たせないため ([DR-0001](./decisions/DR-0001-python-port-design.md))。仕様で bind が fork に進む所は `ENAMETOOLONG` になる (ハブの D12-Q3 で kawaz 裁定)
+- D をどこにも作れない時、bind は同じ手段を [D 無しの形](#d-無しの形) (thread-cwd-sockdir、at-sockdir、proc-sockdir) で試す
+- 仕様の fork の経路 (fork、fork-sockdir、fork-direct) は作っていない。Python から fork した子は Python を実行するので、仕様が求める「子の区間は async-signal-safe」を満たせないため ([DR-0001](./decisions/DR-0001-python-port-design.md))。仕様で bind が fork に進む所は `ENAMETOOLONG` になる (ハブの D12-Q3 で kawaz 裁定)。そこでも届かせたい時は [`bind_any`](#bind_any)
 - 順番の最後まで届かなかったパスは `ENAMETOOLONG` になる
 
-### 中心の経路
+### D を通す経路
+
+thread-cwd・at・proc。
 
 1. 置き場に自分専用のディレクトリ D (mode 0700) を作り、fd で開いて掴む
 2. D が自分の物 (ディレクトリ、持ち主が自分、group と other に権限が無い) か `fstat` で確かめ、0700 にそろえる
@@ -89,6 +166,7 @@ finally:
 
 - ディレクトリの深さによらず届く。綴り `R/<ファイル名>` に収まるファイル名は Linux 96、Apple の OS / FreeBSD 92 バイトまで
 - 確かめに落ちた D は他人の物とみなし、中身も含めて触らない
+- 作った直後の D を開けない時 (umask が持ち主の権限を削った時。macOS は検索権限、`O_RDONLY` で開く OS は読み取り権限) は、名前で `stat` (symlink を辿らない) して手順 2 と同じ条件なら `rmdir` で消し、その置き場では作れないとして次へ進む。名前で確かめてから消すまでにすり替えられても、`rmdir` は空のディレクトリしか消さない (ハブの D12-Q5)
 - 長さと手段を使えるかは D を作る前に確かめる。使えなければ何も作らずに次へ進む
 
 #### D の置き場
@@ -105,48 +183,48 @@ finally:
 
 #### 手段
 
-| 手段 | OS | やり方 | 使えない時 |
+| 経路 | OS | やり方 | 使えない時 |
 |---|---|---|---|
-| スレッド cwd | Linux / Android | 使い捨ての `threading.Thread` で ctypes の `unshare(CLONE_FS)` → `os.fchdir(D)` → `R/<ファイル名>` | seccomp の filter が掛かっている (docker の既定、systemd の `SystemCallFilter=` 等。filter が `unshare` でプロセスを kill しうるので呼ばない)、`unshare` を断られた、スレッドを作れない |
-| スレッド cwd | macOS / iOS | 使い捨ての `threading.Thread` で ctypes の `pthread_fchdir_np(D)` (libSystem の非公開 API) → `R/<ファイル名>` | 関数が無い・失敗した、スレッドを作れない |
-| bindat / connectat | FreeBSD | ctypes の `bindat(2)` / `connectat(2)` に D の fd と `R/<ファイル名>` | ファイル名 > 92 |
-| /proc 版 | Linux / Android | `/proc/self/fd/<D の fd>/R/<ファイル名>` を標準に渡す | `/proc/self/fd/<fd>` を引けない (`/proc` の無い chroot や最小のコンテナ)、綴りが 107 バイトを超える (ファイル名およそ 79 まで) |
+| thread-cwd | Linux / Android | 使い捨ての `threading.Thread` で ctypes の `unshare(CLONE_FS)` → `os.fchdir(D)` → `R/<ファイル名>` | seccomp の filter が掛かっている (docker の既定、systemd の `SystemCallFilter=` 等。filter が `unshare` でプロセスを kill しうるので呼ばない)、`unshare` を断られた、スレッドを作れない |
+| thread-cwd | macOS / iOS | 使い捨ての `threading.Thread` で ctypes の `pthread_fchdir_np(D)` (libSystem の非公開 API) → `R/<ファイル名>` | 関数が無い・失敗した、スレッドを作れない |
+| at | FreeBSD | ctypes の `bindat(2)` / `connectat(2)` に D の fd と `R/<ファイル名>` | ファイル名 > 92 |
+| proc | Linux / Android | `/proc/self/fd/<D の fd>/R/<ファイル名>` を標準に渡す | `/proc/self/fd/<fd>` を引けない (`/proc` の無い chroot や最小のコンテナ)、綴りが 107 バイトを超える (ファイル名およそ 79 まで) |
 
-- スレッド cwd では、プロセスの cwd も他のスレッドの cwd も変わらない。connect した相手から見える peer の pid も呼び出し元のまま
-- Linux でスレッド cwd が使えない時は、同じ D で /proc 版を試す
+- thread-cwd では、プロセスの cwd も他のスレッドの cwd も変わらない。connect した相手から見える peer の pid も呼び出し元のまま
+- Linux で thread-cwd が使えない時は、同じ D で proc を試す
 
 #### D 無しの形
 
-bind だけが、D をどこにも作れない時に試す。
+bind だけが、D をどこにも作れない時に試す。経路は thread-cwd-sockdir (FreeBSD は at-sockdir)、proc-sockdir の順。
 
 1. ソケットのディレクトリの中に、ソケットのディレクトリの realpath を指す symlink R を、ソケットのディレクトリの fd を基準に作る。名前は `.sockat.` + 乱数 10 文字
-2. ソケットのディレクトリの fd を基準に、[手段](#手段)を同じ順 (スレッド cwd、FreeBSD は bindat → /proc 版) に使って `.sockat.XXXXXXXXXX/<ファイル名>` で bind する。スレッド cwd は使い捨てのスレッドの cwd をソケットのディレクトリに移し、/proc 版は `/proc/self/fd/<ソケットのディレクトリの fd>/.sockat.XXXXXXXXXX/<ファイル名>` を渡す
+2. ソケットのディレクトリの fd を基準に、[手段](#手段)を同じ順に使って `.sockat.XXXXXXXXXX/<ファイル名>` で bind する。thread-cwd-sockdir は使い捨てのスレッドの cwd をソケットのディレクトリに移し、proc-sockdir は `/proc/self/fd/<ソケットのディレクトリの fd>/.sockat.XXXXXXXXXX/<ファイル名>` を渡す
 3. 成功でも失敗でも R を消す
 
-- 綴りは 19 バイト + ファイル名。ファイル名は Linux 88、macOS / FreeBSD 84 バイトまで (/proc 版はおよそ 72)
+- 綴りは 19 バイト + ファイル名。ファイル名は Linux 88、macOS / FreeBSD 84 バイトまで (proc-sockdir はおよそ 72)
 - ソケットのディレクトリを開けない、手段を使えない、綴りが収まらない時は、何も作らずに `ENAMETOOLONG`。R を作れない時 (名前の衝突が 16 回続いた等) も `ENAMETOOLONG`
 - D を作れて手段が全部使えなかった時は、この形を試さずに `ENAMETOOLONG`
 
 ### 予備の経路
 
-connect 系だけが、中心の経路を使えない時 (手段が無い、D を作れない、ファイル名が収まらない) に OS ごとの順で試す。
+connect 系だけが、D を通す経路を使えない時 (手段が無い、D を作れない、ファイル名が収まらない) に OS ごとの順で試す。
 
 | 経路 | やり方 | 使える条件 |
 |---|---|---|
-| /proc | ソケットのディレクトリの fd で `/proc/self/fd/<fd>/<ファイル名>` を標準に渡す | Linux / Android。ソケットのディレクトリを開け、綴りが 107 バイト以内 (ファイル名およそ 90 まで) |
-| fd で掴む形 | 中心の経路と同じ D を作り、その中にソケットのファイルを指す symlink `s` を作って `/proc/self/fd/<D の fd>/s` で connect し、消す | Linux / Android。D をどこかに作れる ([DR-0002](./decisions/DR-0002-unsafe-base-held-by-fd.md)) |
-| 相対パス | cwd からの相対パスを標準に渡す。文字列を書き直すだけで `chdir` しない | 元のパスが絶対パスで、相対パスが標準にそのまま渡せる長さ |
-| 広げた sockaddr | ctypes で libc の `connect(2)` に、`sun_path` を超えて 253 バイトまで入る sockaddr で元のパス (無理なら相対パス) を渡す | macOS / iOS。パスが 253 バイト以内で、カーネルが受け付ける |
+| proc-direct | ソケットのディレクトリの fd で `/proc/self/fd/<fd>/<ファイル名>` を標準に渡す | Linux / Android。ソケットのディレクトリを開け、綴りが 107 バイト以内 (ファイル名およそ 90 まで) |
+| proc-held | D を通す経路と同じ D を作り、その中にソケットのファイルを指す symlink `s` を作って `/proc/self/fd/<D の fd>/s` で connect し、消す | Linux / Android。D をどこかに作れる ([DR-0002](./decisions/DR-0002-unsafe-base-held-by-fd.md)) |
+| relative | cwd からの相対パスを標準に渡す。文字列を書き直すだけで `chdir` しない | 元のパスが絶対パスで、相対パスが標準にそのまま渡せる長さ |
+| widened | ctypes で libc の `connect(2)` に、`sun_path` を超えて 253 バイトまで入る sockaddr で元のパス (無理なら相対パス) を渡す | macOS / iOS。パスが 253 バイト以内で、カーネルが受け付ける |
 | symlink | ソケットのファイルを指す `sockat.XXXXXXXXXX` を置き場に作り、それを渡して、すぐ消す | 安全な置き場があり、綴りが収まる (macOS は広げた sockaddr で 253 バイトまで) |
-| connectat (ソケットのディレクトリ) | ctypes の `connectat(2)` にソケットのディレクトリの fd とファイル名 | FreeBSD。ソケットのディレクトリを開け、ファイル名が 103 バイト以内 |
+| at-direct | ctypes の `connectat(2)` にソケットのディレクトリの fd とファイル名 | FreeBSD。ソケットのディレクトリを開け、ファイル名が 103 バイト以内 |
 
-- 相対パス: パスが cwd (`getcwd`、または cwd と同じディレクトリを指す `$PWD`) の下にあれば前を削る。そうでなければ両方を実パスに揃えて `..` で上る綴りを作る。短い方を使う
-- 相対パス: 元と同じディレクトリを指すことを確かめてから使い、connect の後に cwd が変わっていないことも確かめる ([後述](#相対パスの経路は他のスレッドの-chdir-に弱い))
+- relative: パスが cwd (`getcwd`、または cwd と同じディレクトリを指す `$PWD`) の下にあれば前を削る。そうでなければ両方を実パスに揃えて `..` で上る綴りを作る。短い方を使う
+- relative: 元と同じディレクトリを指すことを確かめてから使い、connect の後に cwd が変わっていないことも確かめる ([後述](#relative-は他のスレッドの-chdir-に弱い))
 - symlink の置き場の候補は `TMPDIR` (絶対パスで `/tmp` と違う時)、`/tmp` の順
 - symlink の**安全な置き場**はディレクトリで、次のどちらか。満たさない候補には何も作らず次へ進む
   - sticky bit が立っていて、持ち主が root か自分 (`/tmp` がこれ)
   - 持ち主が自分で、group と other に書き込み権限が無い (macOS の `$TMPDIR` がこれ)
-- bind は /proc (R を通さない `/proc/self/fd/<fd>/<ファイル名>`)・相対パス・広げた sockaddr・置き場の symlink を使わない。綴りが後で無関係なファイルに当たるか (/proc は閉じた fd の番号の使い回し、相対パスは cwd の変化)、listener のアドレスが途中で切れて標準の `getsockname` が読み過ぎるか (広げた sockaddr)、中心の経路で足りる (symlink) ため ([DR-0004](./decisions/DR-0004-own-directory-route.md))
+- `bind` は proc-direct・relative・widened・symlink を使わない。綴りが後で無関係なファイルに当たるか (proc-direct は閉じた fd の番号の使い回し、relative は cwd の変化)、listener のアドレスが途中で切れて標準の `getsockname` が読み過ぎるか (widened)、D を通す経路で足りる (symlink) ため ([DR-0004](./decisions/DR-0004-own-directory-route.md))。symlink は `bind_any` だけが最後に使う ([後述](#symlink-bind_any))
 
 ### 経路の失敗の扱い
 
@@ -158,14 +236,15 @@ connect 系だけが、中心の経路を使えない時 (手段が無い、D �
 
 | OS | `bind` | `connect` / `connect_nonblocking` |
 |---|---|---|
-| Linux / Android (`/proc` を使える) | ファイル名 > 96 (スレッド cwd を使えなければおよそ 79) | 届く (fd で掴む形) |
-| Linux / Android (`/proc` を使えない) | ファイル名 > 96、またはスレッド cwd を使えない | 中心の経路が使えず (ファイル名 > 96 かスレッド cwd を使えない)、相対パス > 107、symlink も使えない |
+| Linux / Android (`/proc` を使える) | ファイル名 > 96 (thread-cwd を使えなければおよそ 79) | 届く (proc-held) |
+| Linux / Android (`/proc` を使えない) | ファイル名 > 96、または thread-cwd を使えない | D を通す経路が使えず (ファイル名 > 96 か thread-cwd を使えない)、relative > 107、symlink も使えない |
 | FreeBSD | ファイル名 > 92 | ファイル名 > 103 |
-| macOS / iOS | ファイル名 > 92、またはスレッド cwd を使えない | 中心の経路が使えず (ファイル名 > 92 かスレッド cwd を使えない)、元のパスも相対パスも > 253、symlink も使えない |
-| NetBSD / OpenBSD | 長いパス全部 | 相対パス > 103、symlink も使えない |
-| illumos | 長いパス全部 | 相対パス > 107、symlink も使えない |
+| macOS / iOS | ファイル名 > 92、または thread-cwd を使えない | D を通す経路が使えず (ファイル名 > 92 か thread-cwd を使えない)、元のパスも相対パスも > 253、symlink も使えない |
+| NetBSD / OpenBSD | 長いパス全部 | relative > 103、symlink も使えない |
+| illumos | 長いパス全部 | relative > 107、symlink も使えない |
 
-- D をどこにも作れない時、bind は [D 無しの形](#d-無しの形)でファイル名 88 (macOS / FreeBSD 84、/proc 版だけならおよそ 72) まで届く (ソケットのディレクトリを開けて R を作れる時。手段を使えない環境は上の表と同じく届かない)。connect は予備の経路の分だけ届く (fd で掴む形は使えない)
+- D をどこにも作れない時、bind は [D 無しの形](#d-無しの形)でファイル名 88 (macOS / FreeBSD 84、proc-sockdir だけならおよそ 72) まで届く (ソケットのディレクトリを開けて R を作れる時。手段を使えない環境は上の表と同じく届かない)。connect は予備の経路の分だけ届く (proc-held は使えない)
+- `bind_any` は、`bind` が `ENAMETOOLONG` になる所でも、[symlink](#symlink-bind_any) の綴り `<置き場>/sockat.XXXXXXXXXX/<ファイル名>` が `sun_path` に収まり、使える置き場があれば届く
 - symlink を使えないのは、symlink を作れる安全な置き場が無い時 (`TMPDIR` も `/tmp` も使えないサンドボックス等)
 - パス全体が `PATH_MAX` (macOS 1024、Linux 4096 バイト) を超えるパスは、どの経路でも `ENAMETOOLONG` になる (他のシステムコールでも開けないパスで、sockat の対象外)
 
@@ -177,7 +256,7 @@ connect 系だけが、中心の経路を使えない時 (手段が無い、D �
 
 | ソケット | 元のパスを返すもの | それ以外 |
 |---|---|---|
-| `bind` / `bind_ex` の listener | `getsockname()` | 標準のまま |
+| `bind` / `bind_ex` / `bind_any` の listener | `getsockname()` | 標準のまま |
 | listener の `accept()` が返すソケット | `getsockname()` | `getpeername()` は標準のまま (相手の綴り。たいてい空) |
 | `connect` / `connect_nonblocking` のソケット | `getpeername()` | `getsockname()` は標準のまま (たいてい空) |
 
@@ -185,14 +264,15 @@ connect 系だけが、中心の経路を使えない時 (手段が無い、D �
 - `dup()` したソケットも同じに返す。`socket.fromfd` 等で fd から作り直したソケットは標準の型なので、カーネルの綴りを返す
 - これで、アドレスを読み返す上位 (asyncio の後始末、`repr`、ログ) が元のパスで動く ([DR-0003](./decisions/DR-0003-report-the-given-path.md))
 
-カーネルが返す綴りは次の通り (`socket.socket.getsockname(s)` のように標準の実装を呼ぶと見える)。R は bind の後に消えているので、この綴りを後でどこで解決しても何にも当たらない。
+カーネルが返す綴りは次の通り (`socket.socket.getsockname(s)` のように標準の実装を呼ぶと見える)。R と symlink は bind の後に消えているので、この綴りを後で解決しても普段は何にも当たらない。ただし綴りは他の利用者に見えうる (Linux の `/proc/net/unix`) ので、プロセスの cwd が他人も書ける場所の時と、共有の置き場の symlink を通った時は、他の利用者が綴りを作り直せる ([`bind_any` の `losses`](#bind_any))。ソケットファイルは綴りでなく元のパスで消す。R を乱数の名前にするのは、たまたまある同じ名前の物に当たる事故を防ぐためで、他の利用者への防御ではない。
 
-| bind の手段 | 返るもの |
+| bind の経路 | 返るもの |
 |---|---|
-| スレッド cwd、bindat | `R/<ファイル名>` |
-| /proc 版 | `/proc/self/fd/<fd>/R/<ファイル名>` |
-| D 無しの形のスレッド cwd、bindat | `.sockat.XXXXXXXXXX/<ファイル名>` |
-| D 無しの形の /proc 版 | `/proc/self/fd/<fd>/.sockat.XXXXXXXXXX/<ファイル名>` |
+| thread-cwd、at | `R/<ファイル名>` |
+| proc | `/proc/self/fd/<fd>/R/<ファイル名>` |
+| thread-cwd-sockdir、at-sockdir | `.sockat.XXXXXXXXXX/<ファイル名>` |
+| proc-sockdir | `/proc/self/fd/<fd>/.sockat.XXXXXXXXXX/<ファイル名>` |
+| symlink (`bind_any`) | `<置き場>/sockat.XXXXXXXXXX/<ファイル名>`。共有の置き場では他の利用者が作り直せる |
 
 他のプログラムが広げた sockaddr で bind した listener (macOS の Node.js 等) に connect した時の `getpeername()` は途中で切れたパスで、macOS の CPython では切れた後ろに無関係なバイトが付くことがある (標準の `getpeername` の振る舞い。取得で例外にはならない。[原因](./findings/2026-11-18-cpython-getsockname-widened-sockaddr.md))。
 
@@ -206,9 +286,9 @@ connect 系だけが、中心の経路を使えない時 (手段が無い、D �
 
 ### ディレクトリは呼ぶ少し前に引かれる
 
-中心の経路と D 無しの形は R を作る時にソケットのディレクトリを実パスにし、予備の経路の /proc・相対パス・connectat はディレクトリを先に引いて (開く、または実パスにする) から、ファイル名で bind / connect する。その間に途中のディレクトリが rename されたり symlink が張り替えられたりすると、引いた時点のディレクトリにソケットができる。広げた sockaddr・symlink・fd で掴む形は標準と同じに振る舞う。
+D を通す経路・D 無しの形・`bind_any` の symlink は R や symlink を作る時にソケットのディレクトリを実パスにし、予備の経路の proc-direct・relative・at-direct はディレクトリを先に引いて (開く、または実パスにする) から、ファイル名で bind / connect する。その間に途中のディレクトリが rename されたり symlink が張り替えられたりすると、引いた時点のディレクトリにソケットができる。widened・connect の symlink・proc-held は標準と同じに振る舞う。
 
-### 相対パスの経路は、他のスレッドの chdir に弱い
+### relative は他のスレッドの chdir に弱い
 
 sockat 自身は cwd を変えない。connect の後に cwd が変わっていたら、結果を捨てて errno の無い `OSError` を返す。変えて戻した場合は見えない。
 
@@ -222,10 +302,8 @@ sticky でなく他人も書けるソケットのディレクトリでは、D �
 
 | 場所 | 残るもの |
 |---|---|
-| 置き場 (`TMPDIR` か `/tmp`) | `sockat.XXXXXXXXXX` (D か、connect の symlink) |
+| 置き場 (`TMPDIR` か `/tmp`。`bind_any` は `XDG_RUNTIME_DIR` も) | `sockat.XXXXXXXXXX` (D か、connect や `bind_any` の symlink) |
 | ソケットのディレクトリ | `.sockat.XXXXXXXXXX` (D か、D 無しの形の R) |
-
-- macOS で umask が持ち主の検索権限を削っている (root 以外で 0777 / 0177 等) と、作った D を開けず、自分の物か確かめられないので消さずに残す。`O_RDONLY` で開く OS では読み取り権限で同じ
 
 ## エラー
 
@@ -239,7 +317,7 @@ sticky でなく他人も書けるソケットのディレクトリでは、D �
 | どの経路にも収まらない ([どこから届かなくなるか](#どこから届かなくなるか)) | `OSError` (`ENAMETOOLONG`) |
 | 標準にそのまま渡せない長さのパスで、名前で終わらない | `ValueError` |
 | 先頭以外に NUL を含むパス | `ValueError` |
-| 相対パスの経路の途中で cwd が変わった | errno の無い `OSError` |
+| relative の途中で cwd が変わった | errno の無い `OSError` |
 
 macOS では、相手の backlog が満杯の時も connect は `ECONNREFUSED` を返す。`ECONNREFUSED` を見てソケットファイルを消すような処理は、macOS では生きている listener のソケットファイルを消しうる (カーネルの振る舞いで、標準でも同じ)。
 
@@ -256,11 +334,13 @@ reader, writer = await asyncio.open_unix_connection(sock=sockat.connect_nonblock
 - 引数を足さずに、短いパスと同じに動く。Python 3.13 以降の asyncio は、server を閉じる時に元のパスのソケットファイルを消す (`cleanup_socket`。listener の `getsockname()` が元のパスを返すので、それで消す)。3.11 / 3.12 の asyncio は消さない (標準と同じ)
 - transport の `get_extra_info('sockname')` (server 側) / `get_extra_info('peername')` (client 側) も元のパス
 - `bind_ex` の listener も同じに渡せる。`discard()` は server の動作中に呼んでも、閉じた後に呼んでもよい
+- `bind_any` の `listener` も同じに渡せる
 
-`connect_nonblocking` は相手を待たないので、イベントループから直接呼べる。`bind` も相手を待たない (スレッド cwd ではスレッドの終わりを待つが、bind してすぐ終わる)。
+`connect_nonblocking` は相手を待たないので、イベントループから直接呼べる。`bind` も相手を待たない (thread-cwd ではスレッドの終わりを待つが、bind してすぐ終わる)。
 
 ## 確かめていないこと
 
 - Android と iOS は動かしていない。Linux / macOS と同じ経路を使う
 - FreeBSD・NetBSD・OpenBSD・illumos は CI の VM で試験を回している
 - ブロックしない connect が backlog の満杯で返すエラーは、Linux と macOS でだけ確かめた
+- `bind_any` の symlink を FreeBSD で通す試験は無い (at を使えなくできないので、symlink に進む所を作れない)

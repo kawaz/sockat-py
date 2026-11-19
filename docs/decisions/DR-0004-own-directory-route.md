@@ -1,13 +1,13 @@
-# DR-0004: 中心の経路 (自分専用のディレクトリ D と R) の Python での作り方、bind_ex
+# DR-0004: D を通す経路 (自分専用のディレクトリ D と R) の Python での作り方、bind_ex
 
-- Status: Accepted (ハブの DR-0012 の Python での作り方。統括の判断 2026-11-19。D をどこにも作れない時の bind の D 無しの形はハブの D12-Q1 の kawaz 裁定 (a)。中心の経路が使えない時の bind が `ENAMETOOLONG` なのはハブの D12-Q3 の kawaz 裁定 (a)。`bind_ex` の形はハブの D12-Q4 で kawaz 裁定待ち)
+- Status: Accepted (ハブの DR-0012 の Python での作り方。統括の判断 2026-11-19。D をどこにも作れない時の bind の D 無しの形はハブの D12-Q1 の kawaz 裁定 (a)。D を通す経路が使えない時の `bind` が `ENAMETOOLONG` なのはハブの D12-Q3 の kawaz 裁定 (a)。`bind_ex` の `discard` が listener を閉じない形と名前はハブの D12-Q4 の kawaz 裁定 (ハブの DR-0014)。開けない D を消すのはハブの D12-Q5 の kawaz 裁定)
 - Date: 2026-11-19
 
 ## Context
 
-- ハブの [DR-0012](https://github.com/kawaz/sockat/blob/main/docs/decisions/DR-0012-own-directory-and-thread-cwd.md) が、長いパスは自分専用のディレクトリ D を fd で掴み、その中の乱数の symlink R を通して `R/<ファイル名>` で bind / connect する形にした。bind は /proc・相対パス・広げた sockaddr・置き場の symlink を使わず、connect はそれらを予備の経路にする
-- SPEC の bind は中心の経路が使えない時に fork の経路へ進むが、Python 版は fork の経路を作らない ([DR-0001](DR-0001-python-port-design.md))
-- SPEC の bind は D をどこにも作れない時、D 無しの形 (ソケットのディレクトリに R を作り、ソケットのディレクトリの fd を基準にする) を中心の経路と同じ手段の順に試し、最後に fork へ進む
+- ハブの [DR-0012](https://github.com/kawaz/sockat/blob/main/docs/decisions/DR-0012-own-directory-and-thread-cwd.md) が、長いパスは自分専用のディレクトリ D を fd で掴み、その中の乱数の symlink R を通して `R/<ファイル名>` で bind / connect する形にした。bind は proc-direct・relative・widened・symlink を使わず、connect はそれらを予備の経路にする
+- SPEC の bind は D を通す経路が使えない時に fork の経路へ進むが、Python 版は fork の経路を作らない ([DR-0001](DR-0001-python-port-design.md))
+- SPEC の bind は D をどこにも作れない時、D 無しの形 (ソケットのディレクトリに R を作り、ソケットのディレクトリの fd を基準にする) を D を通す経路と同じ手段の順に試し (thread-cwd-sockdir → proc-sockdir)、最後に fork-sockdir へ進む
 - SPEC は後始末つきの bind (`_ex`) を足した
 
 ## Decision
@@ -18,12 +18,12 @@
 |---|---|---|
 | 1 | `sun_path` − 1 以下なら標準にそのまま (環境も読まない) | 同じ |
 | 2 | ソケットのディレクトリを `os.stat` で引く (無ければ `ENOENT`、ディレクトリでなければ `ENOTDIR`)。fd が要る経路のために開く | 同じ |
-| 3 | 中心の経路 (手段は決定 3 の順) | 同じ |
+| 3 | D を通す経路 (決定 3 の順) | 同じ |
 | 4 | D をどこにも作れなければ D 無しの形。それも使えない時と、D を作れて手段が全部使えなかった時は `ENAMETOOLONG` (決定 4) | 予備の経路 (決定 5) |
 
-- ソケットのディレクトリの fd が要るのは、ソケットのディレクトリに作る D、bind の D 無しの形と、connect の予備の /proc・fd で掴む形の `/proc` の確かめ・connectat。開けなければ (`O_RDONLY` で開く OS で読み取り権限が無い等) それらを使えないとして他を試す
+- ソケットのディレクトリの fd が要るのは、ソケットのディレクトリに作る D、bind の D 無しの形と、connect の予備の proc-direct・proc-held の `/proc` の確かめ・at-direct。開けなければ (`O_RDONLY` で開く OS で読み取り権限が無い等) それらを使えないとして他を試す
 - ディレクトリ (ソケットのディレクトリ、D の置き場) の開き方: Linux / Android は `O_PATH | O_DIRECTORY`、Apple の OS は `O_SEARCH` (`EISDIR` / `EINVAL` なら `O_RDONLY`)、他は `O_RDONLY | O_DIRECTORY` (読み取り権限が要る)
-- 入口は `_route.run`。長いパスは `routes` が `central_route` を試し、使えなければ `bind_without_central` か `connect_fallbacks` に進む
+- 入口は `_route.run` (と、通った経路・飛ばした経路も返す `_route.reach`)。長いパスは `routes` が `through_d` を試し、使えなければ `bind_past_d` か `connect_fallbacks` に進む
 
 ### 2. D と R
 
@@ -43,7 +43,8 @@
 | Apple の OS | `O_SEARCH \| O_DIRECTORY \| O_NOFOLLOW` (`EISDIR` / `EINVAL` なら `O_RDONLY`) | `os.fchmod` |
 | 他 | `O_RDONLY \| O_DIRECTORY \| O_NOFOLLOW` | `os.fchmod` |
 
-- 開けない D と確かめに落ちた D は他人の物かもしれないので、中身も含めて触らない。確かめが通った後に 0700 にそろえられない・R を作れない D は消して、次の置き場へ進む
+- 確かめに落ちた D は他人の物かもしれないので、中身も含めて触らない。確かめが通った後に 0700 にそろえられない・R を作れない D は消して、次の置き場へ進む
+- 作った直後の D を開けない時 (umask が持ち主の検索・読み取り権限を削った時) は、`os.stat(<D の名前>, dir_fd=<置き場>, follow_symlinks=False)` が確かめと同じ条件 (ディレクトリ・持ち主が実効 uid・group と other に権限が無い) なら `os.rmdir(<D の名前>, dir_fd=<置き場>)` で消し、次の置き場へ進む。条件に合わない物と空でない物は触らない (`rmdir` は空のディレクトリしか消さない) (ハブの D12-Q5)
 - 置き場を開けない、D を作れない、名前を使い切った、乱数が取れない (`NotImplementedError`) も、その置き場では作れないとして次へ進む
 - ソケットのディレクトリの realpath は決定 1 の 2 で `os.stat` と一緒に引き、引けなければそのエラーを返す (長さの判定や D を作るより前)
 - Apple の `O_SEARCH` は `0x40000000 | O_DIRECTORY` を書き下す (`os.O_SEARCH` の無い macOS 向けのビルドがある)
@@ -57,63 +58,63 @@
 - 置き場の安全と長さは問わない
 - 置き場の候補は `_route.Config.own_dir_places` で、試験から差し替える
 
-### 3. D の fd を基準にする手段
+### 3. D の fd を基準にする手段 (経路)
 
-| 順 | 手段 | OS | 作り方 | 使えない時 (次の手段へ) |
+| 順 | 経路 | OS | 作り方 | 使えない時 (次の手段へ) |
 |---|---|---|---|---|
-| 1 | スレッド cwd | Linux / Android | 使い捨ての `threading.Thread` で、ctypes の `unshare(CLONE_FS)` → `os.fchdir(<D>)` → `R/<ファイル名>` で標準の `bind` / `connect` | `prctl(PR_GET_SECCOMP)` が 0 でない (`unshare` を呼ばない)、`unshare` を断られた、スレッドを作れない |
-| 1 | スレッド cwd | Apple の OS | 使い捨ての `threading.Thread` で、ctypes の `pthread_fchdir_np(<D>)` → 同上 | `pthread_fchdir_np` が無い・失敗した、スレッドを作れない |
-| 1 | bindat / connectat | FreeBSD | ctypes の `bindat(<D>, ...)` / `connectat(<D>, ...)` に `R/<ファイル名>` | ファイル名 > 92 |
-| 2 | /proc 版 | Linux / Android | `/proc/self/fd/<D>/R/<ファイル名>` を標準の `bind` / `connect` に渡す | `/proc/self/fd/<fd>` を引けない、綴り > 107 (ファイル名およそ 79 まで) |
+| 1 | thread-cwd | Linux / Android | 使い捨ての `threading.Thread` で、ctypes の `unshare(CLONE_FS)` → `os.fchdir(<D>)` → `R/<ファイル名>` で標準の `bind` / `connect` | `prctl(PR_GET_SECCOMP)` が 0 でない (`unshare` を呼ばない)、`unshare` を断られた、スレッドを作れない |
+| 1 | thread-cwd | Apple の OS | 使い捨ての `threading.Thread` で、ctypes の `pthread_fchdir_np(<D>)` → 同上 | `pthread_fchdir_np` が無い・失敗した、スレッドを作れない |
+| 1 | at | FreeBSD | ctypes の `bindat(<D>, ...)` / `connectat(<D>, ...)` に `R/<ファイル名>` | ファイル名 > 92 |
+| 2 | proc | Linux / Android | `/proc/self/fd/<D>/R/<ファイル名>` を標準の `bind` / `connect` に渡す | `/proc/self/fd/<fd>` を引けない、綴り > 107 (ファイル名およそ 79 まで) |
 
-- 長さと、手段を使えるか (seccomp、`pthread_fchdir_np` の有無、`/proc`) は D を作る前に見る。どの手段も使えなければ何も作らない。/proc 版の長さはソケットのディレクトリの fd の番号で見積もり、D の fd で確かめ直す
-- スレッド cwd がスレッドの中で使えなかった時は、同じ D で /proc 版に進む
+- 長さと、手段を使えるか (seccomp、`pthread_fchdir_np` の有無、`/proc`) は D を作る前に見る。どの手段も使えなければ何も作らない。proc の長さはソケットのディレクトリの fd の番号で見積もり、D の fd で確かめ直す
+- thread-cwd がスレッドの中で使えなかった時は、同じ D で proc に進む
 - ソケットは呼び出し元のスレッドで `socket.socket(AF_UNIX, SOCK_STREAM)` で作り、listen はスレッドが終わってから呼び出し元がする
 - スレッドの `join` が例外 (`KeyboardInterrupt` 等) で抜けたら、ソケットはスレッドが終わる時にスレッドが閉じる
 - NetBSD / OpenBSD / illumos には手段が無い
 
-### 4. 中心の経路が使えない時の bind
+### 4. D を通す経路が使えない時の bind
 
-`_route.bind_without_central` の 1 か所にまとめる。
+`_route.bind_past_d` の 1 か所にまとめる。
 
-- D をどこにも作れない時 (`central_route` が `Skip.NO_OWN_DIR` を返す) は、D 無しの形 (`_route.bind_without_own_dir`) を試す
-- D 無しの形も使えない時と、D を作れて手段が全部使えなかった時は `ENAMETOOLONG` (標準で長すぎるパスと同じ)。SPEC の fork の経路の場所 (ハブの D12-Q3 の kawaz 裁定 (a))
+- D をどこにも作れない時 (`through_d` が `Skip.NO_OWN_DIR` を返す) は、D 無しの形 (`_route.bind_sockdir`) を試す
+- D 無しの形も使えない時と、D を作れて手段が全部使えなかった時は `ENAMETOOLONG` (標準で長すぎるパスと同じ)。SPEC の fork の経路の場所 (ハブの D12-Q3 の kawaz 裁定 (a))。`bind_any` はここで symlink に進む ([DR-0005](DR-0005-bind-any.md))
 - 手段が無くて D を試さなかった時は、D 無しの形も試さない (綴りが D の形より長く、手段の確かめも同じなので、必ず使えない)
 
 D 無しの形:
 
 | 手順 | Python での作り方 |
 |---|---|
-| 確かめる | ソケットのディレクトリを開けていること (決定 1 の 2 の fd)、手段を使えること (決定 3 の確かめを綴り `.sockat.XXXXXXXXXX/<ファイル名>` で。/proc 版の長さはソケットのディレクトリの fd の番号で正確に分かる)。欠ければ何も作らない |
+| 確かめる | ソケットのディレクトリを開けていること (決定 1 の 2 の fd)、手段を使えること (決定 3 の確かめを綴り `.sockat.XXXXXXXXXX/<ファイル名>` で。proc-sockdir の長さはソケットのディレクトリの fd の番号で正確に分かる)。欠ければ何も作らない |
 | R を作る | `os.symlink(<ソケットのディレクトリの realpath>, <R>, dir_fd=<ソケットのディレクトリ>)`。R は `.sockat.` + `secrets` の英数 62 種 10 文字。`FileExistsError` で引き直し、16 回で打ち切る |
-| bind | 決定 3 の手段を同じ順に、D の fd の代わりにソケットのディレクトリの fd を基準にして `R/<ファイル名>`: スレッド cwd (FreeBSD は bindat) → `/proc/self/fd/<ソケットのディレクトリの fd>/R/<ファイル名>` |
+| bind | 決定 3 の手段を同じ順に、D の fd の代わりにソケットのディレクトリの fd を基準にして `R/<ファイル名>`: thread-cwd-sockdir (FreeBSD は at-sockdir) → proc-sockdir (`/proc/self/fd/<ソケットのディレクトリの fd>/R/<ファイル名>`) |
 | 片付け | 自分が作れた R だけを、成功でも失敗でも `os.unlink(<R>, dir_fd=<ソケットのディレクトリ>)`。消す失敗は無視する |
 
-- 綴りは 19 バイト + ファイル名。ファイル名は Linux 88、Apple の OS / FreeBSD 84 まで (/proc 版はおよそ 72)
-- 経路は `Route.THREAD_CWD_WITHOUT_D` / `Route.AT_WITHOUT_D` / `Route.PROC_WITHOUT_D`
+- 綴りは 19 バイト + ファイル名。ファイル名は Linux 88、Apple の OS / FreeBSD 84 まで (proc-sockdir はおよそ 72)
+- 経路は `Route.THREAD_CWD_SOCKDIR` / `Route.AT_SOCKDIR` / `Route.PROC_SOCKDIR`
 - bind が実際に失敗したら (`EADDRINUSE` 等) そのエラーを返し、後の手段を試さない
 
 | 届かない所 | 理由 |
 |---|---|
 | NetBSD / OpenBSD / illumos の長いパス全部 | 手段が無い |
-| スレッド cwd も /proc 版も使えない Linux / Android | 同上 |
+| thread-cwd も proc も使えない Linux / Android | 同上 |
 | `pthread_fchdir_np` を使えない Apple の OS | 同上 |
-| ファイル名 > 96 (Linux)、> 92 (Apple の OS / FreeBSD)、/proc 版だけ使える Linux はおよそ 79 | `R/<ファイル名>` が sockaddr に入らない |
-| D をどこにも作れず、ファイル名 > 88 (Linux)、> 84 (Apple の OS / FreeBSD)、/proc 版だけ使える Linux はおよそ 72 | `.sockat.XXXXXXXXXX/<ファイル名>` が sockaddr に入らない |
+| ファイル名 > 96 (Linux)、> 92 (Apple の OS / FreeBSD)、proc だけ使える Linux はおよそ 79 | `R/<ファイル名>` が sockaddr に入らない |
+| D をどこにも作れず、ファイル名 > 88 (Linux)、> 84 (Apple の OS / FreeBSD)、proc-sockdir だけ使える Linux はおよそ 72 | `.sockat.XXXXXXXXXX/<ファイル名>` が sockaddr に入らない |
 | D をどこにも作れず、ソケットのディレクトリを開けない、または R を作れない | D 無しの形が使えない |
 
 ### 5. connect の予備の経路
 
 | OS | 試す順番 |
 |---|---|
-| Linux / Android (`/proc` を使える) | /proc → fd で掴む形 ([DR-0002](DR-0002-unsafe-base-held-by-fd.md)) → symlink |
-| Linux / Android (`/proc` を使えない) | 相対パス → symlink |
-| Apple の OS | 相対パス → 広げた sockaddr → symlink |
-| FreeBSD | connectat (ソケットのディレクトリの fd とファイル名) |
-| NetBSD / OpenBSD / illumos / その他の Unix | 相対パス → symlink |
+| Linux / Android (`/proc` を使える) | proc-direct → proc-held ([DR-0002](DR-0002-unsafe-base-held-by-fd.md)) → symlink |
+| Linux / Android (`/proc` を使えない) | relative → symlink |
+| Apple の OS | relative → widened → symlink |
+| FreeBSD | at-direct (ソケットのディレクトリの fd とファイル名) |
+| NetBSD / OpenBSD / illumos / その他の Unix | relative → symlink |
 
 - `/proc` を使えるかは、決定 1 の 2 で開いた fd (開けなければ `/` を開いた fd) の `/proc/self/fd/<fd>` を `os.stat` で引けるかで決める
-- FreeBSD でソケットのディレクトリを開けなければ、connectat は使えず `ENAMETOOLONG`
+- FreeBSD でソケットのディレクトリを開けなければ、at-direct は使えず `ENAMETOOLONG`
 - symlink の置き場は `TMPDIR` (絶対パスで `/tmp` と違う時)、`/tmp` の順で、安全な置き場 (sticky で持ち主が root か自分、または持ち主が自分で group と other に書き込み権限が無い) だけを使う
 - 最後まで届かなければ `ENAMETOOLONG`
 
@@ -121,10 +122,10 @@ D 無しの形:
 
 | 経路 | 理由 |
 |---|---|
-| /proc (R を通さない `/proc/self/fd/<fd>/<ファイル名>`) | 綴りの fd の番号が後で使い回され、別のディレクトリの同名ファイルに当たる |
-| 相対パス | cwd が変わると別の場所に当たる |
-| 広げた sockaddr | listener のアドレスが途中で切れ、標準の `getsockname` が読み過ぎる |
-| 置き場の symlink | 中心の経路で足りる |
+| proc-direct (R を通さない `/proc/self/fd/<fd>/<ファイル名>`) | 綴りの fd の番号が後で使い回され、別のディレクトリの同名ファイルに当たる |
+| relative | cwd が変わると別の場所に当たる |
+| widened | listener のアドレスが途中で切れ、標準の `getsockname` が読み過ぎる |
+| symlink | D を通す経路で足りる。`bind_any` だけが最後に使う ([DR-0005](DR-0005-bind-any.md)) |
 
 - 返すアドレスは元のパス ([DR-0003](DR-0003-report-the-given-path.md)) だが、カーネルの綴りも何にも当たらないようにする (`socket.socket.getsockname` を直接呼ぶコード、`socket.fromfd` で作り直したソケットはカーネルの綴りを見る)
 
@@ -140,35 +141,37 @@ D 無しの形:
 | Linux の abstract のアドレス | `discard` は何もしない |
 | 覚えるのに失敗した時 | ソケットを閉じてそのエラーを返す |
 
-- 名前は仮。listener を閉じない形はハブの D12-Q4 の統括推し (α-a) で、SPEC の今の文言 (「`discard()` で listener を閉じ」) と違う。裁定で変える
+- `discard` の名前と、listener を閉じない形はハブの D12-Q4 の kawaz 裁定で確定 (ハブの [DR-0014](https://github.com/kawaz/sockat/blob/main/docs/decisions/DR-0014-discard-removes-only.md))
 - 確かめてから消すまでの間に他のプロセスがファイルを置き換えることは防げない (inode を指定して消すシステムコールが無い)
 
 ## Alternatives Considered
 
-- 案 A: 中心の経路が使えない bind に、置き場の symlink か相対パスを残す
+- 案 A: D を通す経路が使えない `bind` に、置き場の symlink か相対パスを残す
   - 不採用理由: ハブの DR-0012 が bind から外した (綴りが後で無関係なファイルに当たりうる)。既定の bind には戻さない (ハブの D12-Q3 の kawaz 裁定 (a))
 - 案 B: 呼び出し元のスレッドで `pthread_fchdir_np` し、`-1` で戻す
   - 不採用理由: 呼び出し元がスレッドに付けた cwd を消しうる (SPEC)。使い捨てのスレッドなら触らずに済む
 - 案 C: Linux で D を `O_RDONLY` で開いて `fchmod` する
   - 不採用理由: umask が持ち主の読み取りを削ると非 root では開けず、D が置き場に残る。`O_PATH` の fd には `fchmod` ができない (`EBADF`) ので、`/proc/self/fd/<fd>` か開き直しで fd が指す実体に効かせる
 - 案 D: `discard()` が listener も閉じる
-  - 不採用理由: listener を asyncio 等に渡した後は持ち主がそちらに移る。形はハブの D12-Q4 で決める
+  - 不採用理由: listener を asyncio 等に渡した後は持ち主がそちらに移る (ハブの DR-0014)
 - 案 E: D をどこにも作れない時の bind も `ENAMETOOLONG` にする
   - 不採用理由: ハブの D12-Q1 で kawaz が D 無しの形 (a) を裁定した。fork の経路の無い Python でも、ソケットのディレクトリに R を作れれば届く
+- 案 F: 作った直後に開けない D は、他人の物かもしれないので残す
+  - 不採用理由: umask が持ち主の権限を削る環境で呼ぶたびに積もる。名前で確かめて `rmdir` すれば、すり替えられても最悪は他人の空のディレクトリが 1 つ消えるだけ (ハブの D12-Q5)
 
 ## Consequences
 
-- bind のファイル名の上限は `R/` の 11 バイト分短い (Linux 96、Apple の OS / BSD 92。/proc 版はおよそ 79)。D をどこにも作れない時は D 無しの形の 19 バイト分 (Linux 88、Apple の OS / BSD 84。/proc 版はおよそ 72)
+- bind のファイル名の上限は `R/` の 11 バイト分短い (Linux 96、Apple の OS / BSD 92。proc はおよそ 79)。D をどこにも作れない時は D 無しの形の 19 バイト分 (Linux 88、Apple の OS / BSD 84。proc-sockdir はおよそ 72)
 - NetBSD / OpenBSD / illumos では長いパスの bind が届かない (ハブの D12-Q3 の kawaz 裁定 (a))
 - 長いパスの bind / connect のたびに D と R を作って消す
 - 途中でプロセスが死ぬと、置き場に `sockat.XXXXXXXXXX`、ソケットのディレクトリに `.sockat.XXXXXXXXXX` (D か、D 無しの形の R) が残る
-- Apple の OS で umask が持ち主の検索権限を削ると (非 root で 0777 / 0177 等)、D を開けず置き場に残る。`O_RDONLY` で開く OS では読み取り権限で同じ (ハブの D12-Q5)
 - R はソケットのディレクトリの realpath を指すので、R を作った後のディレクトリの rename や symlink の張り替えは反映されない
-- 試験は `tests/test_central.py` (中心の経路と D 無しの形)、`tests/test_ex.py` (`bind_ex`)
+- 試験は `tests/test_through_d.py` (D を通す経路と D 無しの形)、`tests/test_ex.py` (`bind_ex`)
 
 ## 関連
 
 - [ハブの DR-0012](https://github.com/kawaz/sockat/blob/main/docs/decisions/DR-0012-own-directory-and-thread-cwd.md)
 - [ハブの SPEC](https://github.com/kawaz/sockat/blob/main/docs/SPEC-ja.md)
 - [ハブの QUESTIONS](https://github.com/kawaz/sockat/blob/main/docs/QUESTIONS.md) (D12-Q1、D12-Q3、D12-Q4、D12-Q5)
+- [DR-0005](DR-0005-bind-any.md)
 - [DR-0001](DR-0001-python-port-design.md)、[DR-0002](DR-0002-unsafe-base-held-by-fd.md)、[DR-0003](DR-0003-report-the-given-path.md)
