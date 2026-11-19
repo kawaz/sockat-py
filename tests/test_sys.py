@@ -33,7 +33,7 @@ def test_the_lengths_per_system() -> None:
     # XNU takes an address of up to SOCK_MAXADDRLEN (255) bytes: 2 header
     # bytes and 253 bytes of path.
     assert WIDE_PATH_MAX == 253
-    # The thread's own cwd (a means of the central route) exists where a
+    # The thread's own cwd (a means of the routes through D) exists where a
     # thread can have a cwd of its own.
     assert _sys.HAS_THREAD_CWD is (sys.platform.startswith("linux") or sys.platform == "darwin")
 
@@ -107,7 +107,7 @@ def test_the_widened_sockaddr_is_not_there_elsewhere() -> None:
 
 
 # A thread entered into a directory has that directory as its own cwd (what
-# the central route binds / connects `R/<name>` against), while the
+# the routes through D bind / connects `R/<name>` against), while the
 # process cwd, which every other thread keeps using, does not change. Where
 # the system will not give the thread a cwd of its own (Linux under a seccomp
 # filter such as docker's default, where unshare(CLONE_FS) is not even tried),

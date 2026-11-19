@@ -32,10 +32,10 @@ from _support import (
     accept_ping,
     assert_cleaned_up_as_asyncio_does,
     assert_untouched,
-    central_cfg,
-    central_route_here,
     check_full_backlog,
     check_route,
+    d_cfg,
+    d_route_here,
     fallback_cfg,
     forced,
     is_socket,
@@ -70,15 +70,15 @@ def make_stale_socket() -> None:
 
 
 def means_cfg(means: str, own: tuple[OwnDirPlace, ...]) -> tuple[Config, Route]:
-    """The configuration that forces one means of the central route (as
-    ``test_central.means_here`` names them), with ``own`` as the places for
+    """The configuration that forces one means of the routes through D (as
+    ``test_through_d.means_here`` names them), with ``own`` as the places for
     D, and the route it takes."""
     if means == "thread-cwd":
-        return central_cfg(own, proc=NO_PROC), Route.THREAD_CWD
+        return d_cfg(own, proc=NO_PROC), Route.THREAD_CWD
     if means == "proc":
-        return central_cfg(own, thread_cwd=False), Route.PROC_OWN_DIR
+        return d_cfg(own, thread_cwd=False), Route.PROC
     assert means == "at", means
-    return central_cfg(own), Route.AT
+    return d_cfg(own), Route.AT
 
 
 def connect_report() -> None:
@@ -105,7 +105,7 @@ def relative_spelling() -> None:
     report(rel=os.fsdecode(rel.path) if rel is not None else "-")
 
 
-def bind_without_own_dir() -> None:
+def bind_with_no_route() -> None:
     """Bind PATH with no place for D and no means (the fallbacks'
     configuration) and report the errno it fails with."""
     try:
@@ -122,10 +122,10 @@ def relative_routes() -> None:
     connects, with PATH below the cwd so that its relative spelling fits the
     plain sockaddr; on Apple also on the widened sockaddr with the relative
     spelling (WPATH, whose relative spelling fits only the widened one). The
-    listener is bound by the central route (a bind never takes the relative
+    listener is bound by the routes through D (a bind never takes the relative
     spelling)."""
-    bind = central_cfg()
-    bound = central_route_here()
+    bind = d_cfg()
+    bound = d_route_here()
     assert bound is not None
     ways: list[Forced] = [forced("relative", arg("PATH"), fallback_cfg(), routes(bound, Route.RELATIVE), bind_cfg=bind)]
     wpath = opt_arg("WPATH")
@@ -133,7 +133,7 @@ def relative_routes() -> None:
         rel = _route.Relative.new(wpath, os.path.dirname(wpath))
         assert rel is not None
         assert DIRECT_MAX < len(rel.path) <= WIDE_PATH_MAX, rel
-        ways.append(forced("wide-relative", wpath, fallback_cfg(), routes(bound, Route.WIDE_RELATIVE), bind_cfg=bind))
+        ways.append(forced("widened-relative", wpath, fallback_cfg(), routes(bound, Route.WIDENED), bind_cfg=bind))
     for f in ways:
         check_route(f)
         if CHECKS_FULL_BACKLOG:
@@ -170,12 +170,12 @@ def relative_failures() -> None:
 
 
 def relative_input() -> None:
-    """A long path given relative to the cwd (REL) is bound by the central
-    route (D in the socket's directory) and connected to by the fallbacks
+    """A long path given relative to the cwd (REL) is bound by the routes
+    through D (D in the socket's directory) and connected to by the fallbacks
     (BASE as the only place for the symlink, no /proc), in the directory it
     names below the cwd; the routes are reported."""
     rel = arg("REL")
-    listener, bind_route = _route.run_long(BIND, rel, central_cfg())
+    listener, bind_route = _route.run_long(BIND, rel, d_cfg())
     with listener:
         assert is_socket(rel)
         # Reported as given, relative, as the standard reports a short
@@ -204,10 +204,10 @@ def assert_unrelated(path: bytes, what: str) -> None:
         assert f.read() == UNRELATED, what
 
 
-WITHOUT_D = {
-    Route.THREAD_CWD: Route.THREAD_CWD_WITHOUT_D,
-    Route.AT: Route.AT_WITHOUT_D,
-    Route.PROC_OWN_DIR: Route.PROC_WITHOUT_D,
+SOCKDIR_OF = {
+    Route.THREAD_CWD: Route.THREAD_CWD_SOCKDIR,
+    Route.AT: Route.AT_SOCKDIR,
+    Route.PROC: Route.PROC_SOCKDIR,
 }
 """The route a bind takes by the same means where D can be made nowhere."""
 
@@ -215,7 +215,7 @@ WITHOUT_D = {
 def spelling_namesakes() -> None:
     """For each means of MEANS (comma-separated): bind PATH (far from the
     cwd, file name ``s.sock``) through it while a file ``s.sock`` unrelated to
-    the socket sits in the cwd; when WITHOUT_D is ``1``, with no place for D,
+    the socket sits in the cwd; when SOCKDIR_OF is ``1``, with no place for D,
     so the bind takes the form without D (the connects still have the
     socket's directory). The spelling the kernel keeps (``R/s.sock``, or
     ``.sockat.XXXXXXXXXX/s.sock`` without D, either behind
@@ -236,7 +236,7 @@ def spelling_namesakes() -> None:
         cfg, want = means_cfg(means, (SOCKET_DIR,))
         bind_cfg = cfg
         if without_d:
-            bind_cfg, want = dataclasses.replace(cfg, own_dir_places=(NO_PLACE,)), WITHOUT_D[want]
+            bind_cfg, want = dataclasses.replace(cfg, own_dir_places=(NO_PLACE,)), SOCKDIR_OF[want]
         listener, r = _route.run_long(BIND, p, bind_cfg)
         with listener:
             assert r is want, r
@@ -268,7 +268,7 @@ def spelling_namesakes() -> None:
 
 def asyncio_namesakes() -> None:
     """The public API's listener at PATH (far from the cwd, file name
-    ``s.sock``, bound by the central route), served by asyncio as the
+    ``s.sock``, bound by the routes through D), served by asyncio as the
     standard's is (:func:`_support.serve_asyncio`, bound before the loop,
     the public connects adopted), while a file ``s.sock`` unrelated to the
     socket sits in the cwd: asyncio's cleanup (Python 3.13 and later) removes
@@ -421,7 +421,7 @@ def deleted_cwd() -> None:
     here = os.getcwd()
     os.rmdir(here)
     os.environ.pop("PWD", None)
-    cfg = central_cfg((place,))
+    cfg = d_cfg((place,))
     results: dict[str, str] = {}
     for n in (103, DIRECT_MAX):
         path = b"./" + b"n" * n
@@ -445,7 +445,7 @@ SCENARIOS: dict[str, Callable[[], None]] = {
         make_stale_socket,
         connect_report,
         relative_spelling,
-        bind_without_own_dir,
+        bind_with_no_route,
         relative_routes,
         relative_failures,
         relative_input,

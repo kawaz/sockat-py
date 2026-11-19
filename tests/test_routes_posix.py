@@ -1,7 +1,7 @@
 """The relative fallback of a connect (every system but FreeBSD and Linux
 with /proc; made so on Linux here by pointing ``proc_self_fd`` at a path that
 does not exist), the fork route's place, and opening the socket's directory.
-The central route is in ``test_central.py``, the symlink fallback in
+The routes through D are in ``test_through_d.py``, the symlink fallback in
 ``test_symlink.py``.
 
 Tests that need a particular cwd or ``$PWD`` run in a child process
@@ -22,8 +22,8 @@ from _support import (
     accept_ping,
     assert_far_from_cwd,
     assert_untouched,
-    central_cfg,
     check_unreachable,
+    d_cfg,
     dir_id,
     fallback_cfg,
     is_socket,
@@ -59,7 +59,7 @@ no_relative = pytest.mark.skipif(FREEBSD, reason="FreeBSD's connect falls back t
 # peer is this process, the cwd unchanged, the path reported as the peer,
 # asyncio adopting the connects; a nonblocking connect fails at once on a full
 # backlog) is run on it, in a child whose cwd is the socket's ancestor. The
-# listener is bound by the central route: a bind never takes the relative
+# listener is bound by the routes through D: a bind never takes the relative
 # spelling.
 #
 # On Apple the connects also take the widened form with the relative spelling
@@ -75,7 +75,7 @@ def test_a_path_short_relative_to_the_cwd_takes_the_relative_fallback(tmp: TmpDi
     if IS_APPLE:
         args["WPATH"] = nest_tail(t, 240, b"wrel.sock")
         assert len(args["WPATH"]) > WIDE_PATH_MAX
-        want = "relative,wide-relative"
+        want = "relative,widened-relative"
     out = run_child("relative_routes", t, args)
     assert out == {"checked": want}
 
@@ -212,7 +212,7 @@ def test_a_failure_on_the_relative_fallback_is_not_retried(tmp: TmpDirs) -> None
 
 # A bind never takes the relative spelling: the spelling would stay with the
 # listener and name another file once the cwd changes. A path whose relative
-# spelling fits, with the central route and the form without D unusable (no
+# spelling fits, with the routes through D and the form without D unusable (no
 # place for D, no means), is ENAMETOOLONG for the bind with nothing created, while a connect to a
 # listener there takes the relative fallback. Runs in a child whose cwd is
 # the socket's directory's ancestor.
@@ -221,7 +221,7 @@ def test_a_bind_never_takes_the_relative_spelling(tmp: TmpDirs) -> None:
     t = tmp.new()
     p = nest_tail(t, DIRECT_MAX, b"b.sock")
     before = listing(parent(p))
-    out = run_child("bind_without_own_dir", t, {"PATH": p})
+    out = run_child("bind_with_no_route", t, {"PATH": p})
     assert out == {"errno": str(errno.ENAMETOOLONG)}
     assert listing(parent(p)) == before
     assert connect_in_child(t, t, p) == Route.RELATIVE.value
@@ -231,14 +231,14 @@ def test_a_bind_never_takes_the_relative_spelling(tmp: TmpDirs) -> None:
 
 
 # This implementation has no fork route (a child forked from Python runs
-# Python, which is not async-signal-safe). A bind neither the central route
+# Python, which is not async-signal-safe). A bind neither the routes through D
 # nor the form without D carries (here: no means, no place for D at all) ends
 # there with ENAMETOOLONG, the error
 # of a plain bind of a path too long for sun_path, with nothing created next
 # to the socket; so do the connects that no fallback carries (no usable place
 # for a symlink: none, one that does not exist, one too long for a spelling
 # through it). Nothing is created in the place either. With a place for D the
-# same path is bound where the central route can be used. FreeBSD is left
+# same path is bound where the routes through D can be used. FreeBSD is left
 # out: bindat / connectat cannot be turned off there, so the bind (the form
 # without D) and the connect (connectat) reach the socket.
 @pytest.mark.skipif(sys.platform.startswith("freebsd"), reason="bindat / connectat reach the socket on FreeBSD")
@@ -255,14 +255,14 @@ def test_where_only_the_fork_route_reaches_everything_is_enametoolong(tmp: TmpDi
 
 # The counterpart of the test above: the same kind of path, with the
 # socket's directory as the place for D, is bound and connected to (where the
-# central route has a means).
+# routes through D have a means).
 @needs_long_bind
 def test_with_a_place_for_d_the_same_path_is_bound(tmp: TmpDirs) -> None:
     p = nest(tmp.new(), 600)
-    listener, r = _route.run_long(BIND, p, central_cfg())
+    listener, r = _route.run_long(BIND, p, d_cfg())
     with listener:
-        assert r is not Route.DIRECT
-        client, _ = _route.run_long(CONNECT, p, central_cfg())
+        assert r is not Route.STANDARD
+        client, _ = _route.run_long(CONNECT, p, d_cfg())
         with client:
             accept_ping(listener, client)
 
@@ -277,7 +277,7 @@ def test_a_missing_directory_is_enoent_before_any_length_is_judged(tmp: TmpDirs)
     directory = parent(nest(t, 600))
     for n in (6, 254):
         missing = directory + b"/nope/" + b"n" * n
-        for c in (fallback_cfg(), central_cfg()):
+        for c in (fallback_cfg(), d_cfg()):
             for req in (BIND, CONNECT, CONNECT_NONBLOCKING):
                 with pytest.raises(FileNotFoundError):
                     _route.run_long(req, missing, c)
@@ -353,16 +353,16 @@ def test_the_o_rdonly_fallback_needs_read_permission(tmp: TmpDirs) -> None:
 
 
 # Only binds' sockets land at a path: no route of a connect creates anything
-# next to the socket, and the bind's central route leaves only the socket
+# next to the socket, and the bind's routes through D leave only the socket
 # file there (D and R in the socket's directory are removed). Checked with the
 # socket's directory as the only place for D.
 @needs_long_bind
 def test_nothing_but_the_socket_file_is_left_in_its_directory(tmp: TmpDirs) -> None:
     p = nest(tmp.new(), 600)
-    listener, _ = _route.run_long(BIND, p, central_cfg())
+    listener, _ = _route.run_long(BIND, p, d_cfg())
     with listener:
         for req in (CONNECT, CONNECT_NONBLOCKING):
-            client, _ = _route.run_long(req, p, central_cfg())
+            client, _ = _route.run_long(req, p, d_cfg())
             with client:
                 accept_ping(listener, client)
         assert listing(parent(p)) == [b"s.sock"]

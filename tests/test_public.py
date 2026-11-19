@@ -18,11 +18,11 @@ from pathlib import Path
 
 import pytest
 from _support import (
-    NAME_MAX_CENTRAL,
+    NAME_MAX_THROUGH_D,
     SO_NOSIGPIPE,
     TmpDirs,
     accept_ping,
-    central_route_here,
+    d_route_here,
     dir_id,
     is_cloexec,
     is_socket,
@@ -90,22 +90,22 @@ def test_a_path_the_standard_takes_goes_to_it_and_one_byte_more_takes_a_route(tm
     p = os.fsdecode(nest(t, DIRECT_MAX, b"s.sock"))
     listener, r = _route.run(BIND, p)
     with listener:
-        assert r is Route.DIRECT
+        assert r is Route.STANDARD
         assert listener.getsockname() == p
         client, r = _route.run(CONNECT, p)
         with client:
-            assert r is Route.DIRECT
+            assert r is Route.STANDARD
             assert client.getpeername() == p
             accept_ping(listener, client)
 
     # One byte more takes a route and still ends up at the given path (where
-    # the central route has a means; elsewhere no long path can be bound).
-    if central_route_here() is None:
+    # the routes through D have a means; elsewhere no long path can be bound).
+    if d_route_here() is None:
         return
     q = nest(t, DIRECT_MAX + 1, b"s.sock")
     listener, r = _route.run(BIND, q)
     with listener:
-        assert r is not Route.DIRECT
+        assert r is not Route.STANDARD
         assert is_socket(q)
         client, _ = _route.run(CONNECT, q)
         with client:
@@ -180,24 +180,24 @@ def test_paths_are_str_bytes_or_path_like(tmp: TmpDirs, total: int) -> None:
                 accept_ping(listener, client)
 
 
-# A file name longer than the central route's `R/<name>` carries
-# (NAME_MAX_CENTRAL + 1 bytes), one longer than the plain sockaddr carries
+# A file name longer than the D routes' `R/<name>` carries
+# (NAME_MAX_THROUGH_D + 1 bytes), one longer than the plain sockaddr carries
 # (DIRECT_MAX + 1) and one of 254 bytes (NAME_MAX is 255), directly under a
 # short directory.
 #
-# * bind: the central route carries the file name in a sockaddr behind `R/`
+# * bind: the routes through D carry the file name in a sockaddr behind `R/`
 #   (or behind /proc/self/fd/<n>/R/, shorter still), and no other bind route
 #   is left (no fork route in Python; the bind never takes the widened
 #   sockaddr, macOS included), so ENAMETOOLONG, and nothing is created.
 # * connect: the fallbacks reach it: the link to the socket file is spelled
-#   without the file name, /proc and the fd-held form on Linux, the widened
+#   without the file name, /proc and the proc-held route on Linux, the widened
 #   sockaddr on macOS. A socket bound under a short name and renamed to the
 #   long one is reached and talks; with nothing there the error is the
 #   kernel's ENOENT, not ENAMETOOLONG. FreeBSD falls back to connectat of the
 #   file name, which a sockaddr carries up to DIRECT_MAX bytes: past that,
 #   ENAMETOOLONG for the connect too.
-@pytest.mark.parametrize("n", [NAME_MAX_CENTRAL + 1, DIRECT_MAX + 1, 254])
-def test_a_file_name_longer_than_the_central_route_carries_cannot_be_bound_but_can_be_connected_to(
+@pytest.mark.parametrize("n", [NAME_MAX_THROUGH_D + 1, DIRECT_MAX + 1, 254])
+def test_a_file_name_longer_than_the_routes_through_d_carries_cannot_be_bound_but_can_be_connected_to(
     tmp: TmpDirs, n: int
 ) -> None:
     t = tmp.new()
@@ -218,13 +218,13 @@ def test_a_file_name_longer_than_the_central_route_carries_cannot_be_bound_but_c
             accept_ping(listener, client)
 
 
-# Where the central route has no means (NetBSD, OpenBSD, illumos: no thread
+# Where the routes through D have no means (NetBSD, OpenBSD, illumos: no thread
 # cwd, no bindat, no /proc), no long path can be bound (the SPEC's next step
 # is the fork route, which Python does not have): ENAMETOOLONG with nothing
 # created. A connect to a listener at such a path still gets through its
 # fallbacks.
-@pytest.mark.skipif(central_route_here() is not None, reason="the central route has a means here")
-def test_without_the_central_route_a_long_bind_is_enametoolong(tmp: TmpDirs) -> None:
+@pytest.mark.skipif(d_route_here() is not None, reason="the routes through D have a means here")
+def test_without_the_routes_through_d_a_long_bind_is_enametoolong(tmp: TmpDirs) -> None:
     p = nest(tmp.new(), 300)
     with raises_errno(errno.ENAMETOOLONG):
         sockat.bind(p)

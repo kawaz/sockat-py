@@ -1,7 +1,7 @@
 """The Apple fallbacks of a connect (macOS): the widened ``sockaddr_un`` on
 its own and through the symlink, every route forced and checked, what
 happens when the kernel refuses the widened form, and the bind, which never
-takes the widened form (the central route spells it within ``sun_path``)."""
+takes the widened form (the routes through D spells it within ``sun_path``)."""
 
 from __future__ import annotations
 
@@ -18,9 +18,9 @@ from _support import (
     assert_empty,
     assert_far_from_cwd,
     assert_untouched,
-    central_cfg,
     check_full_backlog,
     check_route,
+    d_cfg,
     fallback_cfg,
     forced,
     kernel_peername,
@@ -53,12 +53,12 @@ def long_place(tmp: TmpDirs, total: int) -> bytes:
 # XNU takes a socket address of up to SOCK_MAXADDRLEN (255) bytes, so the
 # widened form carries 255 - 2 = 253 bytes of path. Pinned against the running
 # kernel: a connect in the widened form to a path of 253 bytes reaches the
-# listener there (bound by the central route); a path of 254 is refused
+# listener there (bound by the routes through D); a path of 254 is refused
 # (ENAMETOOLONG) before the kernel is asked.
 def test_the_widened_sockaddr_carries_253_bytes(tmp: TmpDirs) -> None:
     assert WIDE_PATH_MAX == 253
     p = nest(tmp.new(), 253)
-    listener, r = _route.run_long(BIND, p, central_cfg())
+    listener, r = _route.run_long(BIND, p, d_cfg())
     with listener:
         assert r is Route.THREAD_CWD
         with _route.wide_op(CONNECT, p) as client:
@@ -105,7 +105,7 @@ def test_the_address_of_a_widened_bind_is_cut_short(tmp: TmpDirs) -> None:
 # for the standard's) and the nonblocking connect against a full backlog (on
 # macOS a full backlog fails at once with ECONNREFUSED for a blocking connect
 # too, so what differs there is the socket that comes back: it must be
-# nonblocking on every route). The listener is bound by the central route.
+# nonblocking on every route). The listener is bound by the routes through D.
 #
 # * the path itself (DIRECT_MAX bytes), through the socket module, bound so
 #   too;
@@ -116,24 +116,26 @@ def test_the_address_of_a_widened_bind_is_cut_short(tmp: TmpDirs) -> None:
 # * the symlink in the widened sockaddr: under a 150-byte place (the
 #   spelling through it, 168 bytes, needs the widened form), a path of 600
 #   bytes.
-@pytest.mark.parametrize("what", ["direct", "wide-104", "wide-200", "wide-253", "symlink", "symlink-wide"])
+@pytest.mark.parametrize(
+    "what", ["standard", "widened-104", "widened-200", "widened-253", "symlink", "symlink-widened"]
+)
 def test_every_apple_route(tmp: TmpDirs, what: str) -> None:
     t = tmp.new()
     place = tmp.new()
     places = [place]
-    bound = routes(Route.THREAD_CWD, Route.WIDE)
-    if what == "direct":
-        f = forced(what, nest(t, DIRECT_MAX), None, Route.DIRECT)
-    elif what.startswith("wide-"):
-        f = forced(what, nest(t, int(what[5:])), fallback_cfg(), bound, bind_cfg=central_cfg())
+    bound = routes(Route.THREAD_CWD, Route.WIDENED)
+    if what == "standard":
+        f = forced(what, nest(t, DIRECT_MAX), None, Route.STANDARD)
+    elif what.startswith("widened-"):
+        f = forced(what, nest(t, int(what[8:])), fallback_cfg(), bound, bind_cfg=d_cfg())
     elif what == "symlink":
-        want = routes(Route.THREAD_CWD, Route.SYMLINK_TO_FILE)
-        f = forced(what, nest(t, 600), fallback_cfg([place]), want, bind_cfg=central_cfg())
+        want = routes(Route.THREAD_CWD, Route.SYMLINK)
+        f = forced(what, nest(t, 600), fallback_cfg([place]), want, bind_cfg=d_cfg())
     else:
         places = [long_place(tmp, 150), place]
-        want = routes(Route.THREAD_CWD, Route.SYMLINK_TO_FILE_WIDE)
-        f = forced(what, nest(t, 600), fallback_cfg(places), want, bind_cfg=central_cfg())
-    if f.want(BIND) is not Route.DIRECT:
+        want = routes(Route.THREAD_CWD, Route.SYMLINK)
+        f = forced(what, nest(t, 600), fallback_cfg(places), want, bind_cfg=d_cfg())
+    if f.want(BIND) is not Route.STANDARD:
         assert_far_from_cwd(f.path)
     check_route(f, places)
     check_full_backlog(f)
@@ -142,14 +144,14 @@ def test_every_apple_route(tmp: TmpDirs, what: str) -> None:
 
 
 # The bind never takes the widened sockaddr, whatever the path, while the
-# connects of the same path with the same configuration do. Where the central
-# route cannot carry the bind, it ends at the fork route's place
+# connects of the same path with the same configuration do. Where the routes
+# through D cannot carry the bind, it ends at the fork route's place
 # (ENAMETOOLONG) with nothing created. The connects reach a listener made at
 # the path by the standard (renamed there):
 #
 # * the path itself: DIRECT_MAX + 1, 200 and 253 bytes far from the cwd, no
 #   place for D. The bind is ENAMETOOLONG; the connects go in the widened
-#   form (Route.WIDE);
+#   form (Route.WIDENED);
 # * by the file name: names of 93 (one more than `R/<name>` takes), 200 and
 #   253 bytes with every route on (D in the socket's directory, a short place
 #   for the symlink). The bind is ENAMETOOLONG, with nothing created next to
@@ -168,11 +170,11 @@ def test_an_apple_bind_never_takes_the_widened_sockaddr(tmp: TmpDirs) -> None:
             for req in (CONNECT, CONNECT_NONBLOCKING):
                 client, r = _route.run_long(req, p, c)
                 with client:
-                    assert r is Route.WIDE, (total, req)
+                    assert r is Route.WIDENED, (total, req)
                     accept_ping(listener, client)
 
     short = tmp.new()
-    c = central_cfg(links=[short])
+    c = d_cfg(links=[short])
     for n in (DIRECT_MAX - _route.IN_OWN_DIR_LEN + 1, 200, 253):
         p = nest(t, 600, b"n" * n)
         before = listing(parent(p))
@@ -184,7 +186,7 @@ def test_an_apple_bind_never_takes_the_widened_sockaddr(tmp: TmpDirs) -> None:
         with listener_at(p) as listener:
             client, r = _route.run_long(CONNECT, p, c)
             with client:
-                assert r is Route.SYMLINK_TO_FILE, n
+                assert r is Route.SYMLINK, n
                 accept_ping(listener, client)
     assert_empty(short)
 
@@ -211,7 +213,7 @@ def test_a_failure_on_the_widened_route_is_not_retried(tmp: TmpDirs) -> None:
     with listener_at(p) as listener:
         client, r = _route.run_long(CONNECT, p, c)
         with client:
-            assert r is Route.WIDE
+            assert r is Route.WIDENED
             accept_ping(listener, client)
     assert_untouched(place)
     assert not _route.refuses_wide(OSError(errno.ENOENT, "x"))
@@ -259,7 +261,7 @@ def test_a_kernel_refusing_the_widened_form_moves_on_in_the_plain_sockaddr(
     with listener_at(p) as listener:
         client, r = _route.run_long(CONNECT, p, c)
         with client:
-            assert r is Route.SYMLINK_TO_FILE
+            assert r is Route.SYMLINK
             accept_ping(listener, client)
     assert_untouched(long150)
 
@@ -267,7 +269,7 @@ def test_a_kernel_refusing_the_widened_form_moves_on_in_the_plain_sockaddr(
     with listener_at(q) as listener:
         client, r = _route.run_long(CONNECT, q, c)
         with client:
-            assert r is Route.SYMLINK_TO_FILE
+            assert r is Route.SYMLINK
             accept_ping(listener, client)
     # The link under the 150-byte place was made and removed again.
     assert os.stat(long150).st_mtime != UNTOUCHED

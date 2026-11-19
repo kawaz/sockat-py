@@ -365,7 +365,7 @@ def fallback_cfg(
     links: Sequence[bytes] = (), *, wide: bool = IS_APPLE, proc: bytes = NO_PROC, thread_cwd: bool = False
 ) -> Config:
     """The route order's inputs with no place for D and, unless turned on,
-    neither the thread's own cwd nor /proc (so neither the central route nor
+    neither the thread's own cwd nor /proc (so neither the routes through D nor
     the form without D can be used, bindat on FreeBSD aside, and a bind ends
     at the fork route's place, where this implementation answers
     ``ENAMETOOLONG``), ``links`` as the places for a connect's symlink, and
@@ -375,7 +375,7 @@ def fallback_cfg(
     return Config(own_dir_places=(), link_places=tuple(links), wide=wide, proc_self_fd=proc, thread_cwd=thread_cwd)
 
 
-def central_cfg(
+def d_cfg(
     own: Sequence[OwnDirPlace] = (SOCKET_DIR,),
     links: Sequence[bytes] = (),
     *,
@@ -431,8 +431,8 @@ HAS_PROC = IS_LINUX and os.path.isdir(b"/proc/self/fd")
 """Whether /proc can be used here (Linux)."""
 
 
-def central_route_here() -> Route | None:
-    """The central route the real configuration takes here for a short file
+def d_route_here() -> Route | None:
+    """The routes through D the real configuration takes here for a short file
     name, or ``None`` where it has no means (NetBSD, OpenBSD, illumos): a
     thread's own cwd where it can be used, else bindat on FreeBSD, else
     /proc on Linux."""
@@ -441,18 +441,18 @@ def central_route_here() -> Route | None:
     if thread_cwd_usable():
         return Route.THREAD_CWD
     if HAS_PROC:
-        return Route.PROC_OWN_DIR
+        return Route.PROC
     return None
 
 
 needs_long_bind = pytest.mark.skipif(
-    central_route_here() is None,
-    reason="no means of the central route here, so no long path can be bound (no fork route in Python)",
+    d_route_here() is None,
+    reason="no means of the routes through D here, so no long path can be bound (no fork route in Python)",
 )
 """For the tests that bind long paths through the public API."""
 
-NAME_MAX_CENTRAL = DIRECT_MAX - _route.IN_OWN_DIR_LEN
-"""The longest file name the central route binds by a thread's own cwd or
+NAME_MAX_THROUGH_D = DIRECT_MAX - _route.IN_OWN_DIR_LEN
+"""The longest file name the routes through D bind by a thread's own cwd or
 bindat (``R/<name>`` in a sockaddr): 96 on Linux, 92 on Apple and the
 BSDs."""
 
@@ -691,7 +691,7 @@ def check_asyncio(f: Forced) -> None:
 
     * bound before any event loop exists (``asyncio.run`` after the bind).
       This is how a listener is usually made, and the one that matters on
-      Linux: the central route through /proc binds
+      Linux: the routes through D through /proc binds
       ``/proc/self/fd/<n>/R/<name>`` with D's fd, closed again, and the event
       loop made afterwards takes that free fd number for its own (the
       selector, the self-pipe), so the kernel's spelling then names something

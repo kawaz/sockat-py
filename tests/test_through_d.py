@@ -1,4 +1,4 @@
-"""The central route (hub SPEC, DR-0012): a private directory D made in a
+"""The routes through D (hub SPEC, DR-0012): a private directory D made in a
 place and held by its fd, holding R, a symlink with a random name to the
 realpath of the socket's directory, and the bind / connect of ``R/<name>``
 from D's fd: through a thread's own cwd (Linux, Apple), ``bindat`` /
@@ -7,7 +7,7 @@ from D's fd: through a thread's own cwd (Linux, Apple), ``bindat`` /
 The paths are 600 bytes deep under /tmp unless a test says otherwise (so no
 fallback of a connect is the relative one, and the directory's length does not
 matter to the route). The configurations come from
-:func:`_support.central_cfg`."""
+:func:`_support.d_cfg`."""
 
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ from dataclasses import dataclass
 import pytest
 from _support import (
     HAS_PROC,
-    NAME_MAX_CENTRAL,
+    NAME_MAX_THROUGH_D,
     NO_PLACE,
     NO_PROC,
     PROC,
@@ -37,10 +37,10 @@ from _support import (
     assert_empty,
     assert_far_from_cwd,
     assert_untouched,
-    central_cfg,
-    central_route_here,
     check_full_backlog,
     check_route,
+    d_cfg,
+    d_route_here,
     dir_id,
     forced,
     is_socket,
@@ -76,7 +76,7 @@ from sockat._route import (
 )
 from sockat._sys import DIRECT_MAX, IS_APPLE, IS_FREEBSD, IS_LINUX
 
-pytestmark = pytest.mark.skipif(central_route_here() is None, reason="no means of the central route here")
+pytestmark = pytest.mark.skipif(d_route_here() is None, reason="no means of the routes through D here")
 
 IS_ROOT = os.geteuid() == 0
 
@@ -88,7 +88,7 @@ RANDOM = rb"[A-Za-z0-9]{%d}" % RANDOM_LEN
 
 @dataclass(frozen=True)
 class Means:
-    """One means of the central route, forced: its name, the configuration
+    """One means of the routes through D, forced: its name, the configuration
     (with ``own`` as the places for D) that takes it, and the route."""
 
     what: str
@@ -97,26 +97,26 @@ class Means:
 
 
 def means_here() -> list[Means]:
-    """Every means of the central route this system can use: a thread's own
+    """Every means of the routes through D this system can use: a thread's own
     cwd (Linux where the system allows it, Apple), bindat (FreeBSD), /proc
     with the thread's own cwd turned off (Linux)."""
     found: list[Means] = []
     if IS_FREEBSD:
-        found.append(Means("at", lambda own: central_cfg(own), Route.AT))
+        found.append(Means("at", lambda own: d_cfg(own), Route.AT))
     if thread_cwd_usable():
-        found.append(Means("thread-cwd", lambda own: central_cfg(own, proc=NO_PROC), Route.THREAD_CWD))
+        found.append(Means("thread-cwd", lambda own: d_cfg(own, proc=NO_PROC), Route.THREAD_CWD))
     if HAS_PROC:
-        found.append(Means("proc", lambda own: central_cfg(own, thread_cwd=False), Route.PROC_OWN_DIR))
+        found.append(Means("proc", lambda own: d_cfg(own, thread_cwd=False), Route.PROC))
     return found
 
 
 MEANS = means_here()
 MEANS_IDS = [m.what for m in MEANS]
 
-WITHOUT_D = {
-    Route.THREAD_CWD: Route.THREAD_CWD_WITHOUT_D,
-    Route.AT: Route.AT_WITHOUT_D,
-    Route.PROC_OWN_DIR: Route.PROC_WITHOUT_D,
+SOCKDIR = {
+    Route.THREAD_CWD: Route.THREAD_CWD_SOCKDIR,
+    Route.AT: Route.AT_SOCKDIR,
+    Route.PROC: Route.PROC_SOCKDIR,
 }
 """The route a bind takes by the same means where D can be made nowhere (the
 form without D: R in the socket's directory)."""
@@ -190,7 +190,7 @@ def assert_used(d: bytes) -> None:
 # ----- every means -----
 
 
-# Each means of the central route, forced, gets every check of a route
+# Each means of the routes through D, forced, gets every check of a route
 # (check_route: the socket at the given path, data both ways, blocking and
 # nonblocking connects, close-on-exec, the peer's pid is this process's, the
 # process cwd unchanged, the path reported as the address while the kernel's
@@ -198,7 +198,7 @@ def assert_used(d: bytes) -> None:
 # standard's) and the nonblocking connect against a full backlog. The place
 # for D is empty after every step, though D was made there (its mtime moved).
 @pytest.mark.parametrize("means", MEANS, ids=MEANS_IDS)
-def test_every_means_of_the_central_route(tmp: TmpDirs, means: Means) -> None:
+def test_every_means_of_the_routes_through_d(tmp: TmpDirs, means: Means) -> None:
     p = far(tmp)
     d_place = tmp.new()
     mark_untouched(d_place)
@@ -237,7 +237,7 @@ def test_d_is_private_and_r_points_to_the_realpath_of_the_directory(
         assert d.entries == [d.link]
         assert d.target == os.fsencode(os.path.realpath(real_dir))
         kernel = os.fsencode(kernel_sockname(listener))
-        if means.route is Route.PROC_OWN_DIR:
+        if means.route is Route.PROC:
             assert re.fullmatch(rb"/proc/self/fd/\d+/" + re.escape(d.link) + rb"/s\.sock", kernel), kernel
         else:
             assert kernel == d.link + b"/s.sock", kernel
@@ -258,7 +258,7 @@ def test_the_calling_threads_own_cwd_is_left_alone(tmp: TmpDirs) -> None:
     p = far(tmp)
     mine = tmp.new()
     process = dir_id(".")
-    c = central_cfg(proc=NO_PROC)
+    c = d_cfg(proc=NO_PROC)
     seen: dict[str, object] = {}
 
     def caller() -> None:
@@ -285,7 +285,7 @@ def test_the_calling_threads_own_cwd_is_left_alone(tmp: TmpDirs) -> None:
 
 
 # The process cwd never changes while many binds and connects run through
-# the central route from several threads: threads that keep checking getcwd
+# the routes through D from several threads: threads that keep checking getcwd
 # and the identity of "." the whole time never see a change.
 @pytest.mark.parametrize("means", MEANS, ids=MEANS_IDS)
 def test_the_process_cwd_never_changes(tmp: TmpDirs, means: Means) -> None:
@@ -369,9 +369,9 @@ def test_the_proc_spelling_names_nothing_when_its_fd_number_is_reused(tmp: TmpDi
     with open(other + b"/s.sock", "wb") as f:
         f.write(b"unrelated")
     own: tuple[OwnDirPlace, ...] = (NO_PLACE,) if without_d else (SOCKET_DIR,)
-    listener, r = _route.run_long(BIND, p, central_cfg(own, thread_cwd=False))
+    listener, r = _route.run_long(BIND, p, d_cfg(own, thread_cwd=False))
     with listener:
-        assert r is (Route.PROC_WITHOUT_D if without_d else Route.PROC_OWN_DIR)
+        assert r is (Route.PROC_SOCKDIR if without_d else Route.PROC)
         kernel = os.fsencode(kernel_sockname(listener))
         link = re.escape(OWN_DIR_PREFIX_IN_SOCKET_DIR) + RANDOM if without_d else RANDOM
         m = re.fullmatch(rb"/proc/self/fd/(\d+)/(" + link + rb")/s\.sock", kernel)
@@ -402,10 +402,10 @@ def fallback_route_here(req: _route.Request) -> Route:
     short safe place for the symlink and the real /proc: connectat on
     FreeBSD, /proc on Linux, the symlink elsewhere."""
     if IS_FREEBSD:
-        return Route.AT_DIR
+        return Route.AT_DIRECT
     if HAS_PROC:
-        return Route.PROC_FD
-    return Route.SYMLINK_TO_FILE
+        return Route.PROC_DIRECT
+    return Route.SYMLINK
 
 
 # D goes in the first place where it can be made, and the places it cannot be
@@ -455,11 +455,11 @@ def test_d_goes_in_the_first_place_where_it_can_be_made(
     seen.clear()
     links = tmp.new()
     z = with_name(p, b"z.sock")
-    c = central_cfg(tuple(bad), [links], thread_cwd=means.route is Route.THREAD_CWD)
+    c = d_cfg(tuple(bad), [links], thread_cwd=means.route is Route.THREAD_CWD)
     before = listing(parent(p))
     listener, r = _route.run_long(BIND, z, c)
     with listener:
-        assert r is WITHOUT_D[means.route]
+        assert r is SOCKDIR[means.route]
         assert listing(parent(p)) == sorted([*before, b"z.sock"])
         for req in (CONNECT, CONNECT_NONBLOCKING):
             client, r = _route.run_long(req, z, c)
@@ -517,7 +517,7 @@ def test_d_goes_in_tmpdir_then_tmp(tmp: TmpDirs, kind: str) -> None:
         tmpdir, where = t + b"/missing", b"/tmp"
     where = where or tmpdir
     out = run_child("own_dir_where", t, {"PATH": p}, env={"TMPDIR": tmpdir})
-    want = central_route_here()
+    want = d_route_here()
     assert want is not None
     assert out["route"] == want.value, out
     st = os.stat(where)
@@ -571,7 +571,7 @@ def test_where_d_can_be_made_nowhere_a_bind_takes_the_form_without_d(
     p = far(tmp)
     d_place = tmp.new()
     for_connects = tmp.new()
-    want = WITHOUT_D[means.route]
+    want = SOCKDIR[means.route]
     if how == "no-place":
         own: tuple[OwnDirPlace, ...] = (NO_PLACE,)
     else:
@@ -585,7 +585,7 @@ def test_where_d_can_be_made_nowhere_a_bind_takes_the_form_without_d(
         assert r is want
         kernel = os.fsencode(kernel_sockname(listener))
         link = re.escape(OWN_DIR_PREFIX_IN_SOCKET_DIR) + RANDOM
-        proc = rb"/proc/self/fd/\d+/" if want is Route.PROC_WITHOUT_D else b""
+        proc = rb"/proc/self/fd/\d+/" if want is Route.PROC_SOCKDIR else b""
         assert re.fullmatch(proc + link + rb"/s\.sock", kernel), kernel
         assert listing(parent(p)) == [b"s.sock"]
     os.unlink(p)
@@ -612,9 +612,9 @@ def test_the_form_without_d_leaves_the_calling_threads_cwd_alone(tmp: TmpDirs) -
         finally:
             os.close(fd)
         seen["before"] = dir_id(".")
-        listener, r = _route.run_long(BIND, p, central_cfg((NO_PLACE,), proc=NO_PROC))
+        listener, r = _route.run_long(BIND, p, d_cfg((NO_PLACE,), proc=NO_PROC))
         with listener:
-            client, _ = _route.run_long(CONNECT, p, central_cfg(proc=NO_PROC))
+            client, _ = _route.run_long(CONNECT, p, d_cfg(proc=NO_PROC))
             with client:
                 accept_ping(listener, client)
         seen["route"] = r
@@ -623,13 +623,13 @@ def test_the_form_without_d_leaves_the_calling_threads_cwd_alone(tmp: TmpDirs) -
     th = threading.Thread(target=caller)
     th.start()
     th.join()
-    assert seen["route"] is Route.THREAD_CWD_WITHOUT_D
+    assert seen["route"] is Route.THREAD_CWD_SOCKDIR
     assert seen["before"] == seen["after"] == dir_id(mine)
     assert dir_id(".") == process
     assert listing(parent(p)) == [b"s.sock"]
 
 
-# Without D the means are tried in the central route's order, on the same R:
+# Without D the means are tried in the D routes' order, on the same R:
 # where the thread's own cwd turns out unusable once tried (stood in for at
 # the boundary, as for a seccomp filter or a refused unshare, and by a thread
 # that cannot be started), /proc on Linux; with /proc absent too, or on Apple,
@@ -655,21 +655,21 @@ def test_without_d_the_means_are_tried_in_order(tmp: TmpDirs, monkeypatch: pytes
         monkeypatch.setattr("sockat._route.threading", types.SimpleNamespace(Thread=NoThread, Lock=threading.Lock))
     if HAS_PROC:
         p = far(tmp)
-        listener, r = _route.run_long(BIND, p, central_cfg((NO_PLACE,)))
+        listener, r = _route.run_long(BIND, p, d_cfg((NO_PLACE,)))
         with listener:
-            assert r is Route.PROC_WITHOUT_D
+            assert r is Route.PROC_SOCKDIR
             assert is_socket(p)
             assert listing(parent(p)) == [b"s.sock"]
     q = far(tmp)
     mark_untouched(parent(q))
     with raises_errno(errno.ENAMETOOLONG):
-        _route.run_long(BIND, q, central_cfg((NO_PLACE,), proc=NO_PROC))
+        _route.run_long(BIND, q, d_cfg((NO_PLACE,), proc=NO_PROC))
     assert listing(parent(q)) == []
     assert os.stat(parent(q)).st_mtime != UNTOUCHED, "R was not made"
     z = far(tmp)
     mark_untouched(parent(z))
     with raises_errno(errno.ENAMETOOLONG):
-        _route.run_long(BIND, z, central_cfg((NO_PLACE,), thread_cwd=False, proc=NO_PROC))
+        _route.run_long(BIND, z, d_cfg((NO_PLACE,), thread_cwd=False, proc=NO_PROC))
     assert_untouched(parent(z))
 
 
@@ -684,12 +684,12 @@ def test_without_d_the_means_are_tried_in_order(tmp: TmpDirs, monkeypatch: pytes
 def test_the_length_limit_of_the_form_without_d(tmp: TmpDirs, means: Means) -> None:
     limit = DIRECT_MAX - _route.WITHOUT_OWN_DIR_LEN
     assert (_route.WITHOUT_OWN_DIR_LEN, limit) == (19, 88 if DIRECT_MAX == 107 else 84)
-    fits, too_long = (60, 80) if means.route is Route.PROC_OWN_DIR else (limit, limit + 1)
+    fits, too_long = (60, 80) if means.route is Route.PROC else (limit, limit + 1)
     c = means.cfg((NO_PLACE,))
     p = nest(tmp.new(), 600, b"f" * fits)
     listener, r = _route.run_long(BIND, p, c)
     with listener:
-        assert r is WITHOUT_D[means.route]
+        assert r is SOCKDIR[means.route]
         assert listing(parent(p)) == [b"f" * fits]
     q = nest(tmp.new(), 600, b"g" * too_long)
     mark_untouched(parent(q))
@@ -726,7 +726,7 @@ def test_a_taken_name_for_r_without_d_is_drawn_again_and_16_end_the_form(
     c = means.cfg((NO_PLACE,))
     listener, r = _route.run_long(BIND, p, c)
     listener.close()
-    assert r is WITHOUT_D[means.route]
+    assert r is SOCKDIR[means.route]
     assert drawn == [taken, free]
     assert prefixes == [OWN_DIR_PREFIX_IN_SOCKET_DIR] * 2
     assert listing(directory) == sorted([taken, b"s.sock"])
@@ -779,15 +779,15 @@ def test_without_d_a_socket_directory_that_cannot_be_opened_is_enametoolong(
 # own cwd cannot be used; bindat, which neither stands for). R is removed in
 # the failure too: the socket's directory holds what it held.
 def test_a_failure_through_the_form_without_d_is_not_retried(tmp: TmpDirs, monkeypatch: pytest.MonkeyPatch) -> None:
-    here = central_route_here()
+    here = d_route_here()
     assert here is not None
-    first = {Route.THREAD_CWD: ["thread-cwd"], Route.PROC_OWN_DIR: ["proc"], Route.AT: []}[here]
+    first = {Route.THREAD_CWD: ["thread-cwd"], Route.PROC: ["proc"], Route.AT: []}[here]
     p = far(tmp)
     directory = parent(p)
-    c = central_cfg((NO_PLACE,))
+    c = d_cfg((NO_PLACE,))
     listener, r = _route.run_long(BIND, p, c)
     with listener:
-        assert r is WITHOUT_D[here]
+        assert r is SOCKDIR[here]
         with open(with_name(p, b"file"), "wb"):
             pass
         tried: list[str] = []
@@ -1016,33 +1016,110 @@ def test_a_taken_name_for_d_is_drawn_again_and_16_end_the_place(
 # by its name O_RDONLY: that needs the owner's read bit, so for a user other
 # than root a umask taking it off (0477, 0777) leaves D that cannot be set to
 # 0700; D is then removed again and the place counts as one where D cannot be
-# made (with no other place, the bind takes the form without D: R in the
-# socket's directory, which the umask does not stop). Either way nothing is
-# left in the place (no D piling up, one per call), and only the socket file
-# is left next to the socket (no R). Runs in a child process because the
-# umask is process-wide.
-#
-# Not checked: where D is opened O_SEARCH (Apple), a umask taking the owner's
-# search bit off (0777, 0177) stops the open itself for a user other than
-# root, and D is left in the place (a D that cannot be opened cannot be told
-# to be ours); on the other systems (O_RDONLY) the same for the read bit.
-@pytest.mark.parametrize("umask", ["077", "022", "277", "477", "777"])
+# made. Where D cannot be opened at all (for a user other than root: Apple's
+# O_SEARCH without the owner's search bit, 0177 and 0777; O_RDONLY without
+# the read bit elsewhere), what is at D's name passes the same check by name
+# and is removed, and the place counts as one where D cannot be made too
+# (hub DR-0012, D12-Q5). With no other place, the bind then takes the form
+# without D: R in the socket's directory, which the umask does not stop.
+# Either way nothing is left in the place (no D piling up, one per call), and
+# only the socket file is left next to the socket (no R). Runs in a child
+# process because the umask is process-wide.
+@pytest.mark.parametrize("umask", ["077", "022", "177", "277", "477", "777"])
 @pytest.mark.parametrize("means", MEANS, ids=MEANS_IDS)
 def test_a_umask_taking_owner_bits_off_leaves_nothing_in_the_place(tmp: TmpDirs, umask: str, means: Means) -> None:
     taken = int(umask, 8)
-    if not IS_ROOT and ((IS_APPLE and taken & 0o100) or (not IS_LINUX and not IS_APPLE and taken & 0o400)):
-        pytest.skip("D cannot be opened under this umask here (reported to the SPEC)")
+    unopened = not IS_ROOT and bool(taken & (0o100 if IS_APPLE else 0o400)) and not IS_LINUX
     # The thread-cwd means is forced with /proc made to look absent, so on
     # Linux D's mode is set through the reopening by name.
-    reopened = IS_LINUX and means.route is not Route.PROC_OWN_DIR
-    fails = reopened and not IS_ROOT and bool(taken & 0o400)
+    reopened = IS_LINUX and means.route is not Route.PROC
+    fails = unopened or (reopened and not IS_ROOT and bool(taken & 0o400))
     p = far(tmp)
     d_place = tmp.new()
     args = {"PATH": p, "PLACE": d_place, "UMASK": umask.encode(), "MEANS": means.what.encode()}
     out = run_child("bind_with_umask", b"/", args)
-    assert out == {"route": (WITHOUT_D[means.route] if fails else means.route).value}, out
+    assert out == {"route": (SOCKDIR[means.route] if fails else means.route).value}, out
     assert_empty(d_place)
     assert listing(parent(p)) == [b"s.sock"]
+
+
+# A D just made that cannot be opened (stood in for by an open that fails,
+# as where a umask took the owner's search or read bit off) is looked up by
+# its name and, being a directory of ours with no permission for group or
+# others, removed again: the place counts as one where D cannot be made and
+# the next place is used (hub DR-0012, D12-Q5).
+@pytest.mark.parametrize("means", MEANS, ids=MEANS_IDS)
+def test_a_d_that_cannot_be_opened_is_removed_and_the_next_place_used(
+    tmp: TmpDirs, monkeypatch: pytest.MonkeyPatch, means: Means
+) -> None:
+    p = far(tmp)
+    first = tmp.new()
+    second = tmp.new()
+    real = _route.open_own_dir
+    first_id = dir_id(first)
+
+    def open_own_dir(base_fd: int, name: bytes) -> int:
+        st = os.fstat(base_fd)
+        if (st.st_dev, st.st_ino) == first_id:
+            raise PermissionError(errno.EACCES, "stand-in")
+        return real(base_fd, name)
+
+    monkeypatch.setattr(_route, "open_own_dir", open_own_dir)
+    for d in (first, second):
+        mark_untouched(d)
+    listener, r = _route.run_long(BIND, p, means.cfg((first, second)))
+    listener.close()
+    assert r is means.route
+    assert_used(first)
+    assert_used(second)
+
+
+# What is at the name of a D that cannot be opened is removed only when it
+# passes the check by its name: a directory with permission for group or
+# others (put there in D's place, or not ours) is left as it is, and so is
+# one of ours that is not empty (rmdir removes only an empty directory). The
+# next place is used either way.
+@pytest.mark.parametrize("what", ["group permission", "not empty"])
+def test_an_unopened_d_that_is_not_an_empty_one_of_ours_is_left_alone(
+    tmp: TmpDirs, monkeypatch: pytest.MonkeyPatch, what: str
+) -> None:
+    means = MEANS[0]
+    p = far(tmp)
+    first = tmp.new()
+    second = tmp.new()
+    first_id = dir_id(first)
+    real_mkdir, real_open = _route.mkdir_at, _route.open_own_dir
+
+    def in_first(base_fd: int) -> bool:
+        st = os.fstat(base_fd)
+        return (st.st_dev, st.st_ino) == first_id
+
+    def mkdir_at(base_fd: int, name: bytes) -> None:
+        real_mkdir(base_fd, name)
+        if in_first(base_fd):
+            if what == "group permission":
+                os.chmod(name, 0o750, dir_fd=base_fd)
+            else:
+                os.mkdir(first + b"/" + name + b"/inside", 0o700)
+
+    def open_own_dir(base_fd: int, name: bytes) -> int:
+        if in_first(base_fd):
+            raise PermissionError(errno.EACCES, "stand-in")
+        return real_open(base_fd, name)
+
+    monkeypatch.setattr(_route, "mkdir_at", mkdir_at)
+    monkeypatch.setattr(_route, "open_own_dir", open_own_dir)
+    mark_untouched(second)
+    listener, r = _route.run_long(BIND, p, means.cfg((first, second)))
+    listener.close()
+    assert r is means.route
+    (left,) = listing(first)
+    assert re.fullmatch(re.escape(OWN_DIR_PREFIX) + RANDOM, left), left
+    if what == "group permission":
+        assert stat.S_IMODE(os.stat(first + b"/" + left).st_mode) == 0o750
+    else:
+        assert listing(first + b"/" + left) == [b"inside"]
+    assert_used(second)
 
 
 # A D that passed the check but cannot be set to 0700 (stood in for by a
@@ -1127,15 +1204,15 @@ def test_where_the_threads_cwd_cannot_be_used_the_next_means_is_tried(
                 raise RuntimeError("can't start new thread")
 
         monkeypatch.setattr("sockat._route.threading", types.SimpleNamespace(Thread=NoThread, Lock=threading.Lock))
-    c = central_cfg((d_place,), [links])
+    c = d_cfg((d_place,), [links])
     mark_untouched(d_place)
     if HAS_PROC:
         listener, r = _route.run_long(BIND, p, c)
         with listener:
-            assert r is Route.PROC_OWN_DIR
+            assert r is Route.PROC
             client, r = _route.run_long(CONNECT, p, c)
             with client:
-                assert r is Route.PROC_OWN_DIR
+                assert r is Route.PROC
                 accept_ping(listener, client)
     else:
         with raises_errno(errno.ENAMETOOLONG):
@@ -1150,19 +1227,19 @@ def test_where_the_threads_cwd_cannot_be_used_the_next_means_is_tried(
     assert_empty(links)
 
 
-# A file name too long for `R/<name>` in a sockaddr (NAME_MAX_CENTRAL + 1
-# bytes) leaves the central route without a means before anything is made: the
+# A file name too long for `R/<name>` in a sockaddr (NAME_MAX_THROUGH_D + 1
+# bytes) leaves the routes through D without a means before anything is made: the
 # place for D stays untouched, the bind is ENAMETOOLONG with nothing created,
-# and a connect takes its fallback. NAME_MAX_CENTRAL bytes still go through
+# and a connect takes its fallback. NAME_MAX_THROUGH_D bytes still go through
 # the thread's own cwd or bindat. Through /proc the limit is shorter
 # (`/proc/self/fd/<n>/` in front): a name of 70 bytes goes, one of 85 does
 # not.
 @pytest.mark.parametrize("means", MEANS, ids=MEANS_IDS)
-def test_a_file_name_too_long_for_the_central_route_makes_nothing(tmp: TmpDirs, means: Means) -> None:
+def test_a_file_name_too_long_for_the_routes_through_d_makes_nothing(tmp: TmpDirs, means: Means) -> None:
     t = tmp.new()
     d_place = tmp.new()
     links = tmp.new()
-    fits, too_long = (70, 85) if means.route is Route.PROC_OWN_DIR else (NAME_MAX_CENTRAL, NAME_MAX_CENTRAL + 1)
+    fits, too_long = (70, 85) if means.route is Route.PROC else (NAME_MAX_THROUGH_D, NAME_MAX_THROUGH_D + 1)
     c = dataclasses.replace(means.cfg((d_place,)), link_places=(links,))
     p = nest(t, 600, b"f" * fits)
     listener, r = _route.run_long(BIND, p, c)
@@ -1190,14 +1267,14 @@ def test_a_file_name_too_long_for_the_central_route_makes_nothing(tmp: TmpDirs, 
 # ----- failures -----
 
 
-# A bind / connect that actually ran through the central route is the result:
+# A bind / connect that actually ran through the routes through D are the result:
 # ENOENT for a missing socket, EADDRINUSE for an existing file, ECONNREFUSED
 # for a socket nobody listens on come back as they are, and nothing is tried
 # after them: no second place for D (it stays untouched), no fallback (the
 # place for a connect's symlink stays untouched), no other means. D is
 # removed in the failure too.
 @pytest.mark.parametrize("means", MEANS, ids=MEANS_IDS)
-def test_a_failure_through_the_central_route_is_not_retried(tmp: TmpDirs, means: Means) -> None:
+def test_a_failure_through_the_routes_through_d_is_not_retried(tmp: TmpDirs, means: Means) -> None:
     p = far(tmp)
     first = tmp.new()
     second = tmp.new()
@@ -1239,14 +1316,14 @@ def test_a_missing_directory_is_enoent_before_anything_is_made(tmp: TmpDirs) -> 
         missing = directory + b"/nope/" + b"n" * n
         for req in (BIND, CONNECT, CONNECT_NONBLOCKING):
             with pytest.raises(FileNotFoundError):
-                _route.run_long(req, missing, central_cfg((d_place,)))
+                _route.run_long(req, missing, d_cfg((d_place,)))
     assert listing(directory) == []
     assert_untouched(d_place)
 
 
 # The realpath of the socket's directory is taken first, with the stat
 # (SPEC): when it cannot be resolved, that error is raised as it is, before
-# any length is judged or D is made, rather than the central route counting
+# any length is judged or D is made, rather than the routes through D counting
 # as unusable and the call ending in ENAMETOOLONG. Stood in for by a realpath
 # that fails; nothing is made in the place for D.
 def test_a_realpath_that_cannot_be_taken_is_the_error_it_is(tmp: TmpDirs, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1260,7 +1337,7 @@ def test_a_realpath_that_cannot_be_taken_is_the_error_it_is(tmp: TmpDirs, monkey
     monkeypatch.setattr(os.path, "realpath", realpath)
     for req in (BIND, CONNECT, CONNECT_NONBLOCKING):
         with pytest.raises(PermissionError):
-            _route.run_long(req, p, central_cfg((d_place,)))
+            _route.run_long(req, p, d_cfg((d_place,)))
     assert_untouched(d_place)
 
 
@@ -1301,7 +1378,7 @@ def test_a_socket_directory_that_cannot_be_opened_leaves_the_routes_without_its_
         return real_open_dir(d)
 
     monkeypatch.setattr(_route, "open_dir", open_dir)
-    cfg = central_cfg((d_place,))
+    cfg = d_cfg((d_place,))
     listener, _ = _route.run_long(BIND, p, cfg)
     with listener:
         for req in (CONNECT, CONNECT_NONBLOCKING):
@@ -1321,13 +1398,13 @@ def test_a_socket_directory_that_cannot_be_opened_leaves_the_routes_without_its_
 # The socket's directory needs only search and write permission, as for a
 # plain bind by path: it is opened O_PATH (Linux) / O_SEARCH (Apple), and D
 # lives elsewhere. A directory of mode 0300 cannot be opened O_RDONLY, yet the
-# central route binds and connects in it. Root bypasses permission checks, so
+# routes through D bind and connects in it. Root bypasses permission checks, so
 # as root the test cannot tell anything. FreeBSD opens the directory O_RDONLY
 # (the SPEC's way there).
 @pytest.mark.skipif(IS_ROOT, reason="root bypasses the permission under test")
 @pytest.mark.skipif(IS_FREEBSD, reason="the directory is opened O_RDONLY there")
 @pytest.mark.parametrize("means", MEANS, ids=MEANS_IDS)
-def test_the_central_route_needs_no_read_permission_on_the_directory(tmp: TmpDirs, means: Means) -> None:
+def test_the_routes_through_d_needs_no_read_permission_on_the_directory(tmp: TmpDirs, means: Means) -> None:
     p = far(tmp)
     os.chmod(parent(p), 0o300)
     with pytest.raises(PermissionError):
@@ -1344,7 +1421,7 @@ def test_the_central_route_needs_no_read_permission_on_the_directory(tmp: TmpDir
 
 # When the wait for the thread-cwd thread is interrupted (an exception such
 # as KeyboardInterrupt out of join), the route still waits for the thread to
-# end before it returns, so the central route does not remove D and close its
+# end before it returns, so the routes through D do not remove D and close its
 # fd while the thread is about to enter it (a closed fd, or one reused for an
 # unrelated directory, where the thread would then bind). The interruption is
 # raised after that, with the socket made closed and nothing left in the
@@ -1386,7 +1463,7 @@ def test_an_interrupted_wait_lets_the_thread_end_before_d_is_removed(
     monkeypatch.setattr(threading.Thread, "join", join_interrupted_once)
     try:
         with pytest.raises(KeyboardInterrupt):
-            _route.run_long(BIND, p, central_cfg((d_place,), proc=NO_PROC))
+            _route.run_long(BIND, p, d_cfg((d_place,), proc=NO_PROC))
         alive_at_raise.append(threads[0].is_alive())
     finally:
         monkeypatch.setattr(threading.Thread, "join", real_join)
@@ -1417,15 +1494,15 @@ def test_the_pre_check_of_the_threads_cwd_agrees_with_the_system() -> None:
 # ----- the bind is not widened -----
 
 
-# On Apple the central route's spelling is within sun_path, so the address
+# On Apple the D routes' spelling is within sun_path, so the address
 # the listener's kernel side holds fits sun_path with its NUL, for every name
 # length the route takes: no bind leaves a widened address.
 @pytest.mark.skipif(not IS_APPLE, reason="the widened sockaddr is Apple's")
-def test_an_apple_bind_through_the_central_route_leaves_an_address_within_sun_path(tmp: TmpDirs) -> None:
+def test_an_apple_bind_through_the_routes_through_d_leaves_an_address_within_sun_path(tmp: TmpDirs) -> None:
     t = tmp.new()
-    for n in (6, 50, NAME_MAX_CENTRAL):
+    for n in (6, 50, NAME_MAX_THROUGH_D):
         p = nest(t, 600, b"a" * n)
-        listener, r = _route.run_long(BIND, p, central_cfg())
+        listener, r = _route.run_long(BIND, p, d_cfg())
         with listener:
             assert r is Route.THREAD_CWD
             assert len(os.fsencode(kernel_sockname(listener))) <= DIRECT_MAX

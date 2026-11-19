@@ -84,7 +84,7 @@ def test_sockets_from_sockat_are_used_by_asyncio_as_the_standards_are(tmp: TmpDi
 
 # The close of a server must remove the socket file at the path and nothing
 # else, even where the kernel's spelling of the listener's address would name
-# another file if resolved against the process cwd: the central route's
+# another file if resolved against the process cwd: the D routes'
 # spelling is `R/<name>` (or behind /proc/self/fd/<n>/), and a file of the
 # socket's name sits in the cwd. Had asyncio been handed the spelling, a
 # spelling without R (the file name alone) would have named that file, whose

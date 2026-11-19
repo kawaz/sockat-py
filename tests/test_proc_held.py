@@ -1,17 +1,17 @@
-"""The fd-held fallback of a connect (Linux with /proc): D made as the
-central route makes it, in the first of the places for D where it can be
+"""The proc-held fallback of a connect (Linux with /proc): D made as the
+routes through D make it, in the first of the places for D where it can be
 (whether the place is safe or not does not matter: D is held by its fd), with
 ``s`` in it, a symlink to the socket file, and the connect to
 ``/proc/self/fd/<fd of D>/s``.
 
 The socket paths here have a file name of 100 bytes, which fits neither
-behind ``/proc/self/fd/<n>/`` (so the /proc fallback cannot be used) nor in
-``R/<name>`` (so the central route cannot be used), 600 bytes deep under /tmp
+behind ``/proc/self/fd/<n>/`` (so the proc-direct fallback cannot be used) nor in
+``R/<name>`` (so the routes through D cannot be used), 600 bytes deep under /tmp
 (so no relative spelling fits). No bind reaches such a name, so the
 listeners are bound by the standard under a short name and renamed
 (:func:`_support.listener_at`). What D is made of (its name, mode, the check
-of a replaced D, the names drawn) is shared with the central route and
-checked in ``test_central.py``."""
+of a replaced D, the names drawn) is shared with the routes through D and
+checked in ``test_through_d.py``."""
 
 from __future__ import annotations
 
@@ -57,7 +57,7 @@ from _support import (
 from sockat import _route
 from sockat._route import BIND, CONNECT, CONNECT_NONBLOCKING, OWN_DIR_PREFIX, RANDOM_LEN, Config, Request, Route, Skip
 
-pytestmark = pytest.mark.skipif(not sys.platform.startswith("linux"), reason="the fd-held form needs Linux's /proc")
+pytestmark = pytest.mark.skipif(not sys.platform.startswith("linux"), reason="the proc-held route needs Linux's /proc")
 
 NAME = b"n" * 100
 """A file name that fits neither behind ``/proc/self/fd/<n>/`` nor in
@@ -86,9 +86,9 @@ def assert_used(d: bytes) -> None:
     assert_empty(d)
 
 
-def check_fd_held(p: bytes, cfg: Config, held_in: bytes) -> None:
+def check_proc_held(p: bytes, cfg: Config, held_in: bytes) -> None:
     """Connect (blocking and nonblocking) to a listener at ``p`` through
-    ``cfg`` and check that each connect takes the fd-held form under
+    ``cfg`` and check that each connect takes the proc-held route under
     ``held_in`` and is a working stream: the blocking mode asked for,
     close-on-exec, the path reported as its peer (the kernel holds
     ``/proc/self/fd/<fd>/s``, meaningless once the fd is closed) and the
@@ -102,7 +102,7 @@ def check_fd_held(p: bytes, cfg: Config, held_in: bytes) -> None:
             mark_untouched(held_in)
             client, r = _route.run_long(req, p, cfg)
             with client:
-                assert r is Route.FD_HELD, req
+                assert r is Route.PROC_HELD, req
                 assert client.getblocking() is blocking, req
                 assert is_cloexec(client), req
                 assert client.getpeername() == os.fsdecode(p), req
@@ -133,10 +133,10 @@ def test_a_connect_through_d_held_by_its_fd(tmp: TmpDirs, mode: int) -> None:
     p = far_path(tmp)
     held_in = tmp.new()
     os.chmod(held_in, mode)
-    check_fd_held(p, fd_cfg([held_in]), held_in)
+    check_proc_held(p, fd_cfg([held_in]), held_in)
 
 
-# The fd-held connect, adopted by asyncio as the standard's is
+# The proc-held connect, adopted by asyncio as the standard's is
 # (asyncio.open_unix_connection(sock=)), blocking or not: data flows both ways
 # and the transport reports the path given as its peer, not the spelling
 # through D (whose fd is closed when the connect returns).
@@ -147,11 +147,11 @@ def test_a_connect_through_d_is_adopted_by_asyncio(tmp: TmpDirs) -> None:
 
     def connect(req: Request) -> socket.socket:
         client, r = _route.run_long(req, p, cfg)
-        assert r is Route.FD_HELD, req
+        assert r is Route.PROC_HELD, req
         return client
 
     with listener_at(p) as listener:
-        asyncio.run(serve_asyncio("fd-held", listener, connect, os.fsdecode(p), served=False))
+        asyncio.run(serve_asyncio("proc-held", listener, connect, os.fsdecode(p), served=False))
     assert_empty(held_in)
 
 
@@ -188,13 +188,13 @@ def test_d_holds_s_pointing_to_the_socket_file(tmp: TmpDirs, monkeypatch: pytest
         monkeypatch.setattr(_route, "plain_op", look_then_connect)
         client, r = _route.run_long(CONNECT, p, fd_cfg([base]))
         with client:
-            assert r is Route.FD_HELD
+            assert r is Route.PROC_HELD
             accept_ping(listener, client)
     assert len(seen) == 1
     assert_empty(base)
 
 
-# A nonblocking connect through the fd-held form to a full backlog fails at
+# A nonblocking connect through the proc-held route to a full backlog fails at
 # once (EAGAIN on Linux; a blocking one would wait for room), and D is removed
 # in that failure too.
 def test_a_full_backlog_fails_the_nonblocking_connect_at_once_and_leaves_nothing(tmp: TmpDirs) -> None:
@@ -212,7 +212,7 @@ def test_a_full_backlog_fails_the_nonblocking_connect_at_once_and_leaves_nothing
                 except BlockingIOError:
                     break
                 queued.append(client)
-                assert r is Route.FD_HELD
+                assert r is Route.PROC_HELD
                 assert not client.getblocking()
             assert queued, "nothing got in before it was full"
             mark_untouched(held_in)
@@ -235,7 +235,7 @@ def test_a_relative_path_is_reached_through_its_absolute_target(tmp: TmpDirs) ->
     rel = p[len(t) + 1 :]
     with listener_at(p) as listener:
         out = run_child("connect_report", t, {"PATH": rel, "OWN": held_in, "PROC": b"1"})
-        assert out["route"] == Route.FD_HELD.value, out
+        assert out["route"] == Route.PROC_HELD.value, out
         listener.setblocking(False)
         listener.accept()[0].close()
     assert_empty(held_in)
@@ -256,22 +256,22 @@ def test_d_goes_in_the_first_place_where_it_can_be_made(tmp: TmpDirs) -> None:
     good = tmp.new()
     links = tmp.new()
     p = far_path(tmp)
-    check_fd_held(p, fd_cfg([NO_PLACE, file, good]), good)
+    check_proc_held(p, fd_cfg([NO_PLACE, file, good]), good)
     with listener_at(p) as listener:
         client, r = _route.run_long(CONNECT, p, fd_cfg([NO_PLACE, file], [links]))
         with client:
-            assert r is Route.SYMLINK_TO_FILE
+            assert r is Route.SYMLINK
             accept_ping(listener, client)
     os.unlink(p)
     assert_empty(links)
     check_unreachable(p, fd_cfg([NO_PLACE, file]))
 
 
-# Without /proc (no such directory; an empty one) there is no fd-held form: the
+# Without /proc (no such directory; an empty one) there is no proc-held route: the
 # place for D is not touched, and the connect takes the fallbacks of the
 # systems without /proc (the symlink here, under a safe place).
 @pytest.mark.parametrize("empty", [False, True])
-def test_without_proc_there_is_no_fd_held_form(tmp: TmpDirs, empty: bool) -> None:
+def test_without_proc_there_is_no_proc_held_form(tmp: TmpDirs, empty: bool) -> None:
     t = tmp.new()
     none = t + b"/proc/self/fd"
     if empty:
@@ -284,7 +284,7 @@ def test_without_proc_there_is_no_fd_held_form(tmp: TmpDirs, empty: bool) -> Non
         for req in (CONNECT, CONNECT_NONBLOCKING):
             client, r = _route.run_long(req, p, fd_cfg([d_place], [links], proc=none))
             with client:
-                assert r is Route.SYMLINK_TO_FILE, req
+                assert r is Route.SYMLINK, req
                 accept_ping(listener, client)
     assert_untouched(d_place)
     assert_empty(links)
@@ -298,7 +298,7 @@ def test_a_symlink_that_cannot_be_created_leaves_nothing(tmp: TmpDirs) -> None:
     mark_untouched(base)
     dirfd = _route.open_dir(sock_dir)
     try:
-        assert _route.fd_held_route(CONNECT, b"/" + b"x" * 5000, dirfd, fd_cfg([base])) is Skip.UNUSABLE
+        assert _route.proc_held_route(CONNECT, b"/" + b"x" * 5000, dirfd, fd_cfg([base])) is Skip.UNUSABLE
     finally:
         os.close(dirfd)
     assert_used(base)
@@ -307,12 +307,12 @@ def test_a_symlink_that_cannot_be_created_leaves_nothing(tmp: TmpDirs) -> None:
 # ----- bind -----
 
 
-# A bind never takes the fd-held form (`s` is a link to the socket file, which
+# A bind never takes the proc-held route (`s` is a link to the socket file, which
 # a bind does not follow; and the bind's spelling would stay with the
 # listener). With a name of 100 bytes no bind route is left: ENAMETOOLONG,
 # nothing created in the place or next to the socket; a connect to the same
 # path through the same place gets through.
-def test_a_bind_does_not_take_the_fd_held_form(tmp: TmpDirs) -> None:
+def test_a_bind_does_not_take_the_proc_held_form(tmp: TmpDirs) -> None:
     p = far_path(tmp)
     held_in = tmp.new()
     c = fd_cfg([held_in])
@@ -322,7 +322,7 @@ def test_a_bind_does_not_take_the_fd_held_form(tmp: TmpDirs) -> None:
         _route.run_long(BIND, p, c)
     assert listing(parent(p)) == before
     assert_untouched(held_in)
-    check_fd_held(p, c, held_in)
+    check_proc_held(p, c, held_in)
 
 
 # ----- failures -----

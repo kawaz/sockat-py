@@ -1,10 +1,10 @@
 """The symlink fallback of a connect (every system but FreeBSD; on Linux
-after /proc and the fd-held form, so /proc is made to look absent here): the
+after /proc and the proc-held route, so /proc is made to look absent here): the
 places for the symlink, its name, and how it is created and removed. A bind
-never takes it (the central route carries the binds).
+never takes it (the routes through D carry the binds).
 
 Unless a test says otherwise there is no place for D and the thread's own
-cwd is off (:func:`_support.fallback_cfg`), so the central route is not used
+cwd is off (:func:`_support.fallback_cfg`), so the routes through D are not used
 and a connect that no symlink reaches is ``ENAMETOOLONG``. The listeners are
 bound by the standard under a short name and renamed to the path
 (:func:`_support.listener_at`), so they do not depend on any route."""
@@ -61,7 +61,7 @@ def far(tmp: TmpDirs, name: bytes = b"s.sock") -> bytes:
     return p
 
 
-def connects_through(p: bytes, cfg: _route.Config, want: Route = Route.SYMLINK_TO_FILE) -> None:
+def connects_through(p: bytes, cfg: _route.Config, want: Route = Route.SYMLINK) -> None:
     """A listener at ``p`` is reached by both connects through ``cfg``, by
     the route ``want``."""
     with listener_at(p) as listener:
@@ -317,7 +317,7 @@ def test_the_link_resolves_the_path_as_the_kernel_does(tmp: TmpDirs) -> None:
         decoy_listener.setblocking(False)
         client, r = _route.run_long(CONNECT, spelled, fallback_cfg([base]))
         with client:
-            assert r is Route.SYMLINK_TO_FILE
+            assert r is Route.SYMLINK
             accept_ping(listener, client)
         with pytest.raises(BlockingIOError):
             decoy_listener.accept()
@@ -411,14 +411,14 @@ def test_a_tmpdir_too_long_for_the_symlink_falls_back_to_tmp(tmp: TmpDirs) -> No
     mark_untouched(long_tmpdir)
     with listener_at(p):
         out = run_child("connect_report", b"/", {"PATH": p}, env={"TMPDIR": long_tmpdir})
-    assert out["route"] == Route.SYMLINK_TO_FILE.value, out
+    assert out["route"] == Route.SYMLINK.value, out
     assert out["bases"] == f'["{os.fsdecode(long_tmpdir)}", "/tmp"]', out
     assert_untouched(long_tmpdir)
 
 
 # The link's target is the caller's own spelling made absolute against the
 # cwd, so a long path given relative to the cwd is reached in the directory it
-# names below the cwd (the listener bound there by the central route, from the
+# names below the cwd (the listener bound there by the routes through D, from the
 # relative path too). Runs in a child process with the cwd at a temporary
 # directory: the relative spelling is longer than the plain sockaddr, so no
 # relative fallback; the symlink under a short place carries it.
@@ -429,7 +429,7 @@ def test_a_long_relative_path_is_reached_through_a_link_to_its_absolute_target(t
     p = nest(t, len(t) + 1 + 300)
     rel = p[len(t) + 1 :]
     out = run_child("relative_input", t, {"REL": rel, "BASE": base})
-    assert out["connect"] == Route.SYMLINK_TO_FILE.value, out
+    assert out["connect"] == Route.SYMLINK.value, out
     assert_empty(base)
 
 
