@@ -318,6 +318,12 @@ class Dir:
             return None
         return True
 
+    def gone(self) -> bool:
+        """Whether D was removed (by an old systemd-tmpfiles, macOS's cleaning
+        of ``$TMPDIR``, by hand) since it was made: its fd's ``st_nlink`` is
+        0, or its name no longer names it."""
+        return _gone(self.fd, self.name, self.base.fd)
+
     def unlink(self, name: bytes) -> None:
         """Remove E ``name`` (gone already counts as removed)."""
         if self.closed:
@@ -329,6 +335,20 @@ class Dir:
         if not self.closed:
             self.closed = True
             os.close(self.fd)
+
+
+def _gone(fd: int, name: bytes, dir_fd: int | None) -> bool:
+    """Whether the directory held by ``fd`` is no longer at ``name``: its
+    ``st_nlink`` is 0 (removed), or ``lstat`` of the name gives another
+    ``(st_dev, st_ino)`` or nothing."""
+    try:
+        held = os.fstat(fd)
+        if held.st_nlink == 0:
+            return True
+        now = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+    except OSError:
+        return True
+    return (now.st_dev, now.st_ino) != (held.st_dev, held.st_ino)
 
 
 def _base36(n: int) -> bytes:
@@ -376,11 +396,19 @@ class Base:
             return False
         return (via.st_dev, via.st_ino) == (st.st_dev, st.st_ino)
 
+    def gone(self) -> bool:
+        """Whether B was removed since it was made (as :meth:`Dir.gone`)."""
+        return _gone(self.fd, self.real, None)
+
     def dir(self, uid: int) -> Dir | None:
         """D of this process in B, made on the first call that can; ``None``
         when it cannot be made now (that call goes without the routes using
-        D, and a later call tries again)."""
+        D, and a later call tries again). A D removed since is let go and
+        made again."""
         with self._lock:
+            if self._d is not None and self._d.gone():
+                self._d.close()
+                self._d = None
             if self._d is None and not self.closed:
                 self._d = make_dir(self, uid)
             return self._d
@@ -729,8 +757,8 @@ class Env:
         st = self.state
         key = _place_key(place)
         if key is not None:
-            held = st.places.get(key)
-            if held is not None and not held.closed:
+            held = _alive(st.places.get(key))
+            if held is not None:
                 return held if (held.cross_uid or not cross_uid) else None
         b = make_base(place.kind, place.path, place.name, self.config.uid, checked=st.checked, cross_uid=cross_uid)
         if b is not None and key is not None:
@@ -743,8 +771,8 @@ class Env:
         tried again by a later call), or ``None``."""
         st = self.state
         with st.lock:
-            if st.auto is None or st.auto.closed:
-                st.auto = None
+            st.auto = _alive(st.auto)
+            if st.auto is None:
                 for place in self.config.places:
                     b = self._at_place(place, cross_uid=False)
                     if b is not None:
@@ -758,8 +786,8 @@ class Env:
         made); the process's B itself when that one does."""
         st = self.state
         with st.lock:
-            if st.cross is None or st.cross.closed:
-                st.cross = None
+            st.cross = _alive(st.cross)
+            if st.cross is None:
                 for place in self.config.places:
                     b = self._at_place(place, cross_uid=True)
                     if b is not None:
@@ -773,8 +801,8 @@ class Env:
         st = self.state
         key = (Kind.SOCKDIR, real_dir)
         with st.lock:
-            b = st.others.get(key)
-            if b is None or b.closed:
+            b = _alive(st.others.get(key))
+            if b is None:
                 b = make_base(Kind.SOCKDIR, real_dir, None, self.config.uid, checked=st.checked)
                 if b is None:
                     st.others.pop(key, None)
@@ -791,8 +819,8 @@ class Env:
         real_parent = os.fsencode(os.path.realpath(parent, strict=True))
         key = (Kind.BASE, _path_join(real_parent, name))
         with st.lock:
-            b = st.others.get(key)
-            if b is None or b.closed:
+            b = _alive(st.others.get(key))
+            if b is None:
                 made = make_base(Kind.BASE, parent, name, self.config.uid, checked=st.checked, strict=True)
                 assert made is not None
                 b = made
@@ -833,6 +861,17 @@ class Env:
                 continue
             return len(_path_join(real_parent, place.name))
         return None
+
+
+def _alive(b: Base | None) -> Base | None:
+    """``b`` while it is held and still there; a B removed since it was made
+    is let go (its fds closed), to be made again (SPEC-routes)."""
+    if b is None or b.closed:
+        return None
+    if b.gone():
+        b.close()
+        return None
+    return b
 
 
 def _place_key(place: Place) -> tuple[bytes, bytes] | None:

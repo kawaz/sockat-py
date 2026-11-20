@@ -48,13 +48,16 @@ WIDENED = "widened"
 AT_DIRECT = "at-direct"
 THREAD_CWD_DIRECT = "thread-cwd-direct"
 
+HAS_THREAD_CWD = IS_LINUX or IS_APPLE
+"""Whether this system has a means of giving a thread a cwd of its own
+(thread-cwd, thread-cwd-direct)."""
+
 TOO_LONG = "spelling too long"
 PROC_UNUSABLE = "/proc unusable"
 NO_PLACE_FOR_B = "no place for B"
 NO_CROSS_UID_B = "no B other uids can follow"
 NO_D = "D not made"
 NO_E = "E not made"
-NO_MEANS = "no means on this system"
 THREAD_CWD_REFUSED = "thread cwd refused"
 SOCKET_DIR_NOT_OPENED = "socket directory not opened"
 NOT_FOLLOWED = "symlink not followed by the bind"
@@ -502,9 +505,10 @@ def thread_cwd_op(call: Call, dirfd: int, spelling: bytes) -> socket.socket:
 
 
 def thread_cwd_means(env: Env) -> str | None:
-    """Why a thread's own cwd cannot be used here (``None``: it may be)."""
-    if not env.config.thread_cwd or not (IS_LINUX or IS_APPLE):
-        return NO_MEANS
+    """Why a thread's own cwd cannot be used here (``None``: it may be). Only
+    asked on a system that has the means (:data:`HAS_THREAD_CWD`)."""
+    if not env.config.thread_cwd:
+        return "thread cwd turned off"
     if not thread_cwd_possible():
         return THREAD_CWD_REFUSED
     return None
@@ -614,6 +618,10 @@ def bind_thread_cwd_or_at(call: Call, t: Target, env: Env, bases: Bases, trail: 
     throwaway thread whose cwd is D (or by ``bindat`` on D's fd), and
     removed right after, whatever the outcome (SPEC-routes "thread-cwd と
     at の手順"). ``None`` (noted as skipped) when it cannot be used."""
+    if not IS_FREEBSD and not HAS_THREAD_CWD:
+        # Not in this system's row (NetBSD, OpenBSD, illumos, ...): not
+        # skipped, not tried.
+        return None
     route = AT if IS_FREEBSD else THREAD_CWD
     why = None if IS_FREEBSD else thread_cwd_means(env)
     if why is not None:
@@ -664,7 +672,10 @@ def connect_order(env: Env, proc_ok: bool) -> tuple[str, ...]:
         first = (AT_DIRECT,)
     else:
         first = (RELATIVE,)
-    return (*first, THREAD_CWD_DIRECT, LINK_FILE)
+    # thread-cwd-direct is in the row only where a thread can be given a
+    # cwd of its own (SPEC: a route the system has no means for is not in its
+    # row, so not in skipped either).
+    return (*first, *((THREAD_CWD_DIRECT,) if HAS_THREAD_CWD else ()), LINK_FILE)
 
 
 @dataclass

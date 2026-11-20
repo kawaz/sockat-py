@@ -5,7 +5,9 @@ SPEC's ``remove`` and ``cleanup``)."""
 from __future__ import annotations
 
 import contextlib
+import errno
 import os
+import stat
 import threading
 
 from ._errors import CwdChanged
@@ -88,6 +90,10 @@ def remember_spelling(spelling: bytes, cwd: tuple[int, int] | None, link: Link |
         raise CwdChanged("the current directory changed since the path relative to it was resolved")
     real = os.fsencode(os.path.realpath(spelling, strict=True))
     st = os.lstat(real)
+    if not stat.S_ISSOCK(st.st_mode):
+        # Not bound yet: an unrelated file at the path, which remove() must
+        # never remove.
+        raise OSError(errno.ENOTSOCK, os.strerror(errno.ENOTSOCK), os.fsdecode(real))
     return SocketFile((real, (st.st_dev, st.st_ino)), link)
 
 
