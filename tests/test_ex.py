@@ -13,10 +13,12 @@ from collections.abc import Callable
 
 import pytest
 from _support import (
+    HAS_THREAD_ROUTE,
     NO_PROC,
     ROOT,
     TmpDirs,
     accept_ping,
+    deep_dir,
     ds,
     env_at,
     is_socket,
@@ -30,7 +32,8 @@ from _support import (
 
 import sockat.ex
 from sockat._place import LinkFile, default_link_file
-from sockat._sys import DIRECT_MAX
+from sockat._spelling import Trail
+from sockat._sys import DIRECT_MAX, IS_FREEBSD
 
 
 def options(tmp: TmpDirs) -> sockat.ex.Options:
@@ -639,3 +642,54 @@ def test_concurrent_removals_are_one_at_a_time(tmp: TmpDirs, monkeypatch: pytest
     assert e_in(o) == []
     if which == "bound":
         assert not os.path.lexists(p)
+
+
+# What bind_ex remembers must be a socket even when the last component is no
+# symlink: a regular file put at the path right after the bind (before it is
+# remembered) is refused (ENOTSOCK): the listener is closed, E cleaned up,
+# and the file left (remove() could otherwise remove it). For a short path
+# (the standard) and the routes of a long one.
+@pytest.mark.parametrize("route", ["standard", "link-dir", *(["thread-cwd"] if HAS_THREAD_ROUTE else [])])
+def test_a_file_put_in_place_of_the_socket_is_not_remembered(
+    tmp: TmpDirs, monkeypatch: pytest.MonkeyPatch, route: str
+) -> None:
+    from sockat import _calls
+    from sockat._place import LinkFile as LF
+    from sockat._socket_file import Recorder
+
+    if route == "standard":
+        p = tmp.new() + b"/s.sock"
+        env = env_at(tmp.new())
+    else:
+        place = tmp.new() if route == "link-dir" else deep_dir(tmp.new(), 90)
+        env = env_at(place, proc=NO_PROC, link_file=LF.NOT_TRIED)
+        p = long_path(tmp.new())
+    real_bound = Recorder.bound
+    closed: list[bool] = []
+
+    def swapped(self: Recorder) -> None:
+        os.unlink(p)
+        with open(p, "wb") as f:
+            f.write(b"replacement")
+        real_bound(self)
+
+    monkeypatch.setattr(Recorder, "bound", swapped)
+    real_close = socket.socket.close
+
+    def close(s: socket.socket) -> None:
+        closed.append(True)
+        real_close(s)
+
+    monkeypatch.setattr(socket.socket, "close", close)
+    trail = Trail()
+    with raises_errno(errno.ENOTSOCK):
+        _calls.bind(p, env=env, remember=True, trail=trail)
+    monkeypatch.undo()
+    assert trail.trying == ("at" if route == "thread-cwd" and IS_FREEBSD else route)
+    assert closed
+    with open(p, "rb") as f:
+        assert f.read() == b"replacement"
+    if route != "standard":
+        b = env.auto_base()
+        assert b is not None
+        assert all(os.listdir(b.real + b"/" + d) == [] for d in ds(b.real))
