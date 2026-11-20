@@ -183,7 +183,7 @@ r.cleanup()
 - A path no longer than what is passed to the standard library is returned as it is (`str` / `bytes` in the type given)
 - To reach also where it gives `ENAMETOOLONG`, use `bind` / `connect`
 - When connecting to the same path repeatedly, make the spelling once with `resolve_for_connect`, use it many times, and `cleanup()` at the end
-- `ForBind` has no `remove()` (at resolve time nothing is bound yet, so the file's `(st_dev, st_ino)` cannot be recorded). Calling `socket_file()` after binding yourself and before closing the listener returns a `SocketFile` that has recorded the socket file by following the spelling. Its `remove()` works the same as `Bound.file`'s, and its `cleanup()` cleans up the same E as `ForBind`'s. Calling it before the bind is an error, and replacement between the bind and the call cannot be told apart. For a relative spelling (`CwdRelative`), if the cwd differs between the resolve and the call, it is an `OSError` without errno
+- `ForBind` has no `remove()` (at resolve time nothing is bound yet, so the file's `(st_dev, st_ino)` cannot be recorded). Calling `socket_file()` after binding yourself and before closing the listener returns a `SocketFile` that has recorded the socket file by following the spelling. Its `remove()` works the same as `Bound.file`'s, and its `cleanup()` cleans up the same E as `ForBind`'s. Calling it before the bind is an error (`FileNotFoundError` when there is no file, an `OSError` with `ENOTSOCK` when what the spelling leads to is not a socket: an unrelated file at the path is never recorded and removed), and replacement between the bind and the call cannot be told apart. For a relative spelling (`CwdRelative`), if the cwd differs between the resolve and the call, it is an `OSError` without errno
 
 ```python
 import socket
@@ -230,7 +230,7 @@ For a longer path, the routes are tried in the following order, and the first ro
 | Other Unix | link-dir (B's real path) → link-file (whether it is followed is told at run time) | relative → link-file |
 | Windows | not supported (`ImportError` on import) | same |
 
-- A route the OS has no means for (thread-cwd on NetBSD, OpenBSD and illumos, thread-cwd-direct on FreeBSD and others) goes into `skipped` with a reason
+- A route the OS has no means for (thread-cwd on NetBSD, OpenBSD and illumos, thread-cwd-direct on an OS where a thread cannot move its cwd (other than Linux / Android and Apple's OSes)) is not in that OS's row, so it does not go into `skipped`. Where the OS has the means but it cannot be used (a seccomp filter and so on), it goes into `skipped` with a reason
 - No route changes the cwd of the calling process or thread, so it can be used from multithreaded programs. It does not fork
 - A path that fits in no route fails with `ENAMETOOLONG` (an `OSError` with errno), the same as a path too long for the standard library
 
@@ -317,7 +317,7 @@ The full picture of how far it reaches under which conditions is in [the reach t
 ### State grows outside the app's own place
 
 - B, D and E remain in `/tmp`, `$XDG_RUNTIME_DIR` and `$TMPDIR`. The E of the default `bind` and the D of a dead process remain until the OS cleans up (10 days for Linux's `/tmp`, until reboot for macOS's `/tmp`, until logout for `$XDG_RUNTIME_DIR`)
-- There are environments where a live D may be removed: `/tmp` on Linux older than systemd v242 (RHEL 8 and so on), and when B is in macOS's `$TMPDIR`. The spelling only becomes unfollowable; there is no danger
+- There are environments where a live D may be removed: `/tmp` on Linux older than systemd v242 (RHEL 8 and so on), and when B is in macOS's `$TMPDIR`. The spelling only becomes unfollowable; there is no danger. A B or D removed is made again by the next call (it is let go when its fd's `st_nlink` is 0 or its name no longer names what the fd holds)
 - Across exec, the fd holding D's flock is closed, and even if an inherited listener is alive, D and E may be removed by `sweep()` or by the OS's clean up. A procB spelling becomes unfollowable at the exec
 - Do not use a spelling after it is cleaned up. When B is in `/tmp`, someone else may make it again with the same name after B is gone
 - A B in the socket's directory (`.sockat.XXXXXXXXXX`) and a B fallen back to after a failed check (`sockat-<uid>.XXXXXXXXXX`) may remain, removed neither by `sweep()` nor by the OS's clean up (a B in the socket's directory remains in the user's directory)

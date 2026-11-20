@@ -183,7 +183,7 @@ r.cleanup()
 - 標準に渡す長さ以下のパスはそのまま返す (`str` / `bytes` は渡した型のまま)
 - `ENAMETOOLONG` の所も届かせたい時は `bind` / `connect` を使う
 - 同じパスへの connect を繰り返す時は、`resolve_for_connect` で 1 度作った綴りを何度も使い、最後に `cleanup()` する
-- `ForBind` は `remove()` を持たない (resolve の時点では bind していないので、ファイルの `(st_dev, st_ino)` を覚えられない)。自分で bind した後・listener を閉じる前に `socket_file()` を呼ぶと、綴りを辿ってソケットのファイルを覚えた `SocketFile` を返す。その `remove()` は `Bound.file` と同じ働きで、`cleanup()` は `ForBind` の物と同じ E を片付ける。bind の前に呼ぶとエラー、bind から呼ぶまでの間の置き換えは見分けられない。相対パスの綴り (`CwdRelative`) は、resolve の時と呼んだ時で cwd が違えば errno の無い `OSError`
+- `ForBind` は `remove()` を持たない (resolve の時点では bind していないので、ファイルの `(st_dev, st_ino)` を覚えられない)。自分で bind した後・listener を閉じる前に `socket_file()` を呼ぶと、綴りを辿ってソケットのファイルを覚えた `SocketFile` を返す。その `remove()` は `Bound.file` と同じ働きで、`cleanup()` は `ForBind` の物と同じ E を片付ける。bind の前に呼ぶとエラー (ファイルが無ければ `FileNotFoundError`、辿った先がソケットでなければ `ENOTSOCK` の `OSError`。元のパスにあった無関係なファイルを覚えて消さないため)、bind から呼ぶまでの間の置き換えは見分けられない。相対パスの綴り (`CwdRelative`) は、resolve の時と呼んだ時で cwd が違えば errno の無い `OSError`
 
 ```python
 import socket
@@ -230,7 +230,7 @@ listener.close()
 | その他の Unix | link-dir (B の実パス) → link-file (辿るかを実行時に見分ける) | relative → link-file |
 | Windows | 対象外 (import で `ImportError`) | 同左 |
 
-- その OS に手段の無い経路 (NetBSD・OpenBSD・illumos の thread-cwd、FreeBSD 等の thread-cwd-direct) は `skipped` に理由付きで入る
+- その OS に手段の無い経路 (NetBSD・OpenBSD・illumos の thread-cwd、スレッドの cwd を移せない OS (Linux / Android・Apple の OS 以外) の thread-cwd-direct) は、その OS の行に無いので `skipped` に入らない。手段のある OS で使えない時 (seccomp の filter 等) は理由付きで入る
 - どの経路も呼び出し元のプロセスとスレッドの cwd を変えないので、マルチスレッドのプログラムから使える。fork はしない
 - どの経路にも収まらないパスは、標準で長すぎるパスと同じく `ENAMETOOLONG` (errno 付きの `OSError`) になる
 
@@ -317,7 +317,7 @@ B の置き場は次の順で最初に作れた所 (`Options.base` を指定し�
 ### 状態がアプリの置き場の外に増える
 
 - B・D・E が `/tmp`・`$XDG_RUNTIME_DIR`・`$TMPDIR` に残る。既定の `bind` の E と死んだプロセスの D は OS の掃除まで残る (Linux の `/tmp` は 10 日、macOS の `/tmp` は再起動まで、`$XDG_RUNTIME_DIR` はログアウトまで)
-- 生きている D が消されうる環境がある: systemd v242 より古い Linux (RHEL 8 等) の `/tmp` と、B が macOS の `$TMPDIR` にある時。綴りが辿れなくなるだけで危険はない
+- 生きている D が消されうる環境がある: systemd v242 より古い Linux (RHEL 8 等) の `/tmp` と、B が macOS の `$TMPDIR` にある時。綴りが辿れなくなるだけで危険はない。消された B・D は次の呼び出しで作り直す (持っている fd の `st_nlink` が 0 か、名前で引いた物が fd と違えば外す)
 - exec をまたぐと D の flock の fd が閉じ、引き継いだ listener が生きていても D・E は `sweep()` や OS の掃除で消されうる。procB の綴りは exec の時点で辿れなくなる
 - 片付けた後の綴りは使わない。B が `/tmp` にある時は、B が消えた後に他人が同じ名前で作り直しうる
 - ソケットのディレクトリの B (`.sockat.XXXXXXXXXX`) と、確かめに外れて落とした B (`sockat-<uid>.XXXXXXXXXX`) は `sweep()` でも OS の掃除でも消えずに残りうる (ソケットのディレクトリの B は利用者のディレクトリに残る)
