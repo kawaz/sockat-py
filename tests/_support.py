@@ -358,12 +358,38 @@ NAME_MAX_THREAD_CWD = DIRECT_MAX - 11
 
 RESULT_MARK = "sockat-child: "
 
-PRELUDE = f"""
+PRIVATE_PLACE_ENV = "SOCKAT_TEST_PRIVATE_PLACE"
+"""The environment variable that hands the session's own place for B to the
+child processes (see ``conftest._private_place``)."""
+
+
+def private_config(place: bytes) -> Config:
+    """The configuration the public calls get in the tests: the session's own
+    place for B, the rest as read from the system."""
+    return Config(places=(Place(Kind.TMP, place, b"sockat-%d" % os.geteuid()),))
+
+
+PRIVATE_PLACE_CODE = f"""
+import os as _os
+if _os.environ.get({PRIVATE_PLACE_ENV!r}):
+    from sockat import _place as _p
+    _place_dir = _os.fsencode(_os.environ[{PRIVATE_PLACE_ENV!r}])
+    _p.Config.from_env = classmethod(
+        lambda cls: _p.Config(places=(_p.Place(_p.Kind.TMP, _place_dir, b"sockat-%d" % _os.geteuid()),))
+    )
+"""
+"""Code that a child process runs first so that its public calls use the
+session's own place too."""
+
+PRELUDE = (
+    f"""
 import json, os, socket, sys
 sys.path[:0] = [{str(SRC_DIR)!r}, {str(TESTS_DIR)!r}]
 def report(**values):
     print({RESULT_MARK!r} + json.dumps(values), flush=True)
 """
+    + PRIVATE_PLACE_CODE
+)
 
 
 def run_child(

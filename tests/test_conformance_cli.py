@@ -12,7 +12,7 @@ import sys
 from types import ModuleType
 
 import pytest
-from _support import SRC_DIR, TESTS_DIR, TmpDirs, listener_at, long_path
+from _support import PRIVATE_PLACE_CODE, SRC_DIR, TESTS_DIR, TmpDirs, listener_at, long_path
 
 CLI = TESTS_DIR.parent / "conformance" / "cli.py"
 
@@ -32,7 +32,9 @@ def run_cli(doc: object, cwd: bytes = b"/") -> tuple[int, str]:
     env = dict(os.environ)
     env["PYTHONPATH"] = str(SRC_DIR)
     out = subprocess.run(
-        [sys.executable, str(CLI)],
+        # The CLI run as it is, after the code that gives it the session's
+        # own place for B (not the shared /tmp/sockat-<uid>).
+        [sys.executable, "-c", PRIVATE_PLACE_CODE + f"import runpy; runpy.run_path({str(CLI)!r}, run_name='__main__')"],
         input=doc if isinstance(doc, str) else json.dumps(doc),
         capture_output=True,
         text=True,

@@ -942,3 +942,67 @@ def test_d_that_cannot_be_made_is_removed(tmp: TmpDirs, monkeypatch: pytest.Monk
     assert ("link-dir", "D not made") in [(s.name, s.reason) for s in trail.skipped]
     assert listing(b) == []
     assert listing(second) == []
+
+
+# D that could not be made is remembered per B for the rest of the call: the
+# routes after the first that wanted it do not try to make it again on the
+# same B; the next call does.
+def test_d_not_made_is_not_tried_again_within_the_call(tmp: TmpDirs, monkeypatch: pytest.MonkeyPatch) -> None:
+    env = env_at(tmp.new(), proc=NO_PROC, link_file=_place.LinkFile.NOT_TRIED)
+    calls: list[bytes] = []
+
+    def no_d(base: _place.Base, uid: int) -> None:
+        calls.append(base.real)
+
+    monkeypatch.setattr(_place, "make_dir", no_d)
+    for n in (1, 2):
+        trail = Trail()
+        with raises_errno(errno.ENAMETOOLONG):
+            bind_in(env, long_path(tmp.new()), trail=trail)
+        # link-dir and thread-cwd (where there is one) both want D: one try.
+        assert len(calls) == n
+
+
+# The B to estimate the spelling's length against is the first place not
+# known to be out without making anything (missing, unsafe on the way): when
+# the spelling cannot fit through it, no B is made there or in a later
+# place, even a shorter one.
+def test_the_estimate_is_against_the_first_usable_place(tmp: TmpDirs) -> None:
+    unsafe = tmp.new()
+    os.chmod(unsafe, 0o777)
+    long_place = deep_dir(tmp.new(), 95)
+    short_place = tmp.new()
+    env = env_at(b"/nonexistent/place", unsafe, long_place, short_place, proc=NO_PROC, thread_cwd=False)
+    env = _place.Env(dataclasses.replace(env.config, link_file=_place.LinkFile.NOT_TRIED), env.state)
+    trail = Trail()
+    with raises_errno(errno.ENAMETOOLONG):
+        bind_in(env, long_path(tmp.new()), trail=trail)
+    assert ("link-dir", "spelling too long") in [(s.name, s.reason) for s in trail.skipped]
+    for place in (unsafe, long_place, short_place):
+        assert listing(place) == []
+
+
+# Options.base's safety is checked on every call (an ancestor made writable by
+# others since is refused), while whether others can search their way to it
+# (usable_cross_uid) is judged when the B is first held and kept.
+def test_options_base_safety_every_call_cross_uid_judged_once(tmp: TmpDirs) -> None:
+    root = tmp.new()
+    os.chmod(root, 0o755)
+    given = root + b"/b"
+    env = env_at(tmp.new(), proc=NO_PROC)
+    opts = _calls.Opts(usable_cross_uid=True, base=given)
+    first = bind_in(env, long_path(tmp.new()), opts=opts)
+    first.sock.close()
+    assert isinstance(first.spelling, sockat.ex.Linked)
+    assert first.spelling.usable_cross_uid
+    os.chmod(root, 0o711 & ~0o001)  # others can no longer search it
+    try:
+        again = bind_in(env, long_path(tmp.new()), opts=opts)
+        again.sock.close()
+        assert isinstance(again.spelling, sockat.ex.Linked)
+        assert again.spelling.usable_cross_uid
+        os.chmod(root, 0o777)
+        with raises_errno(errno.EPERM):
+            bind_in(env, long_path(tmp.new()), opts=opts)
+    finally:
+        os.chmod(root, 0o755)

@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-import contextlib
 import os
+import shutil
+import tempfile
 from collections.abc import Iterator
 
 import pytest
-from _support import TmpDirs
+from _support import PRIVATE_PLACE_ENV, TmpDirs, private_config
 
 from sockat import _place
 
@@ -22,21 +23,21 @@ def tmp() -> Iterator[TmpDirs]:
 
 
 @pytest.fixture(autouse=True, scope="session")
-def _remove_own_d() -> Iterator[None]:
-    """The tests of the public calls make this process's D in the real B
-    (``/tmp/sockat-<uid>`` or another default place). Remove it, and the E
-    left in it, at the end of the session, rather than leave it to the
-    system's cleaning of temporary files."""
-    yield
-    for b in _place.state().bases():
-        d = b._d
-        if d is None or d.closed:
-            continue
-        with contextlib.suppress(OSError), os.scandir(d.fd) as entries:
-            names = [e.name for e in entries]
-        for name in names:
-            with contextlib.suppress(OSError):
-                os.unlink(name, dir_fd=d.fd)
-        with contextlib.suppress(OSError):
-            os.rmdir(d.name, dir_fd=b.fd)
-    _place.state().abandon()
+def _private_place() -> Iterator[None]:
+    """The places the public calls read from the environment are made this
+    session's own (a directory of its own, removed at the end), in this
+    process and in the child processes the tests start
+    (:data:`PRIVATE_PLACE_ENV`): the tests never make, use or remove
+    anything in the shared ``/tmp/sockat-<uid>``, which other processes (the
+    other languages' tests run at the same time) use."""
+    place = tempfile.mkdtemp(prefix="spt-place-", dir="/tmp")
+    real_from_env = _place.Config.from_env
+    _place.Config.from_env = classmethod(lambda cls: private_config(os.fsencode(place)))  # type: ignore[method-assign,assignment]
+    os.environ[PRIVATE_PLACE_ENV] = place
+    try:
+        yield
+    finally:
+        _place.Config.from_env = real_from_env  # type: ignore[method-assign]
+        os.environ.pop(PRIVATE_PLACE_ENV, None)
+        _place.state().abandon()
+        shutil.rmtree(place, ignore_errors=True)

@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
-from _support import SRC_DIR, TESTS_DIR, TmpDirs, nest
+from _support import PRIVATE_PLACE_CODE, SRC_DIR, TESTS_DIR, TmpDirs, nest
 
 DOCS = TESTS_DIR.parent / "docs"
 
@@ -105,7 +105,7 @@ def test_the_code_runs(tmp: TmpDirs, block: Block) -> None:
         given = target
         with open(cwd + b"/" + NAME.encode(), "wb") as f:
             f.write(UNRELATED)
-    script = f"path = {os.fsdecode(given)!r}\n" + block.code
+    script = PRIVATE_PLACE_CODE + f"path = {os.fsdecode(given)!r}\n" + block.code
     env = dict(os.environ)
     env["PYTHONPATH"] = os.pathsep.join(filter(None, [str(SRC_DIR), env.get("PYTHONPATH")]))
     out = subprocess.run(
