@@ -3,32 +3,36 @@
 package: it sits outside ``src/`` so neither the wheel nor the sdist carries
 it.
 
-Reads one JSON object from stdin, ``{"op": "bind" | "connect", "path":
-"...", "last_resort": true | false}`` (``last_resort`` may be left out: false),
-makes one bind (and listen) / connect through the routes of the default bind
-/ connect, or with ``last_resort`` through those of ``sockat.ex`` with the
-last resort (a bind's symlink-dir last; a connect's fork-cwd-direct, which
-this implementation does not have, noted as skipped), and writes one JSON
-object to stdout::
+Reads one JSON object from stdin::
 
-    {"ok": true, "error": null, "route": "thread-cwd", "losses": ["respelled"], "skipped": ["standard"]}
+    {"op": "bind" | "connect", "path": "...", "usable_cross_uid": false, "base": null}
 
-* ``error``: the errno's name (``ENOENT``, ...), ``invalid-argument`` for a
-  path the library refuses as an argument error (``ValueError``), ``general``
-  for an :class:`OSError` without an errno;
+(``usable_cross_uid`` may be left out: false; ``base`` left out or null: not
+given), makes one bind (and listen) / connect with ``sockat.ex.bind`` /
+``sockat.ex.connect`` and those ``Options``, and writes one JSON object to
+stdout::
+
+    {"ok": true, "error": null, "route": "link-dir", "base": "proc",
+     "spelling": {"kind": "Linked", "removable": true, "until": "Process",
+                  "usable_cross_uid": false, "usable_with_private_tmp": true},
+     "skipped": ["standard"]}
+
+* ``error``: the errno's name (``ENOENT``, ...; ``EAGAIN``, ``EOPNOTSUPP``
+  and ``EDEADLK`` for the values with two names; ``errno-<n>`` for one with
+  no name), ``invalid-argument`` for a path the library refuses as an
+  argument error (``ValueError``), ``general`` for an :class:`OSError`
+  without an errno;
 * ``route``: the route that carried the call, or, on failure, the one whose
   bind / connect failed (``null`` when none got that far);
-* ``losses``: the SPEC's names of what the route lost (``[]`` on failure);
+* ``base``: the bind's B (``null`` when the spelling goes through none, for
+  a connect and on failure);
+* ``spelling``: the bind's ``Spelling`` (``null`` for a connect and on
+  failure);
 * ``skipped``: the names of the routes tried and found unusable, in order.
 
-A bound listener is closed (its socket file is left where it is); a
-connected stream sends one byte ``x`` and is closed. The cwd and the
-environment are used as given.
-
-Start it with the project's environment and the cwd the case wants:
-``just -f <repo>/justfile conformance-cli`` (``<repo>/.venv/bin/python
-<repo>/conformance/cli.py``, after ``uv sync``). ``uv run`` works too, but
-leaves its ``uv-*.lock`` in ``$TMPDIR``.
+Neither ``remove()`` nor ``cleanup()`` is called. A bound listener is left
+open until the process ends; a connected stream sends one byte ``x`` and is
+closed. The cwd and the environment are used as given.
 
 Exit status: 0 when a result was written (whether the call went through or
 not), 2 when the input is not such an object.
@@ -42,23 +46,26 @@ import sys
 from dataclasses import dataclass
 from typing import Literal
 
-from sockat._route import Loss, Reached, Request, Route, Trail, reach
-from sockat._sys import Op
+import sockat.ex
+
+_TWO_NAMES = {errno.EAGAIN: "EAGAIN", errno.EOPNOTSUPP: "EOPNOTSUPP", errno.EDEADLK: "EDEADLK"}
 
 
 @dataclass(frozen=True)
 class Case:
-    """The input: what to do, the path handed to the library as is, and
-    whether the last resort is used."""
+    """The input: what to do, the path handed to the library as is, and the
+    ``Options``."""
 
     op: Literal["bind", "connect"]
     path: str
-    last_resort: bool = False
+    usable_cross_uid: bool = False
+    base: str | None = None
 
 
 class BadInput(Exception):
     """The input is not ``{"op": "bind" | "connect", "path": "<str>",
-    "last_resort": <bool>}`` (``last_resort`` optional)."""
+    "usable_cross_uid": <bool>, "base": <str> | null}`` (the last two
+    optional)."""
 
 
 def parse(text: str) -> Case:
@@ -75,51 +82,82 @@ def parse(text: str) -> Case:
     path = doc.get("path")
     if not isinstance(path, str):
         raise BadInput('"path" must be a string')
-    last_resort = doc.get("last_resort", False)
-    if not isinstance(last_resort, bool):
-        raise BadInput('"last_resort" must be true or false')
-    return Case(op, path, last_resort)
+    cross = doc.get("usable_cross_uid", False)
+    if not isinstance(cross, bool):
+        raise BadInput('"usable_cross_uid" must be true or false')
+    base = doc.get("base")
+    if base is not None and not isinstance(base, str):
+        raise BadInput('"base" must be a string or null')
+    return Case(op, path, cross, base)
 
 
-def _names(skipped: list[tuple[Route, str]] | tuple[tuple[Route, str], ...]) -> list[str]:
-    return [route.value for route, _ in skipped]
+def error_name(e: OSError | ValueError) -> str:
+    """The output's ``error`` for ``e``."""
+    if isinstance(e, ValueError):
+        return "invalid-argument"
+    if e.errno is None:
+        return "general"
+    return _TWO_NAMES.get(e.errno) or errno.errorcode.get(e.errno) or f"errno-{e.errno}"
 
 
-def _losses(losses: tuple[Loss, ...]) -> list[str]:
-    return [loss.value for loss in losses]
+def spelling_json(s: sockat.ex.Spelling) -> dict[str, object]:
+    """The SPEC's ``Spelling`` as the conformance test writes it."""
+    if isinstance(s, sockat.ex.Linked):
+        return {
+            "kind": "Linked",
+            "removable": s.removable,
+            "until": s.until.value,
+            "usable_cross_uid": s.usable_cross_uid,
+            "usable_with_private_tmp": s.usable_with_private_tmp,
+        }
+    return {"kind": type(s).__name__}
 
 
 def run(case: Case) -> dict[str, object]:
     """Make the call and give the output object."""
-    trail = Trail()
-    req = Request(Op.BIND if case.op == "bind" else Op.CONNECT, last_resort=case.last_resort)
+    options = sockat.ex.Options(usable_cross_uid=case.usable_cross_uid, base=case.base)
     try:
-        done: Reached = reach(req, case.path, trail)
-    except ValueError:
-        return _failed("invalid-argument", trail)
-    except OSError as e:
-        name = errno.errorcode.get(e.errno, "general") if e.errno is not None else "general"
-        return _failed(name, trail)
-    with done.sock as sock:
-        if case.op == "connect":
+        if case.op == "bind":
+            bound = sockat.ex.bind(case.path, options)
+        else:
+            connected = sockat.ex.connect(case.path, options)
+    except (OSError, ValueError) as e:
+        return {
+            "ok": False,
+            "error": error_name(e),
+            "route": getattr(e, "route", None),
+            "base": None,
+            "spelling": None,
+            "skipped": [s.name for s in getattr(e, "skipped", ())],
+        }
+    if case.op == "bind":
+        # Left open until the process ends (conformance.md: the CLI does not
+        # close the listener).
+        _KEEP.append(bound.socket)
+        return {
+            "ok": True,
+            "error": None,
+            "route": bound.route,
+            "base": bound.base,
+            "spelling": spelling_json(bound.spelling),
+            "skipped": [s.name for s in bound.skipped],
+        }
+    with connected.socket as sock:
+        try:
             sock.sendall(b"x")
+        except OSError as e:
+            print(f"conformance/cli.py: sending x: {e}", file=sys.stderr)
     return {
         "ok": True,
         "error": None,
-        "route": done.route.value,
-        "losses": _losses(done.losses),
-        "skipped": _names(done.skipped),
+        "route": connected.route,
+        "base": None,
+        "spelling": None,
+        "skipped": [s.name for s in connected.skipped],
     }
 
 
-def _failed(error: str, trail: Trail) -> dict[str, object]:
-    return {
-        "ok": False,
-        "error": error,
-        "route": None if trail.trying is None else trail.trying.value,
-        "losses": [],
-        "skipped": _names(trail.skipped),
-    }
+_KEEP: list[object] = []
 
 
 def main() -> int:
