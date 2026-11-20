@@ -901,3 +901,44 @@ def test_routes_without_means_are_not_skipped(tmp: TmpDirs, monkeypatch: pytest.
             bind_in(env, long_path(tmp.new(), name=name), trail=trail)
         assert ("thread-cwd" in [s.name for s in trail.skipped]) is has
         assert ("thread-cwd-direct" in _routes.connect_order(env, False)) is has
+
+
+# D whose mode cannot be set or that cannot be opened is removed (the empty
+# directory just made), and that call goes without the routes using D: no
+# other B is looked for, nothing is left in B.
+@pytest.mark.parametrize("fail", ["chmod", "open"])
+def test_d_that_cannot_be_made_is_removed(tmp: TmpDirs, monkeypatch: pytest.MonkeyPatch, fail: str) -> None:
+    first, second = tmp.new(), tmp.new()
+    env = env_at(first, second, proc=NO_PROC, thread_cwd=False, link_file=_place.LinkFile.NOT_TRIED)
+    b = base_of(env)
+    held = env.auto_base()
+    assert held is not None
+
+    def in_b(dir_fd: int | None) -> bool:
+        return dir_fd == held.fd
+
+    if fail == "chmod":
+        real_chmod = os.chmod
+
+        def chmod(path: bytes, mode: int, *, dir_fd: int | None = None, follow_symlinks: bool = True) -> None:
+            if in_b(dir_fd):
+                raise PermissionError(13, "refused for the test")
+            real_chmod(path, mode, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
+
+        monkeypatch.setattr(os, "chmod", chmod)
+    else:
+        real_open = _place._open_own
+
+        def open_own(name: bytes, dir_fd: int) -> int:
+            if in_b(dir_fd):
+                raise PermissionError(13, "refused for the test")
+            return real_open(name, dir_fd)
+
+        monkeypatch.setattr(_place, "_open_own", open_own)
+    trail = Trail()
+    with raises_errno(errno.ENAMETOOLONG):
+        bind_in(env, long_path(tmp.new()), trail=trail)
+    monkeypatch.undo()
+    assert ("link-dir", "D not made") in [(s.name, s.reason) for s in trail.skipped]
+    assert listing(b) == []
+    assert listing(second) == []

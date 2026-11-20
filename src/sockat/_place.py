@@ -472,6 +472,8 @@ def make_own_dir(pfd: int, name: bytes, uid: int) -> int | _Taken | OSError:
         st = os.fstat(fd)
     except OSError as e:
         os.close(fd)
+        with contextlib.suppress(OSError):
+            os.rmdir(name, dir_fd=pfd)
         return e
     if not stat.S_ISDIR(st.st_mode) or st.st_uid != uid:
         os.close(fd)
