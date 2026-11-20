@@ -31,6 +31,9 @@ def _private_place() -> Iterator[None]:
     anything in the shared ``/tmp/sockat-<uid>``, which other processes (the
     other languages' tests run at the same time) use."""
     place = tempfile.mkdtemp(prefix="spt-place-", dir="/tmp")
+    # Others can search it, as /tmp: a spelling through it can be followed by
+    # another uid (usable_cross_uid), as through the shared place.
+    os.chmod(place, 0o755)
     real_from_env = _place.Config.from_env
     _place.Config.from_env = classmethod(lambda cls: private_config(os.fsencode(place)))  # type: ignore[method-assign,assignment]
     os.environ[PRIVATE_PLACE_ENV] = place
