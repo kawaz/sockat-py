@@ -75,7 +75,7 @@ pip install sockat
 ## 長いパスで標準と違う点
 
 - listener (と accept したソケット) の `getsockname()` と、connect したソケットの `getpeername()` は元のパスを返す。カーネルが返すのは bind の綴りだが、sockat が返すソケットはそれを元のパスに差し替える
-- 状態がアプリの置き場の外に増える: B・D・E が `/tmp`・`$XDG_RUNTIME_DIR`・`$TMPDIR` に残り、既定の `bind` の E と死んだプロセスの D は OS の一時ディレクトリの掃除まで残る (`sockat.ex.sweep()` で死んだプロセスの D を消せる)
+- 状態がアプリの置き場の外に増える: B・D・E が `/tmp`・`$XDG_RUNTIME_DIR`・`$TMPDIR` に残り、既定の `bind` の E と死んだプロセスの D は OS の一時ディレクトリの掃除まで残る (`sockat.ex.sweep()` で死んだプロセスの D を消せる)。どこにも B を作れずソケットのディレクトリに作った B (`.sockat.XXXXXXXXXX`) と、確かめに外れて横に作った B (`sockat-<uid>.XXXXXXXXXX`) は、`sweep()` でも OS の掃除でも消えずに残りうる
 - 片付けた後の綴りは使わない (`/tmp` の B は消えた後に他人が作り直しうる)
 - 相手の `/tmp` が隔離されていると (systemd の `PrivateTmp` 等)、`/tmp` を通る綴りを相手は辿れない
 - systemd v242 より古い Linux と、B が macOS の `$TMPDIR` にある時は、生きている D が消されうる (綴りが辿れなくなるだけ)
@@ -98,10 +98,10 @@ connected = sockat.ex.connect(path)
 
 - `sockat.ex.bind` / `connect` / `connect_nonblocking` (と `sockat.ex.datagram.bind` / `connect`) は、既定の呼び出しと同じ経路を試し、綴りの性質 (`spelling`)、通った経路 (`route`)、通った B (`base`)、試して使えなかった経路 (`skipped`) を一緒に返す
 - `sockat.ex.connect(...)` のようにモジュールを通して呼ぶ。`sockat.ex` は `import sockat` では読み込まれない
-- `Options(usable_cross_uid=True)` で別の uid の相手も辿れる綴りを、`Options(base=...)` で B の場所をアプリが指定する
+- `Options(usable_cross_uid=True)` で別の uid の相手も辿れる綴りを (bind 系だけ)、`Options(base=...)` で B の場所をアプリが指定する (`sockat.ex.sweep_base(path)` でその B の死んだ D を消せる)
 - `spelling` は `Original` / `CwdRelative` / `Linked(removable, until, usable_cross_uid, usable_with_private_tmp)` / `Dangling` のどれか。分岐にはこれを使う。`route`・`base`・`skipped` は診断用で中身は約束しない
 - `file.remove()` は bind が作ったソケットファイルだけを消し (listener を開いている間に別のファイルに置き換わっていたら消さない)、綴りの E も片付ける。`file.cleanup()` は E だけを片付ける。どちらも 1 回だけ働き、listener は閉じない。`remove()` は listener を閉じる前に呼ぶ
-- `resolve_for_bind` / `resolve_for_connect` は、標準に自分で渡す短い綴りを返す (同じパスへの connect を繰り返す時に綴りを使い回す等)
+- `resolve_for_bind` / `resolve_for_connect` は、標準に自分で渡す短い綴りを返す (同じパスへの connect を繰り返す時に綴りを使い回す等)。`resolve_for_bind` の綴りに自分で bind した後は、`socket_file()` で `SocketFile` を受け取って `remove()` できる
 - 失敗した時は、例外 (型と `errno` は既定の呼び出しと同じ) に `skipped` と `route` の属性を付ける
 - 詳細は [docs/MANUAL-ja.md](./docs/MANUAL-ja.md#sockatex)
 

@@ -14,7 +14,7 @@ Status は各 DR ファイルの `Status:` 行が正本。ここに載るのは�
 
 | DR | 状態 | 説明 |
 |---|---|---|
-| [DR-0001](DR-0001-python-port-design.md) | ✅ 実装済 | Python 版の作り方 (ハブの DR-0017)。純 Python + ctypes で fork 以外の経路を作る、置き場 B・D・E (realpath、flock、sweep との競合、fork の子)、公開 API (`sockat`・`sockat.datagram`・`sockat.ex`・`sockat.ex.datagram`、`Options`・`Spelling`・`SocketFile` ほか)、標準に揃える点、NUL、エラーの型、Python 3.11 以上 |
+| [DR-0001](DR-0001-python-port-design.md) | ✅ 実装済 | Python 版の作り方 (ハブの DR-0017)。純 Python + ctypes で fork 以外の経路を作る、置き場 B・D・E (realpath、flock、sweep との競合、fork の子、`Options.base` の確かめ)、公開 API (`sockat`・`sockat.datagram`・`sockat.ex`・`sockat.ex.datagram`、`Options`・`Spelling`・`SocketFile`・`ForBind.socket_file()`・`sweep_base` ほか)、標準に揃える点、NUL、エラーの型、Python 3.11 以上 |
 | [DR-0003](DR-0003-report-the-given-path.md) | ✅ 実装済 | 長いパスのソケットはアドレスを元のパスで返す (`socket.socket` の subclass)。asyncio の後始末が短いパスと同じに動く |
 
 振る舞いの正本はハブの [SPEC](https://github.com/kawaz/sockat/blob/main/docs/SPEC-ja.md)、今の設計の判断はハブの [DR-0017](https://github.com/kawaz/sockat/blob/main/docs/decisions/DR-0017-resolve-through-persistent-base.md) にある。

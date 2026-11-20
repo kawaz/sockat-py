@@ -75,7 +75,7 @@ A path of a length the standard library accepts (`sun_path` − 1: 107 bytes on 
 ## What differs from the standard for a long path
 
 - `getsockname()` of a listener (and of an accepted socket) and `getpeername()` of a connected socket return the original path. The kernel returns the spelling of the bind, but the sockets sockat returns replace it with the original path
-- State grows outside the app's own place: B, D and E remain in `/tmp`, `$XDG_RUNTIME_DIR` and `$TMPDIR`, and the E of the default `bind` and the D of a dead process remain until the OS cleans its temporary directories (`sockat.ex.sweep()` removes the D of dead processes)
+- State grows outside the app's own place: B, D and E remain in `/tmp`, `$XDG_RUNTIME_DIR` and `$TMPDIR`, and the E of the default `bind` and the D of a dead process remain until the OS cleans its temporary directories (`sockat.ex.sweep()` removes the D of dead processes). A B made in the socket's directory because B could be made nowhere else (`.sockat.XXXXXXXXXX`), and a B made beside one that failed the check (`sockat-<uid>.XXXXXXXXXX`), may remain, removed neither by `sweep()` nor by the OS's clean up
 - Do not use a spelling after it is cleaned up (a B in `/tmp` may be made again by someone else after it is gone)
 - If the peer's `/tmp` is isolated (systemd's `PrivateTmp` and so on), the peer cannot follow a spelling through `/tmp`
 - On Linux older than systemd v242, and when B is in macOS's `$TMPDIR`, a live D may be removed (the spelling only becomes unfollowable)
@@ -98,10 +98,10 @@ connected = sockat.ex.connect(path)
 
 - `sockat.ex.bind` / `connect` / `connect_nonblocking` (and `sockat.ex.datagram.bind` / `connect`) try the same routes as the default calls and return, along with the result, the spelling's properties (`spelling`), the route taken (`route`), the B taken (`base`) and the routes tried that could not be used (`skipped`)
 - Call them through the module, as in `sockat.ex.connect(...)`. `sockat.ex` is not loaded by `import sockat`
-- `Options(usable_cross_uid=True)` asks for a spelling a peer of another uid can also follow, and `Options(base=...)` lets the app give the location of B
+- `Options(usable_cross_uid=True)` asks for a spelling a peer of another uid can also follow (bind calls only), and `Options(base=...)` lets the app give the location of B (`sockat.ex.sweep_base(path)` removes the dead D in that B)
 - `spelling` is one of `Original` / `CwdRelative` / `Linked(removable, until, usable_cross_uid, usable_with_private_tmp)` / `Dangling`. Branch on it. `route`, `base` and `skipped` are for diagnostics and their contents are not promised
 - `file.remove()` removes only the socket file the bind made (if it has been replaced by another file while the listener is open, it does not remove it) and also cleans up the spelling's E. `file.cleanup()` cleans up only E. Each works once, and neither closes the listener. Call `remove()` before closing the listener
-- `resolve_for_bind` / `resolve_for_connect` return a short spelling you pass to the standard library yourself (for reusing a spelling when connecting to the same path repeatedly, and so on)
+- `resolve_for_bind` / `resolve_for_connect` return a short spelling you pass to the standard library yourself (for reusing a spelling when connecting to the same path repeatedly, and so on). After binding to the spelling of `resolve_for_bind` yourself, you can get a `SocketFile` with `socket_file()` and `remove()` it
 - On failure, the exception (whose type and `errno` are the same as the default calls') carries `skipped` and `route` attributes
 - Details are in [docs/MANUAL.md](./docs/MANUAL.md#sockatex)
 

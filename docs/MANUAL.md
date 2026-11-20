@@ -27,7 +27,7 @@ assert server.recv(4) == b"ping"
 | `sockat.datagram.connect(sock, path)` | `sock.connect(path)` | `None` |
 | `sockat.ex.bind(path, options)` and so on | the same + spelling properties, clean up, diagnostics | `Bound` / `Connected` / `Report` ([sockat.ex](#sockatex)) |
 | `sockat.ex.resolve_for_bind(path, options)` / `resolve_for_connect` | a short spelling you pass to the standard library yourself | `ForBind` / `ForConnect` ([resolve](#resolve)) |
-| `sockat.ex.sweep()` | — | `None` ([sweep](#sweep)) |
+| `sockat.ex.sweep()` / `sweep_base(path)` | — | `None` ([sweep](#sweep)) |
 
 - For a path of a length the standard library accepts, what is returned is a plain `socket.socket`. For a long path, it is a subclass of `socket.socket` that returns the original path as its address ([Addresses return the original path](#addresses-return-the-original-path))
 - `path` is `str` / `bytes` / `os.PathLike`
@@ -83,9 +83,9 @@ connected = sockat.ex.connect(path)
 | `sockat.ex.connect(path, options=None)` / `connect_nonblocking` | `Connected(socket, route, skipped)` |
 | `sockat.ex.datagram.bind(path, options=None)` | `Bound` (the socket is DGRAM) |
 | `sockat.ex.datagram.connect(sock, path, options=None)` | `Report(route, skipped)` |
-| `sockat.ex.resolve_for_bind(path, options=None)` | `ForBind(path, spelling, route, base, skipped)` and `cleanup()` |
-| `sockat.ex.resolve_for_connect(path, options=None)` | `ForConnect(path, route, base, skipped)` and `cleanup()` |
-| `sockat.ex.sweep()` | `None` |
+| `sockat.ex.resolve_for_bind(path, options=None)` | `ForBind(path, spelling, route, base, skipped)` and `cleanup()`, `socket_file()` |
+| `sockat.ex.resolve_for_connect(path, options=None)` | `ForConnect(path, route, skipped)` and `cleanup()` |
+| `sockat.ex.sweep()` / `sockat.ex.sweep_base(path)` | `None` |
 
 - They try the same routes in the same order as the default calls
 - `Bound` / `Connected` / `Report` are named tuples and can be unpacked in the order above
@@ -94,8 +94,8 @@ connected = sockat.ex.connect(path)
 
 | Field | Meaning |
 |---|---|
-| `usable_cross_uid: bool = False` | Asks for a spelling a peer of another uid can also follow. B is taken from a place every directory on the way to which grants x to other (`/tmp`), and procB (`/proc/<pid>/fd/...`) is not used. If this cannot be met, it does not fall back to a spelling that does not meet it, but goes on to thread-cwd / at (`Dangling`). Whether it was met is told by `spelling` of the result |
-| `base: str \| bytes \| os.PathLike \| None = None` | Gives the path of B itself (a location the app manages itself, e.g. `/tmp/app-<uid>/sockat`). Made if missing (its parent must exist), checked if present. If the check fails it is an error and does not fall back to the automatic places ([Errors](#errors)) |
+| `usable_cross_uid: bool = False` | Asks for a spelling a peer of another uid can also follow. Only the bind calls (`bind`, `datagram.bind`, `resolve_for_bind`) look at it; the connect calls do not (a connect's spelling is not left with the peer). B is taken from a place where every directory on the way and B itself grant x to other (`/tmp`), and procB (`/proc/<pid>/fd/...`) is not used. If this cannot be met, it does not fall back to a spelling that does not meet it, but goes on to thread-cwd / at (`Dangling`) (whose D is made in the usual B). Whether it was met is told by `spelling` of the result |
+| `base: str \| bytes \| os.PathLike \| None = None` | Gives the path of B itself (a location the app manages itself, e.g. `/tmp/app-<uid>/sockat`). Both the bind calls and the connect calls use it as the place of B. An absolute path ending in a name (otherwise `ValueError`). For a long path, it is checked without making anything after the socket's directory is looked up and before routes are tried (the directories on the way, and B itself if present. If the check fails, `route` is `None` and `skipped` is empty). B is made when a route that uses B is reached (its parent must exist). If the check fails it is an error and does not fall back to the automatic places ([Errors](#errors)) |
 
 ### Spelling properties (Spelling)
 
@@ -112,8 +112,8 @@ Whether the spelling of the bind (what the kernel remembers and `getsockname` re
 |---|---|
 | `removable` | Whether unlinking by the spelling removes the real file. `True` for link-dir, `False` for link-file (the last symlink is not followed and E is removed) |
 | `until` | `Until.PROCESS` (procB: unfollowable once the process ends) or `Until.CLEANUP` (B's real path: E stays until `cleanup()`) |
-| `usable_cross_uid` | Whether a peer of another uid can follow it |
-| `usable_with_private_tmp` | Whether it can be followed even if you or the peer isolate `/tmp` (systemd's `PrivateTmp` and so on). `True` if the spelling does not go through `/tmp` or `/var/tmp` |
+| `usable_cross_uid` | Whether a peer of another uid can follow it. `False` for procB. For B's real path, `True` if every directory on the way and B itself grant x to other |
+| `usable_with_private_tmp` | Whether it can be followed even if you or the peer isolate `/tmp` (systemd's `PrivateTmp` and so on). Always `True` for procB. For B's real path, `False` if either the place's path before realpath or B's real path goes through `/tmp` or `/var/tmp` (or their realpaths, such as macOS's `/private/tmp`) |
 
 ```python
 match bound.spelling:
@@ -149,7 +149,7 @@ The two handles of `Bound.file` (`SocketFile`). Each works only when called (nei
 | Field | Meaning |
 |---|---|
 | `route` | The name of the route taken ([Route names](#route-names)) |
-| `base` | The B the spelling of the bind goes through (`"proc"`, `"sockdir"`, `"tmp"`, `"runtime"`, `"tmpdir"`, `"base"`). `None` for a spelling that does not go through B (standard, thread-cwd, at). Not in `Connected` and `Report` |
+| `base` | The B the spelling of the bind goes through. For a B in a temporary place, the form of the spelling (`"proc"` for procB; `"tmp"`, `"runtime"`, `"tmpdir"` for the real path); for a B not in a temporary place, that B regardless of the form of the spelling (`"sockdir"` for the socket's directory, `"given"` for `Options.base`). `None` for a spelling that does not go through B (standard, thread-cwd, at). Not in `Connected`, `Report` and `ForConnect` |
 | `skipped` | The routes tried that could not be used (in the order tried). Each element is `Skipped(name, reason)`. One entry per route name |
 
 - All the routes tried before `route` could not be used (if a route actually binds / connects and fails, the error is returned there and the next one is not tried)
@@ -176,17 +176,36 @@ r.cleanup()
 | | `resolve_for_bind` | `resolve_for_connect` |
 |---|---|---|
 | Spelling | link-dir (`B/D/E/<file name>`), then link-file (`B/D/E`) on OSes where bind was measured to follow a symlink (macOS, NetBSD) | link-file (`B/D/E`). Regardless of the file name's length |
-| Returns | `ForBind` (`path`, `spelling`, `cleanup()`) | `ForConnect` (`path`, `cleanup()`. It has no `remove()`) |
+| Returns | `ForBind` (`path`, `spelling`, `cleanup()`, `socket_file()`) | `ForConnect` (`path`, `cleanup()`. It has no handle to remove) |
 | When not usable | `ENAMETOOLONG` (a length only thread-cwd / at reach) | `ENAMETOOLONG` (B cannot be made, the spelling does not fit) |
 
 - A path no longer than what is passed to the standard library is returned as it is (`str` / `bytes` in the type given)
 - To reach also where it gives `ENAMETOOLONG`, use `bind` / `connect`
 - When connecting to the same path repeatedly, make the spelling once with `resolve_for_connect`, use it many times, and `cleanup()` at the end
-- `remove()` of `ForBind` is not there yet (open in the specification). Remove the bound file by the original path
+- `ForBind` has no `remove()` (at resolve time nothing is bound yet, so the file's `(st_dev, st_ino)` cannot be recorded). Calling `socket_file()` after binding yourself and before closing the listener returns a `SocketFile` that has recorded the socket file by following the spelling. Its `remove()` works the same as `Bound.file`'s, and its `cleanup()` cleans up the same E as `ForBind`'s. Calling it before the bind is an error, and replacement between the bind and the call cannot be told apart. For a relative spelling (`CwdRelative`), if the cwd differs between the resolve and the call, it is an `OSError` without errno
+
+```python
+import socket
+
+import sockat.ex
+
+r = sockat.ex.resolve_for_bind(path)
+listener = socket.socket(socket.AF_UNIX)
+listener.bind(r.path)
+listener.listen()
+file = r.socket_file()
+...
+file.remove()
+listener.close()
+```
 
 ### sweep
 
-`sockat.ex.sweep()` removes, from the B of the automatic places, the D whose owning process has ended (a D whose lock is released). It does not remove the D of other live processes. It works only when called (sockat never calls it on its own). It does not make B and touches nothing in B other than D.
+`sockat.ex.sweep()` removes, from the B with the default names in automatic places 1 to 3 (`/tmp/sockat-<uid>`, `$XDG_RUNTIME_DIR/sockat`, `$TMPDIR/sockat-<uid>`), the D whose owning process has ended (a D whose lock is released). `sockat.ex.sweep_base(path)` does the same for a B passed to `Options.base` (called by the app that manages that B. `path` is checked the same as `Options.base`, and nothing is made).
+
+- It does not remove the D of other live processes. It works only when called (sockat never calls it on its own)
+- It does not make B. It does not touch an E directly under B (the default connect's), and leaves a D that contains something other than a symlink
+- A B with a random name fallen back to after a failed check (`sockat-<uid>.XXXXXXXXXX`) and a B in the socket's directory (`.sockat.XXXXXXXXXX`) are not covered. These two may not be removed by the OS's clean up either (a B in the socket's directory remains in the user's directory)
 
 ## How long paths are reached
 
@@ -233,11 +252,14 @@ B's place is the first of the following where it can be made (only that one when
 | 2 | `$XDG_RUNTIME_DIR` (when an absolute path) | `sockat` | `runtime` |
 | 3 | `$TMPDIR` (when an absolute path) | `sockat-<uid>` | `tmpdir` |
 | 4 | the socket's directory | `.sockat.XXXXXXXXXX` | `sockdir` (usable only with procB) |
+| — | `Options.base` | the given name | `given` |
 
-- The place is used after being turned into its realpath. It is not used unless every directory from the root to the place is owned by root or yourself and not writable by others, or is sticky (the same idea as OpenSSH's StrictModes)
-- B is made with `mkdirat`, opened with `O_NOFOLLOW`, checked to be a real directory owned by yourself, and then set to 0711. If it already exists it is checked the same way (including that others cannot write to it), and if the check fails a B with a random name such as `sockat-<uid>.XXXXXXXXXX` is made beside it
-- D is made with a random name, and the process keeps an fd holding a shared flock lock on it. `sweep()` removes only a D on which it can take an exclusive lock. A forked child does not use the parent's B and D but makes its own D
-- B is spelled first as procB (`/proc/<pid>/fd/<B's fd>`, on Linux with `/proc` usable), and otherwise as B's real path
+- The place is used after being turned into its realpath (macOS's `/tmp` is `/private/tmp`). It is not used unless every directory from the root to the place is owned by root or yourself and not writable by others (including the group), or is sticky (the same idea as OpenSSH's StrictModes). `$TMPDIR` and `$XDG_RUNTIME_DIR` are not used if empty or relative
+- B is made with `mkdirat`, opened with `O_NOFOLLOW`, checked to be a real directory owned by yourself, and then set to 0711. If it already exists it is checked the same way (including that others cannot write to it), and used without changing its mode even if it is not 0711. If the check fails, a B named `sockat-<uid>.XXXXXXXXXX` is made beside it. If the umask leaves the owner unable to open it, the empty directory made is removed and the next place is tried
+- When the length of the place's real path shows that the spelling will not fit, B is not made
+- A process uses one B among places 1 to 3 (even when the default connect made it first, that B is used from then on). A B in the socket's directory is per directory
+- D is made with a random name, and the process keeps an fd holding a shared flock lock on it. After taking the lock the name is looked up again, and if another process's `sweep()` removed it, it is made again. A forked child does not use the parent's B and D but makes its own D
+- B is spelled first as procB (`/proc/<pid>/fd/<B's fd>`, only when what is looked up through `/proc` has the same `(st_dev, st_ino)` as B's fd), and otherwise as B's real path
 
 ### Route names
 
@@ -297,6 +319,7 @@ The full picture of how far it reaches under which conditions is in [the reach t
 - There are environments where a live D may be removed: `/tmp` on Linux older than systemd v242 (RHEL 8 and so on), and when B is in macOS's `$TMPDIR`. The spelling only becomes unfollowable; there is no danger
 - Across exec, the fd holding D's flock is closed, and even if an inherited listener is alive, D and E may be removed by `sweep()` or by the OS's clean up. A procB spelling becomes unfollowable at the exec
 - Do not use a spelling after it is cleaned up. When B is in `/tmp`, someone else may make it again with the same name after B is gone
+- A B in the socket's directory (`.sockat.XXXXXXXXXX`) and a B fallen back to after a failed check (`sockat-<uid>.XXXXXXXXXX`) may remain, removed neither by `sweep()` nor by the OS's clean up (a B in the socket's directory remains in the user's directory)
 
 ### A peer with PrivateTmp
 
@@ -474,14 +497,15 @@ bound.socket.close()
 | The backlog is full | On Linux, `BlockingIOError` (`EAGAIN`) for a non-blocking connect (a blocking connect waits); on macOS, `ConnectionRefusedError` |
 | No route can be used (the spelling does not fit, there is no means) | `OSError` (`ENAMETOOLONG`) |
 | A length only thread-cwd / at reach for `resolve_for_bind`, link-file not usable for `resolve_for_connect` | `OSError` (`ENAMETOOLONG`) |
+| `Options.base` is a relative path, or does not end in a name (`dir/`, `..`, `/`) | `ValueError` |
 | The parent of `Options.base` does not exist | `FileNotFoundError` (`ENOENT`) |
 | `Options.base` (or its parent) is not a directory | `NotADirectoryError` (`ENOTDIR`) |
-| `Options.base` fails the owner / permission check (including, together with `usable_cross_uid`, whether every directory on the way grants x to other) | `PermissionError` (`EPERM`) |
+| `Options.base` fails the owner / permission check (including, for the bind calls together with `usable_cross_uid`, whether every directory on the way and base itself grant x to other) | `PermissionError` (`EPERM`) |
 | A path of a length that cannot be passed to the standard library as it is does not end in a name | `ValueError` |
 | A path contains a NUL other than at the start | `ValueError` |
 | The cwd changed during the relative route, or during `sockat.ex.bind` of a relative path | `OSError` without errno |
 
-- An error with `Options.base` does not fall back to the automatic places
+- An error with `Options.base` does not fall back to the automatic places. For a long path it is checked before routes are tried, so `route` is `None` and `skipped` is empty
 - On macOS, connect returns `ECONNREFUSED` also when the peer's backlog is full. Code that removes the socket file on seeing `ECONNREFUSED` may, on macOS, remove the socket file of a live listener (this is kernel behaviour and the same with the standard library)
 
 ## asyncio
