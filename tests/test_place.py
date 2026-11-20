@@ -22,6 +22,7 @@ import pytest
 from _support import (
     HAS_PROC,
     HAS_THREAD_ROUTE,
+    NAME_MAX_THREAD_CWD,
     NO_PLACE,
     NO_PROC,
     PRELUDE,
@@ -47,7 +48,7 @@ from sockat import _calls, _place
 from sockat._place import Kind, State
 from sockat._routes import Call
 from sockat._spelling import Trail
-from sockat._sys import DIRECT_MAX, Op
+from sockat._sys import DIRECT_MAX, IS_FREEBSD, Op
 
 
 def uid_name() -> bytes:
@@ -544,7 +545,9 @@ def test_connects_do_not_look_at_usable_cross_uid(tmp: TmpDirs) -> None:
 def test_b_is_not_made_for_a_spelling_that_cannot_fit(tmp: TmpDirs) -> None:
     place = deep_dir(tmp.new(), 95)
     env = env_at(place, proc=NO_PROC, thread_cwd=False, link_file=_place.LinkFile.NOT_TRIED)
-    p = long_path(tmp.new())
+    # A file name past thread-cwd / at too (FreeBSD's at needs no thread and
+    # would make B for its D), so that no route of any system's row takes B.
+    p = long_path(tmp.new(), name=b"n" * (NAME_MAX_THREAD_CWD + 1))
     with raises_errno(errno.ENAMETOOLONG):
         bind_in(env, p)
     with listener_at(p), raises_errno(errno.ENAMETOOLONG):
@@ -980,10 +983,20 @@ def test_the_estimate_is_against_the_first_usable_place(tmp: TmpDirs) -> None:
     env = env_at(b"/nonexistent/place", unsafe, long_place, short_place, proc=NO_PROC, thread_cwd=False)
     env = _place.Env(dataclasses.replace(env.config, link_file=_place.LinkFile.NOT_TRIED), env.state)
     trail = Trail()
-    with raises_errno(errno.ENAMETOOLONG):
-        bind_in(env, long_path(tmp.new()), trail=trail)
+    if IS_FREEBSD:
+        # FreeBSD's row has at, which needs no thread: the bind goes through it,
+        # with D in the first place B can be made (the long one), and the
+        # shorter place after it is not used.
+        done = bind_in(env, long_path(tmp.new()), trail=trail)
+        done.sock.close()
+        assert done.route == "at"
+        assert listing(long_place) == [uid_name()]
+    else:
+        with raises_errno(errno.ENAMETOOLONG):
+            bind_in(env, long_path(tmp.new()), trail=trail)
+        assert listing(long_place) == []
     assert ("link-dir", "spelling too long") in [(s.name, s.reason) for s in trail.skipped]
-    for place in (unsafe, long_place, short_place):
+    for place in (unsafe, short_place):
         assert listing(place) == []
 
 

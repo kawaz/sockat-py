@@ -348,6 +348,15 @@ THREAD_CWD = thread_cwd_usable()
 HAS_THREAD_ROUTE = sys.platform.startswith("freebsd") or THREAD_CWD
 """Whether a bind has thread-cwd (or at, FreeBSD) here."""
 
+THREAD_ROUTE_IN_BIND_ROW = IS_LINUX or IS_APPLE or sys.platform.startswith("freebsd")
+"""Whether this system's bind row has thread-cwd (or at, FreeBSD): the SPEC
+leaves a route the system has no means for out of its row (NetBSD, OpenBSD,
+illumos), so out of skipped too."""
+
+THREAD_CWD_DIRECT_IN_CONNECT_ROW = IS_LINUX or IS_APPLE
+"""Whether this system's connect row has thread-cwd-direct (a thread can be
+given a cwd of its own: Linux, Apple)."""
+
 NAME_MAX_THREAD_CWD = DIRECT_MAX - 11
 """The longest file name thread-cwd / at bind (``E/<name>``, E 10 bytes)."""
 

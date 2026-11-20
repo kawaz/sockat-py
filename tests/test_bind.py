@@ -17,6 +17,7 @@ from _support import (
     HAS_THREAD_ROUTE,
     NAME_MAX_THREAD_CWD,
     NO_PROC,
+    THREAD_ROUTE_IN_BIND_ROW,
     TmpDirs,
     accept_ping,
     base_of,
@@ -355,7 +356,13 @@ def test_a_name_no_route_reaches_is_enametoolong(tmp: TmpDirs) -> None:
     trail = Trail()
     with raises_errno(errno.ENAMETOOLONG):
         bind_in(env, p, trail=trail)
-    assert [s.name for s in trail.skipped] == ["standard", "link-dir", THREAD_ROUTE]
+    # thread-cwd / at only where this system's row has it (SPEC: a route
+    # the system has no means for is not in its row, nor in skipped).
+    assert [s.name for s in trail.skipped] == [
+        "standard",
+        "link-dir",
+        *([THREAD_ROUTE] if THREAD_ROUTE_IN_BIND_ROW else []),
+    ]
     assert ds(base_of(env)) == []
     assert listing(os.path.dirname(p)) == []
 

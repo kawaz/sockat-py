@@ -16,6 +16,7 @@ from _support import (
     HAS_PROC,
     NO_PROC,
     THREAD_CWD,
+    THREAD_CWD_DIRECT_IN_CONNECT_ROW,
     TmpDirs,
     accept_ping,
     at_once,
@@ -57,7 +58,9 @@ def expected_order(proc_ok: bool) -> list[str]:
         first = ["at-direct"]
     else:
         first = ["relative"]
-    return [*first, "thread-cwd-direct", "link-file"]
+    # thread-cwd-direct only where a thread can be given a cwd of its own
+    # (SPEC: a route the system has no means for is not in its row).
+    return [*first, *(["thread-cwd-direct"] if THREAD_CWD_DIRECT_IN_CONNECT_ROW else []), "link-file"]
 
 
 # Each route of this system, forced alone, reaches the listener at a long
@@ -122,7 +125,9 @@ def test_the_order_of_this_system(tmp: TmpDirs) -> None:
 def test_the_default_connect_leaves_nothing(tmp: TmpDirs) -> None:
     place = tmp.new()
     env = env_at(place, proc=NO_PROC, thread_cwd=False, wide=False)
-    p = long_path(tmp.new(), name=b"n" * 90, total=220)
+    # A file name past every sockaddr, so that no route before link-file
+    # reaches it on any system (FreeBSD's at-direct carries 103 bytes).
+    p = long_path(tmp.new(), name=b"n" * 110, total=230)
     with listener_at(p) as listener:
         for nonblocking in (False, True):
             sock, route = at_once(lambda nb=nonblocking: connect_in(env, p, nonblocking=nb))  # type: ignore[misc]
@@ -137,19 +142,37 @@ def test_the_default_connect_leaves_nothing(tmp: TmpDirs) -> None:
 
 # A connect's real failure is the outcome, raised with the route that failed;
 # no later route is tried (nothing appears in B): ENOENT with no socket file,
-# ECONNREFUSED with one nobody listens on.
+# ECONNREFUSED with one nobody listens on. Run from the socket's directory
+# (in a child), so that the first route of every system's row can be used
+# (relative fits there; proc-direct, at-direct need no cwd) and link-file,
+# last in every row, comes after it.
 @pytest.mark.parametrize(("stale", "code"), [(False, errno.ENOENT), (True, errno.ECONNREFUSED)])
 def test_a_connect_failure_is_not_tried_again(tmp: TmpDirs, stale: bool, code: int) -> None:
     place = tmp.new()
-    env = env_at(place)
     p = long_path(tmp.new())
     if stale:
         stale_socket(p)
-    trail = Trail()
-    with raises_errno(code):
-        _calls.connect(p, call=Call(Op.CONNECT), env=env, trail=trail)
-    assert trail.trying is not None
-    assert trail.trying != "link-file"
+    out = run_child(
+        """
+        import errno
+        from _support import env_at
+        from sockat import _calls
+        from sockat._routes import Call
+        from sockat._spelling import Trail
+        from sockat._sys import Op
+        trail = Trail()
+        try:
+            env = env_at(os.fsencode(ARGS["place"]))
+            _calls.connect(os.fsencode(ARGS["p"]), call=Call(Op.CONNECT), env=env, trail=trail)
+            report(errno=None)
+        except OSError as e:
+            report(errno=e.errno, trying=trail.trying)
+        """,
+        cwd=os.path.dirname(p),
+        args={"p": os.fsdecode(p), "place": os.fsdecode(place)},
+    )
+    assert out["errno"] == code
+    assert out["trying"] == expected_order(HAS_PROC)[0]
     assert listing(place) == []
 
 
