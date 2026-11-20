@@ -118,9 +118,9 @@ def run(case: Case) -> dict[str, object]:
     options = sockat.ex.Options(usable_cross_uid=case.usable_cross_uid, base=case.base)
     try:
         if case.op == "bind":
-            bound = sockat.ex.bind(case.path, options)
+            bound = sockat.ex.bind(case.path, options=options)
         else:
-            connected = sockat.ex.connect(case.path, options)
+            connected = sockat.ex.connect(case.path, options=options)
     except (OSError, ValueError) as e:
         return {
             "ok": False,

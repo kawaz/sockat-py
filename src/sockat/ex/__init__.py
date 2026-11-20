@@ -127,7 +127,7 @@ class Bound(NamedTuple):
     """The route taken, as the sockat SPEC names it. For diagnosis only."""
     base: str | None
     """Which B the spelling goes through (``"proc"``, ``"sockdir"``,
-    ``"tmp"``, ``"runtime"``, ``"tmpdir"``, ``"base"``), ``None`` when it
+    ``"tmp"``, ``"runtime"``, ``"tmpdir"``, ``"given"``), ``None`` when it
     goes through none. For diagnosis only."""
     skipped: tuple[Skipped, ...]
     """The routes tried before :attr:`route` and found unusable, in order.
@@ -214,7 +214,7 @@ def _telling(trail: Trail) -> Iterator[None]:
         raise
 
 
-def bind(path: StrOrBytesPath, options: Options | None = None) -> Bound:
+def bind(path: StrOrBytesPath, *, options: Options | None = None) -> Bound:
     """:func:`sockat.bind`, with what it went through and the socket file.
 
     ``file.remove()`` removes the socket file the bind made, and nothing
@@ -231,12 +231,12 @@ def bind(path: StrOrBytesPath, options: Options | None = None) -> Bound:
     return Bound(done.sock, file, done.spelling, done.route, done.base, tuple(trail.skipped))
 
 
-def connect(path: StrOrBytesPath, options: Options | None = None) -> Connected:
+def connect(path: StrOrBytesPath, *, options: Options | None = None) -> Connected:
     """:func:`sockat.connect`, with what it went through."""
     return _connect(Call(Op.CONNECT), path, options)
 
 
-def connect_nonblocking(path: StrOrBytesPath, options: Options | None = None) -> Connected:
+def connect_nonblocking(path: StrOrBytesPath, *, options: Options | None = None) -> Connected:
     """:func:`sockat.connect_nonblocking`, with what it went through."""
     return _connect(Call(Op.CONNECT, nonblocking=True), path, options)
 
@@ -248,7 +248,7 @@ def _connect(call: Call, path: StrOrBytesPath, options: Options | None) -> Conne
     return Connected(sock, route, tuple(trail.skipped))
 
 
-def resolve_for_bind(path: StrOrBytesPath, options: Options | None = None) -> ForBind:
+def resolve_for_bind(path: StrOrBytesPath, *, options: Options | None = None) -> ForBind:
     """A short spelling that names the same place as ``path`` for as long as
     it lives, to bind with the standard library (any socket type). A path
     the :mod:`socket` module takes is returned as is. ``ENAMETOOLONG`` where
@@ -259,7 +259,7 @@ def resolve_for_bind(path: StrOrBytesPath, options: Options | None = None) -> Fo
     return ForBind(r.path, r.spelling, r.route, r.base, tuple(trail.skipped), r)
 
 
-def resolve_for_connect(path: StrOrBytesPath, options: Options | None = None) -> ForConnect:
+def resolve_for_connect(path: StrOrBytesPath, *, options: Options | None = None) -> ForConnect:
     """A short spelling of ``path`` to connect (or send) to with the
     standard library, as often as needed, then :meth:`ForConnect.cleanup`.
     A path the :mod:`socket` module takes is returned as is.
