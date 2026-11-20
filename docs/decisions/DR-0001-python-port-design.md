@@ -1,13 +1,13 @@
-# DR-0001: Python 版の作り方 (作る経路、公開 API、標準に揃える点、配布)
+# DR-0001: Python 版の作り方 (作る経路、置き場 B・D・E、公開 API、標準に揃える点、配布)
 
-- Status: Accepted (fork の経路を作らないことは kawaz 裁定 2026-11-18。NUL は統括の裁定 2026-11-18。他は統括の判断)
-- Date: 2026-11-18
+- Status: Accepted (fork の経路を作らないことと `sockat.ex` の置き場は kawaz 裁定。経路・置き場・綴りの性質・関数の組はハブの DR-0017 の kawaz 裁定。Python での形は統括の判断 2026-11-21、公開の名前は統括がハブに確認中)
+- Date: 2026-11-21
 
 ## Context
 
-- sockat の振る舞いの正本はハブの [SPEC](https://github.com/kawaz/sockat/blob/main/docs/SPEC-ja.md)。経路の設計の判断はハブの [DR-0012](https://github.com/kawaz/sockat/blob/main/docs/decisions/DR-0012-own-directory-and-thread-cwd.md) にある
+- sockat の振る舞いの正本はハブの [SPEC](https://github.com/kawaz/sockat/blob/main/docs/SPEC-ja.md) と [SPEC-routes](https://github.com/kawaz/sockat/blob/main/docs/SPEC-routes-ja.md)。今の設計の判断はハブの [DR-0017](https://github.com/kawaz/sockat/blob/main/docs/decisions/DR-0017-resolve-through-persistent-base.md) (長いパスは置き場 B の中の消さない symlink を通る短い綴りに resolve する。既定の bind も綴りを残す。fork はしない)
 - Python の標準 (`socket` モジュール) は `len >= sizeof(sun_path)` のパスを errno の無い `OSError('AF_UNIX path too long')` で断る。macOS の CPython 3.11 / 3.13 / 3.14 / 3.15 で 103 バイトまで通り 104 から断ることを確かめた
-- SPEC は「その言語で作れない経路は飛ばし、README に OS × 経路の表で示す」「fork の無い言語は connect の最終手段 fork-cwd-direct を `skipped` に理由付きで入れて次へ進む」と決めている
+- Python から呼べないシステムコール (`bindat` / `connectat`、`unshare`、`pthread_fchdir_np`、広げた sockaddr の `bind` / `connect`) は ctypes で呼べる。`flock`、`mkdirat` / `symlinkat` / `openat` (`dir_fd=`)、`fchmod` は標準ライブラリにある
 
 ## Decision
 
@@ -15,97 +15,124 @@
 
 | 経路 | 作り方 | 使う OS |
 |---|---|---|
-| D を通す経路 (D と R) | [DR-0004](DR-0004-own-directory-route.md) | 手段のある OS |
-| thread-cwd (D を通す経路) | sockat が作る使い捨ての `threading.Thread` で、ctypes の `unshare(CLONE_FS)` → `os.fchdir` (Linux。seccomp の filter が掛かっていれば `unshare` を呼ばずに使えないとみなす) / `pthread_fchdir_np` (Apple) をしてから、そのスレッドで `R/<ファイル名>` で bind / connect し、スレッドを捨てる | Linux / Android、Apple の OS |
-| at (D を通す経路) | ctypes で `bindat(2)` / `connectat(2)` | FreeBSD |
-| proc (D を通す経路) | `/proc/self/fd/<D の fd>/R/<ファイル名>` を標準に渡す | Linux / Android |
-| proc-direct (connect だけ) | `os.open(dir, O_PATH \| O_DIRECTORY)` の fd で `/proc/self/fd/<fd>/<ファイル名>` を標準に渡す | Linux / Android |
-| proc-held (connect だけ) | [DR-0002](DR-0002-unsafe-base-held-by-fd.md) | Linux / Android |
-| relative (connect だけ) | 文字列を書き直して標準に渡す | FreeBSD 以外で `/proc` を使えない時 |
-| widened (connect だけ) | ctypes で libc の `connect(2)` に手で組んだ sockaddr を渡す | Apple の OS |
-| symlink-file (connect と bind) | `os.symlink` で作り、標準に渡し、消す ([DR-0004](DR-0004-own-directory-route.md) の決定 8) | connect は FreeBSD 以外、bind は bind が symlink を辿らないと確かめた OS (Linux / Android、FreeBSD、OpenBSD、illumos) 以外 |
-| symlink-dir (`sockat.ex.bind` の最終手段) | `os.symlink` で作り、標準に渡し、消す ([DR-0006](DR-0006-sockat-ex.md)) | 全部 |
-| at-direct (connect だけ) | ctypes で `connectat(2)` にソケットのディレクトリの fd とファイル名 | FreeBSD |
-| fork-cwd、fork-cwd-sockdir、fork-cwd-direct | 作らない (kawaz 裁定) | — |
+| link-dir | B・D の中に `os.symlink(..., dir_fd=D)` で E を作り、`B/D/E/<ファイル名>` を標準に渡す。B の綴りは procB (`/proc/<pid>/fd/<B の fd>`) か B の実パス | 全部 |
+| link-file | E をソケットのファイルを指して作り、bind は `B/D/E`、既定の connect は B の直下の乱数の E を `B/E` で標準に渡してすぐ消す | bind は辿ると実測した OS と未確認の OS、connect は全部 |
+| thread-cwd | sockat が作る使い捨ての `threading.Thread` で ctypes の `unshare(CLONE_FS)` → `os.fchdir` (Linux。seccomp の filter が掛かっていれば `unshare` を呼ばずに使えないとみなす) / `pthread_fchdir_np` (Apple) をし、そのスレッドで `E/<ファイル名>` を bind する | Linux / Android、Apple の OS |
+| at | ctypes で `bindat(2)` に D の fd | FreeBSD |
+| proc-direct | `os.open(dir, O_PATH \| O_DIRECTORY)` の fd で `/proc/self/fd/<fd>/<ファイル名>` を標準に渡す | Linux / Android |
+| relative | 文字列を書き直して標準に渡す | `/proc` を使えない Linux、Apple、FreeBSD 以外 |
+| widened | ctypes で libc の `connect(2)` に手で組んだ sockaddr を渡す | Apple の OS |
+| at-direct | ctypes で `connectat(2)` にソケットのディレクトリの fd とファイル名 | FreeBSD |
+| thread-cwd-direct | thread-cwd と同じスレッドの cwd をソケットのディレクトリに移し、ファイル名で connect する | Linux / Android、Apple の OS |
 
-- 経路の順番、使える条件、失敗をやり直さない扱い、D・R・symlink の置き場と名前は SPEC のとおり。Python での作り方は [DR-0004](DR-0004-own-directory-route.md)
-- 長いパスは最初にソケットのディレクトリを `stat` で引く (無ければ `ENOENT`)。bind が fork-cwd の経路の場所に来たら `ENAMETOOLONG` を返す
-- thread-cwd は CPython の 1 スレッド = 1 OS スレッドに頼る。他のスレッドの `os.getcwd()` が変わらないことを macOS と Linux で確かめた
+- 経路の順番、使える条件、失敗をやり直さない扱いは SPEC のとおり。fork の経路は作らない (SPEC も作らない)
+- thread-cwd は CPython の 1 スレッド = 1 OS スレッドに頼る。使い捨てのスレッドが終わるまで呼び出し元は待ち、`join` が割り込まれても (`KeyboardInterrupt`) スレッドが終わってから片付けて割り込みを投げ直す
 - ctypes を使う呼び出しは `src/sockat/_sys.py` にだけ置き、最初に要った時に import する
 
-理由: Python から `os.fork()` した子は Python を実行するので、SPEC の「子の区間は async-signal-safe」を満たせない。満たすには C 拡張が要り、配布が OS × arch の wheel になる。純 Python で 1 つの wheel にする方を取る (kawaz 裁定)。fork の経路が無いことで bind が届かなくなる所は [DR-0004](DR-0004-own-directory-route.md) の決定 4 (ハブの D12-Q3 の kawaz 裁定で `ENAMETOOLONG`。届かせたい人は最終手段を使う `sockat.ex.bind`)。
-
-### 2. 公開 API
-
-| 関数 | SPEC の操作 | 戻り値 |
-|---|---|---|
-| `sockat.bind(path)` | `bind` | listen 済みの `socket.socket` |
-| `sockat.connect(path)` | `connect` | `socket.socket` (ブロックする) |
-| `sockat.connect_nonblocking(path)` | `connect_nonblocking` | 非ブロッキングの `socket.socket` |
-| `sockat.ex.bind(path, *, last_resort=False)` | `bind_ex` | `Bound` ([DR-0006](DR-0006-sockat-ex.md)) |
-| `sockat.ex.connect(path, *, last_resort=False)` | `connect_ex` | `Connected` ([DR-0006](DR-0006-sockat-ex.md)) |
-| `sockat.ex.connect_nonblocking(path, *, last_resort=False)` | `connect_nonblocking_ex` | `Connected` ([DR-0006](DR-0006-sockat-ex.md)) |
-
-- `sockat.ex` は `import sockat` では読み込まない。connect 系の最終手段の fork-cwd-direct は作らず、`skipped` に入れる (fork の経路が無いため)
-- 長いパスでは、戻り値は `socket.socket` の subclass で、アドレスを元のパスで返す ([DR-0003](DR-0003-report-the-given-path.md))
-- `path` は `str` / `bytes` / `os.PathLike`。標準の `socket.bind` は `os.PathLike` を受けない (3.11〜3.15 で確認) が、Python のファイル API の慣習に合わせて受け、`os.fspath` した値を標準に渡す
-- 経路 (`_route.Route`) は公開しない (`sockat.ex` が経路の名前の文字列を診断用に返すだけ)。試験はパッケージの中から各経路の関数を呼ぶ。環境を読む部分 (D の置き場、symlink-file の置き場の候補、bind で symlink-file を試すか、macOS で広げた sockaddr を試すか、`/proc/self/fd` の場所、thread-cwd を試すか、symlink-dir の置き場の候補) は `_route.Config` にして試験から差し替える
-
-### 3. 標準に揃える点
+### 2. 置き場 B・D・E の Python での作り方
 
 | 点 | 決定 |
 |---|---|
-| 標準にそのまま渡す長さ | `sun_path` − 1。Linux / Android / illumos は 107、Apple と BSD は 104 − 1 = 103。他の OS は 103 (小さい方に倒す) |
-| ソケットの作り方 | どの経路も `socket.socket(AF_UNIX, SOCK_STREAM)` で作る (close-on-exec、既定の timeout、`SO_NOSIGPIPE` を付けない点まで標準と同じ) |
+| B の置き場 | `/tmp` → `$XDG_RUNTIME_DIR` → `$TMPDIR` → ソケットのディレクトリ。環境変数は空・相対パスなら使わない |
+| 置き場のパス | realpath にしてから、ルートからの途中を確かめ、`O_DIRECTORY \| O_NOFOLLOW` で開いて `mkdirat` する。実パスの綴りもこの realpath から作る |
+| 既にある B | `O_NOFOLLOW` で開いて実ディレクトリ・持ち主が自分・他人が書けないことを確かめる。外れたら自動の置き場は `<名前>.XXXXXXXXXX` の B を横に作る。`Options.base` は symlink なら `EPERM`、ディレクトリでも symlink でもなければ `ENOTDIR` (OS ごとに違う `O_NOFOLLOW` の errno でなく `lstat` で見分ける) |
+| D | 乱数 10 文字の名前で `mkdir(dir_fd=B)`、`O_NOFOLLOW` で開いて確かめ、`os.fchmod` で 0711、`fcntl.flock(LOCK_SH)` を掛けた fd を持ち続ける |
+| D と `sweep` の競合 | flock を掛けた後に名前を引き直し、`(st_dev, st_ino)` が開いた物と違えば (他のプロセスの `sweep` が、ロックの掛かる前の D を消した) 別の名前で作り直す |
+| E の名前 | resolve の E は D ごとのカウンタ (36 進)。thread-cwd・at と B の直下の E は乱数 10 文字 |
+| プロセスの状態 | B (と fd、D) はモジュールの `State` に持つ。`os.register_at_fork(after_in_child=...)` で、fork の子では親の B・D の fd を閉じて状態を作り直す (子は親の D を使わず自分の D を作る) |
+| 環境を読む部分 | 置き場の候補、uid、`/proc` の場所、thread-cwd を試すか、widened を試すか、link-file を試すか・どう見分けるかを `_place.Config` にし、試験から差し替える |
+
+### 3. 公開 API
+
+| 置き場 | 関数・型 |
+|---|---|
+| `sockat` | `bind(path)`・`connect(path)`・`connect_nonblocking(path)` (`socket.socket` を返す) |
+| `sockat.datagram` | `bind(path)`・`unbound()`・`connect(sock, path)` |
+| `sockat.ex` | `bind`・`connect`・`connect_nonblocking` (各 `(path, options=None)`)、`resolve_for_bind`・`resolve_for_connect`、`sweep()`、型 `Options`・`Bound`・`Connected`・`Report`・`ForBind`・`ForConnect`・`SocketFile`・`Skipped`・`Spelling` (`Original`・`CwdRelative`・`Linked`・`Dangling`)・`Until` |
+| `sockat.ex.datagram` | `bind(path, options=None)`・`connect(sock, path, options=None)` |
+
+- `sockat.ex` は `import sockat` では読み込まない (標準の `socket.connect_ex` と紛れるため、使う人が `import sockat.ex` で選ぶ)。`sockat.datagram` は読み込む
+- `Options` は frozen dataclass (`usable_cross_uid: bool = False`、`base: str | bytes | os.PathLike | None = None`)
+- `Bound(socket, file, spelling, route, base, skipped)`・`Connected(socket, route, skipped)`・`Report(route, skipped)` は NamedTuple (分解して受け取れる)。`ForBind` / `ForConnect` は frozen dataclass と `cleanup()`。`ForConnect` は `remove()` を持たない
+- `Spelling` は基底のクラスと、値ごとの frozen dataclass。`match bound.spelling: case sockat.ex.Linked(removable=True): ...` で分岐できる。`Until` は `StrEnum` (`"Process"` / `"Cleanup"`)
+- `SocketFile` は `remove()` と `cleanup()` を持つ (SPEC の Python の形「戻り値に引数なしの関数を含める」を、引数なしのメソッドで満たす)
+- resolve の `path` は、渡したパスが `str` なら `str`、`bytes` なら `bytes`
+- 長いパスでは、戻り値は `socket.socket` の subclass で、アドレスを元のパスで返す ([DR-0003](DR-0003-report-the-given-path.md))。`sockat.datagram.unbound()` も同じ subclass で、長いパスに connect すると `getpeername()` が元のパスを返す
+- `path` は `str` / `bytes` / `os.PathLike`。入口で 1 度だけ `os.fspath` し、その値を覚える・bind する・返すのすべてに使う
+- 経路は公開しない (`sockat.ex` が経路の名前の文字列を診断用に返すだけ)。試験はパッケージの中から各経路の関数を呼び、connect は試す順を渡して強制する
+
+### 4. 標準に揃える点
+
+| 点 | 決定 |
+|---|---|
+| 標準にそのまま渡す長さ | `sun_path` − 1。Linux / Android / illumos は 107、Apple と BSD は 103。他の OS は 103 (小さい方に倒す) |
+| ソケットの作り方 | どの経路も `socket.socket(AF_UNIX, SOCK_STREAM)` (DGRAM は `SOCK_DGRAM`) で作る (close-on-exec、既定の timeout、`SO_NOSIGPIPE` を付けない点まで標準と同じ) |
 | listen | 引数なしの `listen()` (標準の既定の backlog) |
 | ブロックしない connect | connect の前に `setblocking(False)` |
 | ctypes の connect の `EINTR` | 標準と同じく、ブロックするソケットは書き込み可能になるまで待って `SO_ERROR` を読み、非ブロッキングは `InterruptedError` |
+| DGRAM の connect | 渡されたソケットで経路を試す。失敗してもそのソケットは閉じない |
 
-### 4. NUL を含むパス
+### 5. NUL を含むパス
 
 - 先頭以外に NUL を含むパスは、長さによらず `ValueError`。標準は NUL で黙って切り詰めて別の場所に bind する (`b"/tmp/a\0b"` が `/tmp/a` になる。Linux / macOS で確認)
-- Linux / Android で先頭が NUL のパスは abstract namespace のアドレスで、pathname ではないので対象外。長さによらず標準にそのまま渡す (標準で abstract socket を使うコードが置き換えで壊れないように)
+- Linux / Android で先頭が NUL のパスは abstract namespace のアドレスで、長さによらず標準にそのまま渡す。abstract namespace の無い OS では先頭の NUL も `ValueError`
 
-### 5. エラーの型
+### 6. エラーの型
 
 | SPEC の状況 | Python の型 |
 |---|---|
 | OS のエラー | errno 付きの `OSError` (`FileNotFoundError` 等のサブクラスになる) |
-| 引数の誤り (名前で終わらない長いパス、先頭以外に NUL を含むパス) | `ValueError` (Python の引数の値の誤りの慣習) |
-| 一般のエラー (相対パスの経路の途中で cwd が変わった) | errno の無い `OSError` (標準の `AF_UNIX path too long` と同じ形) |
+| 引数の誤り (名前で終わらない長いパス、先頭以外に NUL を含むパス) | `ValueError` |
+| 一般のエラー (relative の途中で cwd が変わった、相対パスの `sockat.ex.bind` で覚える前に cwd が変わった) | errno の無い `OSError` |
+| `_ex` と resolve の失敗 | 既定の呼び出しと同じ例外に、属性 `skipped` (`Skipped` のタプル) と `route` (失敗した経路の名前か `None`) を足す |
 
-### 6. 対応する版と道具
+### 7. 対応する版と道具
 
 | 項目 | 決定 |
 |---|---|
-| Python | 3.11 以上 (3.10 は 2026-10 にサポート終了) |
+| Python | 3.11 以上 |
 | 中身 | 純 Python (ctypes は標準ライブラリ)。依存なし |
 | ビルド | uv、build backend は `uv_build` |
-| 型と lint | mypy strict (Linux / macOS / FreeBSD の platform ごとに通す)、ruff |
-| 試験 | pytest。macOS と Linux (docker で /proc あり・なし) |
+| 型と lint | mypy strict (darwin / linux / freebsd / netbsd の platform ごとに通す)、ruff |
+| 試験 | pytest。macOS と Linux (docker で Python 3.11 / 最新 × seccomp の既定 / unconfined × root / nobody)。ハブの適合試験の CLI は `conformance/cli.py` |
 
 ## Alternatives Considered
 
 - 案 A: Python から `os.fork()` して子に `fchdir` → bind / connect させる
-  - 不採用理由: 子が Python を実行し、`os.register_at_fork` で登録された処理も走る。async-signal-safe にならない。3.12 以降はスレッドのあるプロセスで fork すると DeprecationWarning も出る
-- 案 B: `sys.executable` を fork+exec し、渡した fd に子の Python が bind / connect する (`_posixsubprocess` の子の区間は C)
-  - 不採用理由: SPEC の fork の経路と仕組みが違う。PyInstaller 等で固めたアプリでは `sys.executable` がアプリ本体を指し、それを起こしてしまう
-- 案 C: PyO3 で sockat-rs を包む
+  - 不採用理由: SPEC が fork をしない。子が Python を実行し、`os.register_at_fork` で登録された処理も走る
+- 案 B: PyO3 で sockat-rs を包む
   - 不採用理由: Rust 標準のソケット設定 (`SO_NOSIGPIPE`、backlog) になり Python 標準と揃わない。経路を Python 側の試験から強制できない。配布が OS × arch の wheel になる
-- 案 D: C 拡張を任意にし、入っている時だけ fork の経路を出す
-  - 不採用理由: 入れ方で公開 API が変わる
-- 案 E: 標準にそのまま渡す長さを、import 時に標準で試して求める
+- 案 C: `Spelling` を 1 つのクラスに `kind` と省略できる属性を持たせる
+  - 不採用理由: `Linked` 以外で属性が意味を持たない組み合わせを許す。値ごとのクラスなら `match` のクラスパターンで属性ごと分岐できる
+- 案 D: `_ex` の失敗を専用の例外型で包む
+  - 不採用理由: 呼び出し元が見ている型 (`FileNotFoundError` 等) と `errno` が変わる
+- 案 E: D の名前をプロセスの中のカウンタにする
+  - 不採用理由: プロセスが終わった後に同じ PID・同じ fd 番号の別のプロセスが現れると、procB の綴りが同じになる (ハブ DR-0017 の案 G)
+- 案 F: fork の子でも親の B・D をそのまま使う
+  - 不採用理由: 子の procB の綴りは子の pid で綴るが、親の fd を引き継いだ番号が子で閉じられ使い回されうる。親が先に終わると子の持つ複製で親の D のロックが残り続ける
+- 案 G: 標準にそのまま渡す長さを、import 時に標準で試して求める
   - 不採用理由: import のたびに試す手間がかかる。値は OS で決まるので表で足り、試験が標準自身で境界を確かめる
 
 ## Consequences
 
-- fork の経路でしか届かない所は、`bind` も connect も `ENAMETOOLONG` になる。`bind` では D を通す経路が使えない所全部 (NetBSD / OpenBSD / illumos の長いパス全部を含む。[DR-0004](DR-0004-own-directory-route.md) の決定 4)。README の OS × 経路の表に「fork の経路なし」と書く
-- fork の経路が欲しくなったら、使う人が選んで有効にする別のもの (例: C 拡張を含む別の配布物) として出す。既定の `sockat` は純 Python のまま変えない (kawaz 裁定 2026-11-18)。後始末・診断つきの呼び出しと最終手段の置き場は `sockat.ex` ([DR-0006](DR-0006-sockat-ex.md))
+- 長いパスの bind は、どの OS でも B の実パスの link-dir で届く所まで届く (`/tmp` の B ならファイル名およそ 77 バイトまで)。それを超えるファイル名は link-file (macOS・NetBSD) と thread-cwd・at (Linux・Apple・FreeBSD) で届き、届かない所は `ENAMETOOLONG`
+- 長いパスの既定の bind はプロセスの D に E を残す。試験は置き場を試験のディレクトリにし、本物の `/tmp` の B に作った自分の D は試験の終わりに消す
 - SPEC が変わったら、この実装と README / MANUAL を追従させる
+
+## 未決 (統括経由でハブに確認中)
+
+- 置き場に symlink がある時 (macOS の `/tmp` → `/private/tmp`) に realpath してから使うか、`usable_with_private_tmp` の判定を realpath で行うか (今は realpath を使い、綴りの字面で判定)
+- 診断の `base` で `Options.base` の B を実パスで綴った時の値 (今は `"base"`)
+- connect 系での `Options.usable_cross_uid` の効き (今は字面どおり B の選び方に効かせる)
+- B・D・E の名前の長さ (今は D と乱数の E が 10 文字、resolve の E がカウンタ)
+- 既にある B の mode が 0711 でない時に直すか (今は直さない)
+- `sweep()` の対象の B (今は自動の置き場 1〜3 の既定の名前の B だけ)
+- 既定の connect が link-file で B を初めて作る時に、その B をプロセスの B として覚えるか (今は覚える)
+- `Options.base` をいつ確かめるか (今は B が要る経路に来た時)
+- `ForBind` の `remove()` (SPEC で未確定。今は作らない)。DGRAM の `send_to`、SEQPACKET (SPEC で未確定。今は作らない)
 
 ## 関連
 
-- [sockat の SPEC](https://github.com/kawaz/sockat/blob/main/docs/SPEC-ja.md)
-- [ハブの DR-0012](https://github.com/kawaz/sockat/blob/main/docs/decisions/DR-0012-own-directory-and-thread-cwd.md)
-- [DR-0004](DR-0004-own-directory-route.md)
-- [他言語への移植の調査](https://github.com/kawaz/sockat/blob/main/docs/research/2026-11-18-ports-to-other-languages.md)
+- [ハブの SPEC](https://github.com/kawaz/sockat/blob/main/docs/SPEC-ja.md)、[SPEC-routes](https://github.com/kawaz/sockat/blob/main/docs/SPEC-routes-ja.md)
+- [ハブの DR-0017](https://github.com/kawaz/sockat/blob/main/docs/decisions/DR-0017-resolve-through-persistent-base.md)
+- [DR-0003](DR-0003-report-the-given-path.md)

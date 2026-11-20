@@ -1,6 +1,6 @@
 # DR-0002: proc-held (`/proc` を使える Linux の connect の経路)
 
-- Status: Accepted (ハブの DR-0012 の connect の経路の Python での作り方。統括の判断 2026-11-19)
+- Status: Superseded by [DR-0001](../DR-0001-python-port-design.md) (ハブの DR-0017 の作り直し)
 - Date: 2026-11-19
 
 ## Context
@@ -35,5 +35,5 @@
 
 ## 関連
 
-- [DR-0001](DR-0001-python-port-design.md)、[DR-0004](DR-0004-own-directory-route.md)
+- [DR-0001](../DR-0001-python-port-design.md)、[DR-0004](DR-0004-own-directory-route.md)
 - [ハブの DR-0012](https://github.com/kawaz/sockat/blob/main/docs/decisions/DR-0012-own-directory-and-thread-cwd.md)

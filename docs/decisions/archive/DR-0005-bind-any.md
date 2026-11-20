@@ -1,13 +1,13 @@
 # DR-0005: bind_any の Python での形
 
-- Status: Superseded by [DR-0006](DR-0006-sockat-ex.md) (ハブの DR-0013 の Python での形。any 系の意味・置き場の順・`losses` / `route` / `skipped` を返すこと・失敗にも `skipped` を付けること・`cwd-relative` は kawaz 裁定 (ハブの D12-Q3、D13-Q1、2026-11-19)。モジュールの置き場と型の形は統括の判断 2026-11-19)
+- Status: Superseded by [DR-0001](../DR-0001-python-port-design.md) (ハブの DR-0017 の作り直し)
 - Date: 2026-11-19
 
 ## Context
 
 - ハブの [DR-0013](https://github.com/kawaz/sockat/blob/main/docs/decisions/DR-0013-any-means-reach-at-any-cost.md) が、any 系を「何かを失ってでも届かせる」opt-in の API にした。`bind_any` は既定の bind の経路を全部試した後、最後に置き場の symlink (symlink-dir) を試し、標準の listener と一緒に、失ったものの名前の並び (`losses`)、通った経路の名前 (`route`)、試して使えなかった経路の並び (`skipped`、各要素は `{name, reason}`) を返す。失敗した時もエラーに `skipped` (と、実際に bind して失敗した経路の名前) を付ける
 - any 系は既定の API に出さず、使う人が選んで有効にする仕組みの後ろに置く。Python の置き場は各言語の DR で決める
-- Python 版の既定の `bind` は、D を通す経路と D 無しの形が使えない所で `ENAMETOOLONG` になる (fork-cwd の経路が無い。[DR-0001](DR-0001-python-port-design.md)、[DR-0004](DR-0004-own-directory-route.md) の決定 4)。NetBSD / OpenBSD / illumos の長いパス全部と、スレッド cwd も `/proc` も使えない Linux がそこに入る
+- Python 版の既定の `bind` は、D を通す経路と D 無しの形が使えない所で `ENAMETOOLONG` になる (fork-cwd の経路が無い。[DR-0001](../DR-0001-python-port-design.md)、[DR-0004](DR-0004-own-directory-route.md) の決定 4)。NetBSD / OpenBSD / illumos の長いパス全部と、スレッド cwd も `/proc` も使えない Linux がそこに入る
 
 ## Decision
 
@@ -23,7 +23,7 @@
 理由:
 
 - import する一手が「失うものを受け入れる」意思表示になる (Rust の feature `any` に当たる)
-- 同じ配布物に入るので、入れ方で公開 API が変わらない ([DR-0001](DR-0001-python-port-design.md) の案 D を避ける)
+- 同じ配布物に入るので、入れ方で公開 API が変わらない ([DR-0001](../DR-0001-python-port-design.md) の案 D を避ける)
 - 名前 `any` はハブの SPEC と Rust の feature の名前にそろう
 
 ### 2. 経路
@@ -45,7 +45,7 @@ symlink-dir:
 | bind | 綴りで標準の `bind`、`listen`。成功でも失敗でも symlink を消す。bind の失敗はそのまま返し、次の置き場を試さない |
 | 届かない | `ENAMETOOLONG` |
 
-- 長いパスの listener は、既定の `bind` と同じく元のパスを返す `PathSocket` ([DR-0003](DR-0003-report-the-given-path.md))
+- 長いパスの listener は、既定の `bind` と同じく元のパスを返す `PathSocket` ([DR-0003](../DR-0003-report-the-given-path.md))
 - 経路の名前は `_route.Route.SYMLINK_DIR` (SPEC の symlink-dir。ソケットのファイルを指す symlink-file とは別の経路)
 
 ### 3. 戻り値
@@ -159,4 +159,4 @@ class Loss(enum.StrEnum):
 
 - [ハブの DR-0013](https://github.com/kawaz/sockat/blob/main/docs/decisions/DR-0013-any-means-reach-at-any-cost.md)
 - [ハブの SPEC](https://github.com/kawaz/sockat/blob/main/docs/SPEC-ja.md) (「公開する操作」「symlink-dir」「symlink の置き場と名前」)
-- [DR-0001](DR-0001-python-port-design.md)、[DR-0003](DR-0003-report-the-given-path.md)、[DR-0004](DR-0004-own-directory-route.md)
+- [DR-0001](../DR-0001-python-port-design.md)、[DR-0003](../DR-0003-report-the-given-path.md)、[DR-0004](DR-0004-own-directory-route.md)

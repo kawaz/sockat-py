@@ -1,12 +1,12 @@
 # DR-0004: D を通す経路 (自分専用のディレクトリ D と R) の Python での作り方、bind の discard
 
-- Status: Accepted (ハブの DR-0012 の Python での作り方。統括の判断 2026-11-19。D をどこにも作れない時の bind の D 無しの形はハブの D12-Q1 の kawaz 裁定 (a)。D を通す経路が使えない時の `bind` が `ENAMETOOLONG` なのはハブの D12-Q3 の kawaz 裁定 (a)。`discard` が listener を閉じない形と名前はハブの D12-Q4 の kawaz 裁定 (ハブの DR-0015)。開けない D を消すのはハブの D12-Q5 の kawaz 裁定)
+- Status: Superseded by [DR-0001](../DR-0001-python-port-design.md) (ハブの DR-0017 の作り直し)
 - Date: 2026-11-19
 
 ## Context
 
 - ハブの [DR-0012](https://github.com/kawaz/sockat/blob/main/docs/decisions/DR-0012-own-directory-and-thread-cwd.md) が、長いパスは自分専用のディレクトリ D を fd で掴み、その中の乱数の symlink R を通して `R/<ファイル名>` で bind / connect する形にした。bind は proc-direct・relative・widened・symlink を使わない。connect はそれらと D を通す経路を、書き込み (D・R・symlink を作る) もスレッドも要らない経路を先にした OS ごとの順 (ハブの SPEC の「connect の順」) で試す
-- SPEC の bind は D を通す経路が使えない時に fork-cwd の経路へ進むが、Python 版は fork の経路を作らない ([DR-0001](DR-0001-python-port-design.md))
+- SPEC の bind は D を通す経路が使えない時に fork-cwd の経路へ進むが、Python 版は fork の経路を作らない ([DR-0001](../DR-0001-python-port-design.md))
 - SPEC の bind は D をどこにも作れない時、D 無しの形 (ソケットのディレクトリに R を作り、ソケットのディレクトリの fd を基準にする) を D を通す経路と同じ手段の順に試し (thread-cwd-sockdir → proc-sockdir)、最後に fork-cwd-sockdir へ進む
 - SPEC は後始末つきの bind (`_ex`) を足した
 - ハブの [DR-0016](https://github.com/kawaz/sockat/blob/main/docs/decisions/DR-0016-bind-through-file-symlink.md) が、bind が symlink を辿る OS では standard の次にソケットのファイルを指す symlink を通して bind する経路 (symlink-file) を足した
@@ -134,7 +134,7 @@ D 無しの形:
 | widened | listener のアドレスが途中で切れ、標準の `getsockname` が読み過ぎる |
 | symlink-dir | D を通す経路で足りる。最終手段を使う `sockat.ex.bind` だけが最後に使う ([DR-0006](DR-0006-sockat-ex.md)) |
 
-- 返すアドレスは元のパス ([DR-0003](DR-0003-report-the-given-path.md)) だが、カーネルの綴りも何にも当たらないようにする (`socket.socket.getsockname` を直接呼ぶコード、`socket.fromfd` で作り直したソケットはカーネルの綴りを見る)
+- 返すアドレスは元のパス ([DR-0003](../DR-0003-report-the-given-path.md)) だが、カーネルの綴りも何にも当たらないようにする (`socket.socket.getsockname` を直接呼ぶコード、`socket.fromfd` で作り直したソケットはカーネルの綴りを見る)
 
 ### 7. bind の discard
 
@@ -197,4 +197,4 @@ D 無しの形:
 - [ハブの SPEC](https://github.com/kawaz/sockat/blob/main/docs/SPEC-ja.md)
 - [ハブの QUESTIONS](https://github.com/kawaz/sockat/blob/main/docs/QUESTIONS.md) (D12-Q1、D12-Q3、D12-Q4、D12-Q5)
 - [DR-0005](DR-0005-bind-any.md)
-- [DR-0001](DR-0001-python-port-design.md)、[DR-0002](DR-0002-unsafe-base-held-by-fd.md)、[DR-0003](DR-0003-report-the-given-path.md)
+- [DR-0001](../DR-0001-python-port-design.md)、[DR-0002](DR-0002-unsafe-base-held-by-fd.md)、[DR-0003](../DR-0003-report-the-given-path.md)

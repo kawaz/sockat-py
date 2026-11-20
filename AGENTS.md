@@ -6,26 +6,33 @@ sockat-py は、`sun_path` の上限を超えるパスでも Unix domain socket 
 
 ## 必読
 
-- [docs/decisions/DR-0001](docs/decisions/DR-0001-python-port-design.md) — Python 版で作る経路と作らない経路、公開 API、標準に揃える点、エラーの型
+- [docs/decisions/DR-0001](docs/decisions/DR-0001-python-port-design.md) — Python 版で作る経路、置き場 B・D・E の作り方、公開 API、標準に揃える点、エラーの型 (今の設計の正本はハブの [DR-0017](https://github.com/kawaz/sockat/blob/main/docs/decisions/DR-0017-resolve-through-persistent-base.md))
 - [docs/MANUAL-ja.md](docs/MANUAL-ja.md) — 利用者に約束している振る舞い (標準と違う点、エラー)
 
 ## 構成
 
 | パス | 中身 |
 |---|---|
-| `src/sockat/__init__.py` | 公開 API (`bind` / `connect` / `connect_nonblocking`) |
-| `src/sockat/ex.py` | 後始末・診断つきの呼び出しと最終手段 (`sockat.ex`。`import sockat` では読み込まない) |
-| `src/sockat/_route.py` | 経路の順番と各経路、試験から差し替える `Config` |
+| `src/sockat/__init__.py` | 既定の stream (`bind` / `connect` / `connect_nonblocking`) |
+| `src/sockat/datagram.py` | 既定の DGRAM (`bind` / `unbound` / `connect`) |
+| `src/sockat/ex/` | `_ex` の呼び出し・resolve・`sweep`・型 (`sockat.ex`、DGRAM は `sockat.ex.datagram`。`import sockat` では読み込まない) |
+| `src/sockat/_calls.py` | 公開の呼び出しの中身 (パスを 1 度読み、短いパスは標準へ、長いパスは経路へ) |
+| `src/sockat/_routes.py` | 経路と、bind・connect・resolve の試す順 |
+| `src/sockat/_place.py` | 置き場 B・D・E、プロセスの状態、`sweep`、試験から差し替える `Config` |
+| `src/sockat/_spelling.py` | 綴りの性質 `Spelling` と診断 (`Skipped`、`Trail`) |
+| `src/sockat/_socket_file.py` | `remove` / `cleanup` (`SocketFile`) と bind したファイルを覚える所 |
+| `src/sockat/_sockets.py` | アドレスを元のパスで返す `socket.socket` の subclass |
 | `src/sockat/_path.py` | パスの分割・相対パスの計算 (ファイルシステムに触らない) |
 | `src/sockat/_sys.py` | ctypes の境界。`socket` モジュールで呼べないシステムコールはここだけ |
-| `tests/` | 経路を強制する試験と公開 API・asyncio の試験 |
+| `conformance/cli.py` | ハブの適合試験の試験用 CLI (配布物に入らない) |
+| `tests/` | 経路を強制する試験 (置き場は試験のディレクトリ) と公開 API・asyncio・適合試験の CLI・MANUAL のコードの試験 |
 
 ## 守ること
 
 - **振る舞いを変える時は、先にハブの SPEC を直す。** sockat-py の docs と実装はその後に追従させる
 - **ctypes は `src/sockat/_sys.py` にだけ書く。** 最初に要った時に import する (Linux は読み込まない)
 - **標準が受け付けるパス (OS ごとの `sun_path` − 1 バイト以内) には何も足さない。** `socket` モジュールをそのまま呼ぶ
-- **どの経路のソケットも `socket.socket(AF_UNIX, SOCK_STREAM)` で作る。** 標準と同じ設定にするため
+- **どの経路のソケットも `socket.socket(AF_UNIX, SOCK_STREAM)` (DGRAM は `SOCK_DGRAM`) で作る。** 標準と同じ設定にするため。DGRAM の connect は渡されたソケットで試す
 - **経路の本当の失敗は次の経路でやり直さない。** 次へ進むのは経路自体が使えない時だけ
 - **プロセスの cwd を変えない。** cwd を移すのはスレッド cwd の経路の使い捨てのスレッドだけ
 - **経路は公開 API に出さない。** 試験はパッケージの中で各経路の関数を呼ぶ
@@ -36,6 +43,7 @@ sockat-py は、`sun_path` の上限を超えるパスでも Unix domain socket 
 - `just test` (macOS)、`just test-linux` (docker で Linux。Python 3.11 / 3.15 × seccomp の既定 / unconfined)。経路は OS で違うので、変更したら両方で回す
 - `just check` は ruff と、OS ごとの分岐を platform ごとに見る mypy (strict)
 - 一時ディレクトリはランダム名で作り、試験の終わりに消す。長さを決めたいので、基本は `/tmp` の下に作る
+- B の置き場は試験のディレクトリにする (`_support.env_at`)。本物の `/tmp/sockat-<uid>` を使うのは公開の呼び出しの試験だけで、自分の D は試験の終わりに消す
 - cwd・環境変数・シグナルのようにプロセス全体に効くものを変える試験は、子プロセスの中で行う
 - 各試験の直前に「何を確かめ、なぜそうなるべきか」をコメントで書く
 

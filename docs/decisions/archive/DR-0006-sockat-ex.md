@@ -1,6 +1,6 @@
 # DR-0006: sockat.ex (後始末・診断つきの呼び出しと最終手段) の Python での形
 
-- Status: Accepted (ハブの DR-0015 の Python での形。モジュール `sockat.ex`、関数名 `bind` / `connect` / `connect_nonblocking`、引数 `last_resort`、推奨コードをモジュールを通して書くことは kawaz 裁定 2026-11-19。戻り値の型の形は統括の判断 2026-11-19)
+- Status: Superseded by [DR-0001](../DR-0001-python-port-design.md) (ハブの DR-0017 の作り直し)
 - Date: 2026-11-19
 
 ## Context
@@ -9,7 +9,7 @@
   - `_ex` は既定の操作と同じ経路を試し、通った経路の名前 (`route`)、試して使えなかった経路 (`skipped`、各要素は `{name, reason}`)、失ったもの (`losses`) を返す。bind の方は加えて `discard` を返す
   - 引数で選べるのは「最終手段を使うか」の 1 つだけ (既定は使わない)。bind の最終手段は symlink-dir、connect の最終手段は fork-cwd-direct で、fork の無い言語は fork-cwd-direct を理由付きで `skipped` に入れて次へ進む
   - 失敗した時もエラーに `skipped` (と、実際に bind / connect して失敗した経路の名前) を付ける
-- Python には fork の経路が無い ([DR-0001](DR-0001-python-port-design.md))。最終手段を使う connect は既定の connect と同じ所に届く
+- Python には fork の経路が無い ([DR-0001](../DR-0001-python-port-design.md))。最終手段を使う connect は既定の connect と同じ所に届く
 - 標準の `socket.socket.connect_ex` は errno を返すメソッドで、`connect_ex` という名前は紛れる
 
 ## Decision
@@ -137,4 +137,4 @@ symlink-dir:
 
 - [ハブの DR-0015](https://github.com/kawaz/sockat/blob/main/docs/decisions/DR-0015-ex-with-last-resort-and-diagnostics.md)
 - [ハブの SPEC](https://github.com/kawaz/sockat/blob/main/docs/SPEC-ja.md) (「公開する操作」「symlink-dir」「fork-cwd-direct」「symlink の置き場と名前」)
-- [DR-0001](DR-0001-python-port-design.md)、[DR-0004](DR-0004-own-directory-route.md)、[DR-0005](DR-0005-bind-any.md)
+- [DR-0001](../DR-0001-python-port-design.md)、[DR-0004](DR-0004-own-directory-route.md)、[DR-0005](DR-0005-bind-any.md)
