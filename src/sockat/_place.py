@@ -948,15 +948,27 @@ def check_given(path: bytes, uid: int, *, cross_uid: bool, held: Base | None = N
 def sweep(env: Env) -> None:
     """Remove the D of the processes gone (whose lock can be made exclusive)
     from B of every automatic place (``sockat-<uid>`` / ``sockat``; B is not
-    made where it is not). Nothing else in B is touched (SPEC "sweep")."""
+    made where it is not). A place or a B that fails its check is passed over
+    without an error. Nothing else in B is touched (SPEC "sweep")."""
     for place in env.config.places:
+        key = _place_key(place)
+        # A place that fails the check on the way is passed over in silence,
+        # as a B that fails its own (in _sweep_at).
+        if key is None or not safe_ancestors(key[0], env.config.uid):
+            continue
         _sweep_at(place.kind, place.path, place.name, env.config.uid)
 
 
 def sweep_given(env: Env, path: bytes) -> None:
     """:func:`sweep` for the B given as ``Options.base``, checked as
-    :func:`check_given` checks it (nothing is made)."""
-    check_given(path, env.config.uid, cross_uid=False)
+    :func:`check_given` checks it (nothing is made): a missing parent or B is
+    nothing to sweep (success); the errors of the check otherwise."""
+    try:
+        check_given(path, env.config.uid, cross_uid=False)
+    except OSError as e:
+        if e.errno == BaseError.NO_DIRECTORY.value:
+            return
+        raise
     parent, name = _path.split(path)
     _sweep_at(Kind.BASE, parent, name, env.config.uid)
 

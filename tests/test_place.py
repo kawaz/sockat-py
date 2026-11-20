@@ -1006,3 +1006,77 @@ def test_options_base_safety_every_call_cross_uid_judged_once(tmp: TmpDirs) -> N
             bind_in(env, long_path(tmp.new()), opts=opts)
     finally:
         os.chmod(root, 0o755)
+
+
+# sweep_base(): a missing parent or B is nothing to sweep (success); a base
+# of the wrong form is an argument error; a symlink is EPERM, a file
+# ENOTDIR; a B others (group included) can write to, or one on a way others
+# can write to, is EPERM. Nothing is made.
+@pytest.mark.parametrize(
+    ("case", "outcome"),
+    [
+        ("no parent", None),
+        ("no b", None),
+        ("symlink", errno.EPERM),
+        ("file", errno.ENOTDIR),
+        ("b writable", errno.EPERM),
+        ("b group-writable", errno.EPERM),
+        ("ancestor writable", errno.EPERM),
+        ("ours", None),
+    ],
+)
+def test_sweep_base_outcomes(tmp: TmpDirs, case: str, outcome: int | None) -> None:
+    root = tmp.new()
+    os.chmod(root, 0o755)
+    given = root + b"/b"
+    if case == "no parent":
+        given = root + b"/none/b"
+    elif case == "symlink":
+        os.symlink(root, given)
+    elif case == "file":
+        with open(given, "wb"):
+            pass
+    elif case in ("b writable", "b group-writable"):
+        os.mkdir(given)
+        os.chmod(given, 0o777 if case == "b writable" else 0o775)
+    elif case == "ancestor writable":
+        os.chmod(root, 0o777)
+        os.mkdir(given, 0o711)
+    elif case == "ours":
+        os.mkdir(given, 0o711)
+    before = sorted(os.listdir(root))
+    if outcome is None:
+        sockat.ex.sweep_base(given)
+    else:
+        with raises_errno(outcome):
+            sockat.ex.sweep_base(given)
+    assert sorted(os.listdir(root)) == before
+
+
+# A B owned by another uid is EPERM for sweep_base (run as root, which can
+# make one).
+@pytest.mark.skipif(not ROOT, reason="needs root to make a directory another uid owns")
+def test_sweep_base_of_another_uids_b(tmp: TmpDirs) -> None:
+    root = tmp.new()
+    given = root + b"/b"
+    os.mkdir(given, 0o711)
+    os.chown(given, 65534, 65534)
+    with raises_errno(errno.EPERM):
+        sockat.ex.sweep_base(given)
+
+
+# sweep() passes over in silence a place that fails the check on the way
+# (writable by others, not sticky) and a B that fails its own (writable by
+# others): their dead D stay, and nothing is raised.
+def test_sweep_passes_over_places_and_b_failing_their_checks(tmp: TmpDirs) -> None:
+    unsafe = tmp.new()
+    os.chmod(unsafe, 0o777)
+    loose = tmp.new()
+    for place, b_mode in ((unsafe, 0o711), (loose, 0o777)):
+        b = place + b"/" + uid_name()
+        os.mkdir(b)
+        os.chmod(b, b_mode)
+        os.mkdir(b + b"/dead", 0o711)
+    _place.sweep(env_at(unsafe, loose))
+    assert listing(unsafe + b"/" + uid_name()) == [b"dead"]
+    assert listing(loose + b"/" + uid_name()) == [b"dead"]
