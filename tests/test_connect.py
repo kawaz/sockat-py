@@ -12,7 +12,6 @@ import socket
 
 import pytest
 from _support import (
-    FULL_BACKLOG,
     HAS_PROC,
     NO_PROC,
     THREAD_CWD,
@@ -30,6 +29,7 @@ from _support import (
     raises_errno,
     run_child,
     stale_socket,
+    standard_errno,
     tree,
 )
 
@@ -141,13 +141,15 @@ def test_the_default_connect_leaves_nothing(tmp: TmpDirs) -> None:
 
 
 # A connect's real failure is the outcome, raised with the route that failed;
-# no later route is tried (nothing appears in B): ENOENT with no socket file,
-# ECONNREFUSED with one nobody listens on. Run from the socket's directory
+# no later route is tried (nothing appears in B): with no socket file, and
+# with one nobody listens on. The errno is the OS's, as the standard gets it
+# for a short path on this system (sockat passes it through). Run from the socket's directory
 # (in a child), so that the first route of every system's row can be used
 # (relative fits there; proc-direct, at-direct need no cwd) and link-file,
 # last in every row, comes after it.
-@pytest.mark.parametrize(("stale", "code"), [(False, errno.ENOENT), (True, errno.ECONNREFUSED)])
-def test_a_connect_failure_is_not_tried_again(tmp: TmpDirs, stale: bool, code: int) -> None:
+@pytest.mark.parametrize("stale", [False, True])
+def test_a_connect_failure_is_not_tried_again(tmp: TmpDirs, stale: bool) -> None:
+    code = standard_errno("connect-stale" if stale else "connect-missing")
     place = tmp.new()
     p = long_path(tmp.new())
     if stale:
@@ -181,7 +183,7 @@ def test_link_file_failure_removes_its_e(tmp: TmpDirs) -> None:
     place = tmp.new()
     env = env_at(place)
     p = long_path(tmp.new())
-    with raises_errno(errno.ENOENT):
+    with raises_errno(standard_errno("connect-missing")):
         connect_in(env, p, order=("link-file",))
     b = env.auto_base()
     assert b is not None
@@ -258,10 +260,11 @@ def test_widened_reaches_253_bytes(tmp: TmpDirs) -> None:
             assert "widened" not in [s.name for s in trail.skipped]
 
 
-# A nonblocking connect to a full backlog fails at once (Linux EAGAIN,
-# macOS ECONNREFUSED), on every route of this system that does not need the
-# cwd moved near the socket (relative is the standard's own connect on a
-# relative spelling), rather than wait.
+# A nonblocking connect to a full backlog fails at once, with the errno the
+# standard gets on this system (Linux EAGAIN, macOS ECONNREFUSED), on every
+# route of this system that does not need the cwd moved near the socket
+# (relative is the standard's own connect on a relative spelling), rather
+# than wait.
 @pytest.mark.skipif(not (IS_LINUX or IS_APPLE), reason="confirmed on Linux and macOS only")
 @pytest.mark.parametrize("route", [r for r in ROUTES_HERE if r != "relative"])
 def test_a_nonblocking_connect_to_a_full_backlog_fails_at_once(tmp: TmpDirs, route: str) -> None:
@@ -280,7 +283,8 @@ def test_a_nonblocking_connect_to_a_full_backlog_fails_at_once(tmp: TmpDirs, rou
                     break
                 assert got == route
                 queued.append(sock)
-            assert full == FULL_BACKLOG, "the backlog never filled" if full is None else errno.errorcode[full]
+            want = standard_errno("full-backlog")
+            assert full == want, "the backlog never filled" if full is None else errno.errorcode[full]
             assert queued
         finally:
             for s in queued:

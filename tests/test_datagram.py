@@ -9,7 +9,17 @@ import socket
 import tempfile
 
 import pytest
-from _support import HAS_PROC, THREAD_CWD, TmpDirs, env_at, kernel_sockname, long_path, run_child
+from _support import (
+    HAS_PROC,
+    THREAD_CWD,
+    TmpDirs,
+    env_at,
+    kernel_sockname,
+    long_path,
+    raises_errno,
+    run_child,
+    standard_errno,
+)
 
 import sockat
 import sockat.ex
@@ -97,7 +107,7 @@ def test_each_route_on_the_callers_socket(tmp: TmpDirs, route: str) -> None:
 def test_a_failure_leaves_the_callers_socket_open(tmp: TmpDirs) -> None:
     p = long_path(tmp.new())
     with sockat.datagram.unbound() as client:
-        with pytest.raises(FileNotFoundError):
+        with raises_errno(standard_errno("connect-missing", socket.SOCK_DGRAM)):
             sockat.datagram.connect(client, p)
         assert client.fileno() >= 0
 
@@ -160,3 +170,17 @@ def test_relative_on_the_callers_socket(tmp: TmpDirs) -> None:
         )
         assert out["route"] == "relative"
         assert receiver.recv(1) == b"x"
+
+
+# A datagram connect to a long path where a socket file nobody holds is
+# fails with the OS's errno, the one the standard gets for a short path here
+# (ECONNREFUSED on most systems, EDESTADDRREQ on illumos): sockat passes it
+# through, and leaves the caller's socket open.
+def test_a_connect_to_a_socket_nobody_holds(tmp: TmpDirs) -> None:
+    p = long_path(tmp.new())
+    with dgram_listener_at(p):
+        pass
+    with sockat.datagram.unbound() as client:
+        with raises_errno(standard_errno("connect-stale", socket.SOCK_DGRAM)):
+            sockat.datagram.connect(client, p)
+        assert client.fileno() >= 0

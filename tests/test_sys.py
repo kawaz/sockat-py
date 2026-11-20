@@ -11,7 +11,7 @@ import sys
 import threading
 
 import pytest
-from _support import TmpDirs, accept_ping, dir_id, is_socket, nest, thread_cwd_usable
+from _support import TmpDirs, accept_ping, dir_id, is_socket, nest, raises_errno, standard_errno, thread_cwd_usable
 
 from sockat import _sys
 from sockat._sys import DIRECT_MAX, SUN_PATH_CAP, WIDE_PATH_MAX, Op, op, sockaddr
@@ -80,12 +80,14 @@ def test_op_binds_and_connects_with_a_hand_built_sockaddr(tmp: TmpDirs) -> None:
 
 
 # A failure of the call comes back as the OSError subclass of its errno, as
-# the socket module raises them: ENOENT for a missing socket is
-# FileNotFoundError.
+# the socket module raises them, with the errno the standard gets for the
+# same call on this system (a missing socket).
 def test_op_raises_the_errno_of_the_call(tmp: TmpDirs) -> None:
     client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    with client, pytest.raises(FileNotFoundError):
+    code = standard_errno("connect-missing")
+    with client, raises_errno(code) as e:
         op(Op.CONNECT, client, sockaddr(tmp.new() + b"/missing.sock"))
+    assert type(e.value) is type(OSError(code, "x"))
 
 
 # The widened sockaddr exists on Apple only: sun_len and the address length

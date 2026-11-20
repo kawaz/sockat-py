@@ -32,6 +32,7 @@ from _support import (
     long_path,
     raises_errno,
     run_child,
+    standard_errno,
 )
 
 import sockat.ex
@@ -162,7 +163,7 @@ def test_link_file_told_at_run_time_not_followed(tmp: TmpDirs) -> None:
 
 
 # ... and when something is at the path, the failure is the outcome
-# (EADDRINUSE), raised from link-file, with no route tried after it.
+# (the standard's errno for a file at the path), raised from link-file, with no route tried after it.
 @pytest.mark.skipif(not IS_LINUX, reason="a system whose bind does not follow the symlink")
 def test_link_file_told_at_run_time_with_a_file_there(tmp: TmpDirs) -> None:
     env = env_at(tmp.new(), proc=NO_PROC, link_file=LinkFile.TOLD_AT_RUN_TIME)
@@ -170,7 +171,7 @@ def test_link_file_told_at_run_time_with_a_file_there(tmp: TmpDirs) -> None:
     with open(p, "wb"):
         pass
     trail = Trail()
-    with raises_errno(errno.EADDRINUSE):
+    with raises_errno(standard_errno("bind-exists")):
         bind_in(env, p, trail=trail)
     assert trail.trying == "link-file"
     assert [s.name for s in trail.skipped] == ["standard", "link-dir"]
@@ -240,16 +241,15 @@ def test_thread_cwd_reaches_its_longest_name(tmp: TmpDirs, extra: int) -> None:
 
 
 # A bind's real failure is the outcome, raised with the route that failed,
-# and no route after it is tried (EADDRINUSE: a file already at the path). E
+# and no route after it is tried (a file already at the path: the standard's errno for it). E
 # made for it is removed.
 def test_a_bind_failure_is_not_tried_again(tmp: TmpDirs) -> None:
     env = env_at(tmp.new(), proc=NO_PROC)
     p = long_path(tmp.new())
     with open(p, "wb"):
         pass
-    with raises_errno(errno.EADDRINUSE) as e:
+    with raises_errno(standard_errno("bind-exists")):
         _calls.bind(p, env=env, trail=(trail := Trail()))
-    assert e.value.errno == errno.EADDRINUSE
     assert trail.trying == "link-dir"
     assert [s.name for s in trail.skipped] == ["standard"]
     assert entries(env) == []
@@ -380,7 +380,7 @@ def test_options_base_carries_the_spelling(tmp: TmpDirs) -> None:
 
 
 # Where a bind follows link-file's symlink, a bind that fails through it
-# (EADDRINUSE: a file at the path) raises from link-file and leaves no E.
+# (a file at the path: the standard's errno for it) raises from link-file and leaves no E.
 @pytest.mark.skipif(not (IS_APPLE or os.uname().sysname == "NetBSD"), reason="a bind follows the symlink here only")
 def test_link_file_failure_leaves_no_e(tmp: TmpDirs) -> None:
     env = env_at(tmp.new())
@@ -388,7 +388,7 @@ def test_link_file_failure_leaves_no_e(tmp: TmpDirs) -> None:
     with open(p, "wb"):
         pass
     trail = Trail()
-    with raises_errno(errno.EADDRINUSE):
+    with raises_errno(standard_errno("bind-exists")):
         bind_in(env, p, trail=trail)
     assert trail.trying == "link-file"
     assert entries(env) == []

@@ -6,12 +6,11 @@ short one, where the kernel holds the spelling of a route."""
 
 from __future__ import annotations
 
-import errno
 import fcntl
 import os
 import socket
 
-from _support import TmpDirs, kernel_peername, kernel_sockname, long_path, nest, ping, raises_errno
+from _support import TmpDirs, errno_of, kernel_peername, kernel_sockname, long_path, nest, ping, raises_errno
 
 import sockat
 import sockat.ex
@@ -68,11 +67,17 @@ def test_failures_are_the_standards(tmp: TmpDirs) -> None:
     p = long_path(tmp.new())
     bound = sockat.ex.bind(p, options=options(tmp))
     listener = bound.socket
-    with raises_errno(errno.ENOTCONN):
+    with socket.socket(socket.AF_UNIX) as plain:
+        plain.bind(tmp.new() + b"/p.sock")
+        plain.listen()
+        not_connected = errno_of(plain.getpeername)
+    with raises_errno(not_connected):
         listener.getpeername()
     bound.file.remove()
     listener.close()
-    with raises_errno(errno.EBADF):
+    closed = socket.socket(socket.AF_UNIX)
+    closed.close()
+    with raises_errno(errno_of(closed.getsockname)):
         listener.getsockname()
 
 

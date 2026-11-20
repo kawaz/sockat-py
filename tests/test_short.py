@@ -6,7 +6,6 @@ judged or made)."""
 
 from __future__ import annotations
 
-import errno
 import os
 import socket
 
@@ -21,6 +20,7 @@ from _support import (
     long_path,
     nest,
     raises_errno,
+    standard_errno,
     tree,
 )
 
@@ -136,8 +136,10 @@ def test_a_long_path_not_ending_with_a_file_name_is_an_argument_error(tmp: TmpDi
 # The socket's directory is looked up before any length is judged or
 # anything is made: a missing one is ENOENT, a file in its place ENOTDIR, with
 # no route tried (route None, skipped empty) and no B made.
-@pytest.mark.parametrize(("make_file", "code"), [(False, errno.ENOENT), (True, errno.ENOTDIR)])
-def test_the_directory_is_looked_up_first(tmp: TmpDirs, make_file: bool, code: int) -> None:
+@pytest.mark.parametrize("make_file", [False, True])
+def test_the_directory_is_looked_up_first(tmp: TmpDirs, make_file: bool) -> None:
+    # The OS's errno, as the standard gets it for a short path here.
+    code = standard_errno("bind-file-in-path" if make_file else "bind-no-directory")
     place = tmp.new()
     d = tmp.new()
     if make_file:

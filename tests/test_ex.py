@@ -28,6 +28,7 @@ from _support import (
     nest,
     raises_errno,
     run_child,
+    standard_errno,
 )
 
 import sockat.ex
@@ -177,12 +178,12 @@ def test_errors_carry_skipped_and_route(tmp: TmpDirs) -> None:
     p = long_path(tmp.new())
     with open(p, "wb"):
         pass
-    with raises_errno(errno.EADDRINUSE) as e:
+    with raises_errno(standard_errno("bind-exists")) as e:
         sockat.ex.bind(p, options=options(tmp))
     assert e.value.route == "link-dir"  # type: ignore[attr-defined]
     assert [s.name for s in e.value.skipped] == ["standard"]  # type: ignore[attr-defined]
     os.unlink(p)
-    with pytest.raises(FileNotFoundError) as fe:
+    with raises_errno(standard_errno("connect-missing")) as fe:
         sockat.ex.connect(p)
     assert fe.value.route is not None  # type: ignore[attr-defined]
     assert fe.value.skipped[0].name == "standard"  # type: ignore[attr-defined]
@@ -257,7 +258,7 @@ def test_resolve_for_connect(tmp: TmpDirs) -> None:
                 accept_ping(listener, s)
         r.cleanup()
         assert e_in(o) == []
-        with socket.socket(socket.AF_UNIX) as s, pytest.raises(FileNotFoundError):
+        with socket.socket(socket.AF_UNIX) as s, raises_errno(standard_errno("connect-missing")):
             s.connect(r.path)
         assert not hasattr(r, "remove")
     short = nest(tmp.new(), 40)
@@ -507,7 +508,7 @@ def test_failing_to_clean_up_e_is_silent(tmp: TmpDirs, monkeypatch: pytest.Monke
             accept_ping(listener, sock)
         assert route == "link-file"
     monkeypatch.setattr(os, "unlink", unlink)
-    with raises_errno(errno.EADDRINUSE):
+    with raises_errno(standard_errno("bind-exists")):
         _calls.bind(p, env=env)
     monkeypatch.undo()
 

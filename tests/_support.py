@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
-import errno
+import functools
 import json
 import os
 import shutil
@@ -55,9 +55,6 @@ exist."""
 NO_PLACE = b"/nonexistent/place"
 """A place for B that does not exist, so B cannot be made there."""
 
-FULL_BACKLOG = errno.EAGAIN if IS_LINUX else errno.ECONNREFUSED
-"""What a nonblocking connect answers while the listener's backlog is full:
-Linux ``EAGAIN``, macOS ``ECONNREFUSED``."""
 
 HAS_PROC = IS_LINUX and os.path.isdir(b"/proc/self/fd")
 
@@ -283,6 +280,92 @@ def at_once(f: Callable[[], T]) -> T:
     if failure:
         raise failure[0]
     return box[0]
+
+
+@functools.cache
+def standard_errno(case: str, kind: int = socket.SOCK_STREAM) -> int:
+    """The errno the standard (the ``socket`` module, a short path) gives on
+    this system for ``case``: sockat passes the OS's errors through as they
+    are (SPEC "エラー"), and they differ by system (illumos answers a datagram
+    connect to a socket nobody holds with ``EDESTADDRREQ``, not
+    ``ECONNREFUSED``), so the tests compare with this rather than a fixed
+    errno.
+
+    * ``connect-missing``: connect to a path with nothing there
+    * ``connect-stale``: connect to a socket file nobody holds
+    * ``bind-exists``: bind where a file is already
+    * ``bind-no-directory``: bind in a directory that is not there
+    * ``bind-file-in-path``: bind under a regular file
+    * ``full-backlog``: a nonblocking connect while the listener's backlog is
+      full
+    """
+    d = tempfile.mkdtemp(prefix="spt-std-", dir="/tmp")
+    p = os.path.join(d, "s.sock")
+    try:
+        if case == "full-backlog":
+            return _standard_full_backlog(p)
+        with socket.socket(socket.AF_UNIX, kind) as s:
+            try:
+                if case == "connect-missing":
+                    s.connect(p)
+                elif case == "connect-stale":
+                    with socket.socket(socket.AF_UNIX, kind) as held:
+                        held.bind(p)
+                    s.connect(p)
+                elif case == "bind-exists":
+                    with open(p, "wb"):
+                        pass
+                    s.bind(p)
+                elif case == "bind-no-directory":
+                    s.bind(os.path.join(d, "none", "s.sock"))
+                elif case == "bind-file-in-path":
+                    with open(os.path.join(d, "f"), "wb"):
+                        pass
+                    s.bind(os.path.join(d, "f", "s.sock"))
+                else:
+                    raise AssertionError(case)
+            except OSError as e:
+                return _errno_of(e)
+        raise AssertionError(f"the standard did not fail: {case}")
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def _errno_of(e: OSError) -> int:
+    if e.errno is None:
+        raise AssertionError(f"no errno: {e!r}")
+    return e.errno
+
+
+def errno_of(call: Callable[[], object]) -> int:
+    """The errno ``call`` fails with (a standard socket's call, to compare
+    sockat's with)."""
+    try:
+        call()
+    except OSError as e:
+        return _errno_of(e)
+    raise AssertionError("no error")
+
+
+def _standard_full_backlog(p: str) -> int:
+    with socket.socket(socket.AF_UNIX) as listener:
+        listener.bind(p)
+        listener.listen(1)
+        queued: list[socket.socket] = []
+        try:
+            for _ in range(16):
+                c = socket.socket(socket.AF_UNIX)
+                c.setblocking(False)
+                try:
+                    c.connect(p)
+                except OSError as e:
+                    c.close()
+                    return _errno_of(e)
+                queued.append(c)
+        finally:
+            for c in queued:
+                c.close()
+    raise AssertionError("the standard's backlog never filled")
 
 
 def listener_at(path: bytes) -> socket.socket:
