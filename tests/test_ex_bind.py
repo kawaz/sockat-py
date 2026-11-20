@@ -571,8 +571,10 @@ def test_a_missing_directory_tells_no_route(tmp: TmpDirs) -> None:
 # skipped, through the public API from the environment with no place for
 # symlink-file (which carries any file name where the bind follows the link,
 # as on macOS): the standard, symlink-file where a bind tries it, the routes
-# through D this system has (the spelling too long), the fork route; no
-# route got as far as a bind.
+# through D this system has (the spelling too long), the fork route, and the
+# last resort symlink-dir (no place's spelling fits in the sockaddr): the
+# SPEC's skipped of a failed _ex holds every route of the order tried that
+# could not be used, the last resort included. No route got as far as a bind.
 def test_a_file_name_no_route_carries_tells_every_route_skipped(tmp: TmpDirs, env_cfg: list[Config]) -> None:
     p = with_name(far(tmp), b"n" * 100)
     from_env = Config.from_tmpdir(os.environb.get(b"TMPDIR"), os.environb.get(b"XDG_RUNTIME_DIR"))
@@ -589,7 +591,7 @@ def test_a_file_name_no_route_carries_tells_every_route_skipped(tmp: TmpDirs, en
         want.append("thread-cwd")
     if IS_LINUX:
         want.append("proc")
-    assert names(getattr(e, "skipped")) == [*want, "fork-cwd"]  # noqa: B009
+    assert names(getattr(e, "skipped")) == [*want, "fork-cwd", "symlink-dir"]  # noqa: B009
     assert not os.path.lexists(p)
 
 
@@ -616,7 +618,8 @@ def test_a_failure_through_the_symlink_is_not_retried(tmp: TmpDirs, env_cfg: lis
 
 
 # With no place that carries it either, ENAMETOOLONG: no route, every route
-# skipped, nothing made.
+# skipped, symlink-dir itself included (the SPEC's skipped of a failed _ex
+# holds every route of the order tried that could not be used), nothing made.
 @forces_the_symlink_route
 def test_no_place_for_the_symlink_is_enametoolong(tmp: TmpDirs, env_cfg: list[Config]) -> None:
     p = far(tmp)
@@ -624,7 +627,9 @@ def test_no_place_for_the_symlink_is_enametoolong(tmp: TmpDirs, env_cfg: list[Co
     e = raised(p)
     assert e.errno == errno.ENAMETOOLONG
     assert getattr(e, "route") is None  # noqa: B009
-    assert names(getattr(e, "skipped")) == skipped_before_the_symlink()  # noqa: B009
+    skipped = getattr(e, "skipped")  # noqa: B009
+    assert names(skipped) == [*skipped_before_the_symlink(), "symlink-dir"]
+    assert skipped[-1].reason == _route.NO_PLACE_FOR_LINK
     assert listing(parent(p)) == []
 
 

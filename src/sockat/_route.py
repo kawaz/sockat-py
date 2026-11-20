@@ -485,7 +485,7 @@ def bind_past_d(
         if done_any is not None:
             sock, losses = done_any
             return Reached(sock, Route.SYMLINK_DIR, losses, tuple(trail.skipped))
-        trail.trying = None
+        trail.skip(Route.SYMLINK_DIR, NO_PLACE_FOR_LINK)
     raise _enametoolong()
 
 
