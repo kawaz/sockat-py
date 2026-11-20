@@ -541,6 +541,11 @@ def bind_long(call: Call, t: Target, env: Env, bases: Bases, trail: Trail) -> Bi
         except _Unusable as u:
             trail.skip(LINK_DIR, u.why)
             continue
+        except OSError:
+            # Options.base's B, checked, could not be made: its error, with
+            # no route and the routes skipped before this one (SPEC-routes).
+            trail.forget(LINK_DIR)
+            raise
         return _bind_through(call, through, trail)
     if env.config.link_file is not LinkFile.NOT_TRIED:
         done = bind_link_file(call, t, env, bases, trail)
@@ -573,6 +578,9 @@ def bind_link_file(call: Call, t: Target, env: Env, bases: Bases, trail: Trail) 
     except _Unusable as u:
         trail.skip(LINK_FILE, u.why)
         return None
+    except OSError:
+        trail.forget(LINK_FILE)
+        raise
     trail.attempt(LINK_FILE)
     try:
         sock = call.plain(through.spelling)
@@ -667,11 +675,38 @@ class ConnectCall:
     target: Target
     env: Env
     bases: Bases
-    dirfd: int | None
+    trail: Trail
     proc_ok: bool
     wide: bool
+    route: str = ""
+    """The route being tried."""
     relative_made: bool = False
     relative_spelling: Relative | None = None
+    _dirfd: int | None = None
+    _dir_opened: bool = False
+
+    @property
+    def dirfd(self) -> int | None:
+        """The socket's directory, opened when a route that needs its fd
+        first asks (SPEC-routes: only those routes open it); ``None`` when it
+        cannot be opened."""
+        if not self._dir_opened:
+            self._dir_opened = True
+            try:
+                self._dirfd = open_dir(self.target.directory)
+            except OSError:
+                self._dirfd = None
+        return self._dirfd
+
+    def close(self) -> None:
+        if self._dirfd is not None:
+            os.close(self._dirfd)
+            self._dirfd = None
+
+    def attempt(self) -> None:
+        """Note the route as the one whose connect runs now (its failure is
+        then the call's, with this route)."""
+        self.trail.attempt(self.route)
 
     def relative(self) -> Relative | None:
         if not self.relative_made:
@@ -687,23 +722,18 @@ def connect_long(
     tests give to force a route), the first route that can be used; its
     connect's failure is the outcome. Past the last: ``ENAMETOOLONG``."""
     trail.skip(STANDARD, "path too long")
+    proc_ok = IS_LINUX and proc_usable(env)
+    cc = ConnectCall(call, t, env, bases, trail, proc_ok, IS_APPLE and env.config.wide)
     try:
-        dirfd: int | None = open_dir(t.directory)
-    except OSError:
-        dirfd = None
-    try:
-        proc_ok = IS_LINUX and proc_usable(env, dirfd)
-        cc = ConnectCall(call, t, env, bases, dirfd, proc_ok, IS_APPLE and env.config.wide)
         for route in order if order is not None else connect_order(env, proc_ok):
-            trail.attempt(route)
+            cc.route = route
             outcome = CONNECT_ROUTES[route](cc)
             if isinstance(outcome, socket.socket):
                 return outcome, route
             trail.skip(route, outcome)
         raise enametoolong()
     finally:
-        if dirfd is not None:
-            os.close(dirfd)
+        cc.close()
 
 
 def connect_proc_direct(cc: ConnectCall) -> socket.socket | str:
@@ -717,6 +747,7 @@ def connect_proc_direct(cc: ConnectCall) -> socket.socket | str:
     via = b"%s/self/fd/%d/%s" % (proc, cc.dirfd, cc.target.name)
     if len(via) > DIRECT_MAX:
         return TOO_LONG
+    cc.attempt()
     return cc.call.plain(via)
 
 
@@ -725,6 +756,7 @@ def connect_relative(cc: ConnectCall) -> socket.socket | str:
     rel = cc.relative()
     if rel is None or len(rel.path) > DIRECT_MAX:
         return "no relative spelling fits"
+    cc.attempt()
     return rel.run(lambda p: cc.call.plain(p), cc.call.sock)
 
 
@@ -735,9 +767,11 @@ def connect_widened(cc: ConnectCall) -> socket.socket | str:
         return "widened sockaddr unusable"
     try:
         if len(cc.target.path) <= WIDE_PATH_MAX:
+            cc.attempt()
             return cc.call.wide(cc.target.path)
         rel = cc.relative()
         if rel is not None and len(rel.path) <= WIDE_PATH_MAX:
+            cc.attempt()
             return rel.run(lambda p: cc.call.wide(p), cc.call.sock)
     except OSError as e:
         if not refuses_wide(e):
@@ -761,6 +795,7 @@ def connect_at_direct(cc: ConnectCall) -> socket.socket | str:
         return SOCKET_DIR_NOT_OPENED
     if len(cc.target.name) > DIRECT_MAX:
         return TOO_LONG
+    cc.attempt()
     return cc.call.at(cc.dirfd, cc.target.name)
 
 
@@ -774,9 +809,11 @@ def connect_thread_cwd_direct(cc: ConnectCall) -> socket.socket | str:
         return SOCKET_DIR_NOT_OPENED
     if len(cc.target.name) > DIRECT_MAX:
         return TOO_LONG
+    cc.attempt()
     try:
         return thread_cwd_op(cc.call, cc.dirfd, cc.target.name)
     except ThreadRefused:
+        cc.trail.trying = None
         return THREAD_CWD_REFUSED
 
 
@@ -801,6 +838,7 @@ def connect_link_file(cc: ConnectCall) -> socket.socket | str:
     e = b.random_link(target)
     if e is None:
         return NO_E
+    cc.attempt()
     try:
         return cc.call.plain(_join(b.real, e))
     finally:

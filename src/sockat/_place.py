@@ -76,7 +76,16 @@ def default_places(uid: int, xdg_runtime_dir: bytes | None, tmpdir: bytes | None
         places.append(Place(Kind.RUNTIME, xdg_runtime_dir, b"sockat"))
     if tmpdir and tmpdir.startswith(b"/"):
         places.append(Place(Kind.TMPDIR, tmpdir, own))
-    return tuple(places)
+    # A place whose real path is that of an earlier one ($TMPDIR=/tmp) is the
+    # same place: tried once.
+    out: list[Place] = []
+    seen: set[tuple[bytes, bytes]] = set()
+    for place in places:
+        key = (os.fsencode(os.path.realpath(place.path)), place.name)
+        if key not in seen:
+            seen.add(key)
+            out.append(place)
+    return tuple(out)
 
 
 BIND_FOLLOWS = IS_APPLE or sys.platform.startswith("netbsd")
@@ -115,7 +124,9 @@ class Config:
 
     places: tuple[Place, ...]
     """The places for B, in the order tried (:func:`default_places`)."""
-    uid: int = field(default_factory=os.getuid)
+    uid: int = field(default_factory=os.geteuid)
+    """The effective uid: the owner of what the process makes, and the
+    ``<uid>`` of ``sockat-<uid>``."""
     proc: bytes | None = b"/proc" if IS_LINUX else None
     """Where /proc is (Linux), ``None`` where there is none. The tests point
     it at a path that does not exist to stand in for a system without
@@ -129,7 +140,7 @@ class Config:
 
     @classmethod
     def from_env(cls) -> Config:
-        uid = os.getuid()
+        uid = os.geteuid()
         return cls(places=default_places(uid, os.environb.get(b"XDG_RUNTIME_DIR"), os.environb.get(b"TMPDIR")), uid=uid)
 
 
@@ -198,18 +209,18 @@ def _prefixes(real: bytes) -> list[bytes]:
 
 def safe_ancestors(real_parent: bytes, uid: int) -> bool:
     """Whether every directory from the root to ``real_parent`` (a real
-    path) is owned by root or ``uid`` and writable by nobody else, or is
-    sticky (SPEC-routes: OpenSSH's StrictModes; an ancestor others can write
-    to lets them swap the parent)."""
+    path) is owned by root or ``uid``, and either writable by nobody else
+    (group included) or sticky (SPEC-routes: OpenSSH's StrictModes; an
+    ancestor others can write to lets them swap the parent, and the owner of
+    a sticky one can still swap what is in it)."""
     for p in _prefixes(real_parent):
         try:
             st = os.lstat(p)
         except OSError:
             return False
-        if not stat.S_ISDIR(st.st_mode):
+        if not stat.S_ISDIR(st.st_mode) or st.st_uid not in (0, uid):
             return False
-        owned = st.st_uid in (0, uid) and not st.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
-        if not owned and not st.st_mode & stat.S_ISVTX:
+        if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH) and not st.st_mode & stat.S_ISVTX:
             return False
     return True
 
@@ -348,7 +359,6 @@ class Base:
         ``/var/tmp``."""
         self.closed = False
         self._d: Dir | None = None
-        self._d_tried = False
         self._lock = threading.Lock()
 
     def proc(self, proc: bytes, pid: int) -> bytes:
@@ -367,11 +377,11 @@ class Base:
         return (via.st_dev, via.st_ino) == (st.st_dev, st.st_ino)
 
     def dir(self, uid: int) -> Dir | None:
-        """D of this process in B, made on the first call; ``None`` when it
-        cannot be made (not tried again)."""
+        """D of this process in B, made on the first call that can; ``None``
+        when it cannot be made now (that call goes without the routes using
+        D, and a later call tries again)."""
         with self._lock:
-            if not self._d_tried and not self.closed:
-                self._d_tried = True
+            if self._d is None and not self.closed:
                 self._d = make_dir(self, uid)
             return self._d
 
@@ -401,11 +411,52 @@ class Base:
             os.close(self.fd)
 
 
+class _Taken(Enum):
+    TAKEN = "taken"
+
+
+def make_own_dir(pfd: int, name: bytes, uid: int) -> int | _Taken | OSError:
+    """Make the directory ``name`` in ``pfd`` for B or D (SPEC-routes "B の作り
+    方" 3-4, "D の作り方" 1-2): ``mkdirat`` 0700, ``fchmodat`` 0711 by the
+    name (giving back what the umask took), then open it ``O_DIRECTORY |
+    O_NOFOLLOW`` and check it is a real directory of ours. The fd, or
+    :attr:`_Taken.TAKEN` when the name is taken, or the error; on an error
+    after the ``mkdirat`` the empty directory just made is removed."""
+    try:
+        os.mkdir(name, 0o700, dir_fd=pfd)
+    except FileExistsError:
+        return _Taken.TAKEN
+    except OSError as e:
+        return e
+    try:
+        # Design rationale: chmod by the name, following a symlink (Linux's
+        # fchmodat takes no AT_SYMLINK_NOFOLLOW). Once mkdirat succeeded the
+        # name cannot be removed or swapped by others (the parent is checked,
+        # and even a sticky /tmp keeps others from it), so the fstat of what
+        # is opened below (a real directory of ours) is check enough.
+        os.chmod(name, 0o711, dir_fd=pfd)
+        fd = _open_own(name, pfd)
+    except OSError as e:
+        with contextlib.suppress(OSError):
+            os.rmdir(name, dir_fd=pfd)
+        return e
+    try:
+        st = os.fstat(fd)
+    except OSError as e:
+        os.close(fd)
+        return e
+    if not stat.S_ISDIR(st.st_mode) or st.st_uid != uid:
+        os.close(fd)
+        with contextlib.suppress(OSError):
+            os.rmdir(name, dir_fd=pfd)
+        return OSError(errno.EPERM, os.strerror(errno.EPERM), os.fsdecode(name))
+    return fd
+
+
 def make_dir(base: Base, uid: int) -> Dir | None:
-    """Make D in ``base`` (SPEC-routes "D の作り方"): ``mkdirat`` a random
-    name (another one on ``EEXIST``, :data:`ATTEMPTS` at most), open it
-    ``O_DIRECTORY | O_NOFOLLOW``, check it is a real directory of ours, mode
-    0711, and hold a shared ``flock`` on the fd.
+    """Make D in ``base`` (SPEC-routes "D の作り方"): a random name
+    (another one on ``EEXIST``, :data:`ATTEMPTS` at most) made by
+    :func:`make_own_dir`, then a shared ``flock`` held on its fd.
 
     Once locked, the name is looked up again and must still be the directory
     held: a ``sweep`` of another process may have taken the lock and removed
@@ -413,28 +464,15 @@ def make_dir(base: Base, uid: int) -> Dir | None:
     lock yet), and then another name is drawn."""
     for _ in range(ATTEMPTS):
         name = random_name()
-        try:
-            os.mkdir(name, 0o700, dir_fd=base.fd)
-        except FileExistsError:
+        fd = make_own_dir(base.fd, name, uid)
+        if fd is _Taken.TAKEN:
             continue
-        except OSError:
-            return None
-        try:
-            fd = _open_own(name, base.fd)
-        except FileNotFoundError:
-            continue
-        except OSError:
-            # The umask took the owner's r or x off: remove the empty
-            # directory just made.
-            with contextlib.suppress(OSError):
-                os.rmdir(name, dir_fd=base.fd)
+        if isinstance(fd, OSError):
+            if isinstance(fd, FileNotFoundError):
+                continue
             return None
         try:
             st = os.fstat(fd)
-            if not stat.S_ISDIR(st.st_mode) or st.st_uid != uid:
-                os.close(fd)
-                return None
-            os.fchmod(fd, 0o711)
             fcntl.flock(fd, fcntl.LOCK_SH)
             now = os.stat(name, dir_fd=base.fd, follow_symlinks=False)
         except FileNotFoundError:
@@ -541,12 +579,19 @@ def make_base(
 
 
 def _make_in(
-    kind: Kind, place: bytes, real_parent: bytes, pfd: int, name: bytes | None, uid: int, *, strict: bool
+    kind: Kind,
+    place: bytes,
+    real_parent: bytes,
+    pfd: int,
+    name: bytes | None,
+    uid: int,
+    *,
+    strict: bool,
 ) -> Base | None:
     """B ``name`` (made, or the one there when it passes the checks) in the
     parent held by ``pfd``; where the one there fails them, or ``name`` is
-    ``None``, a fresh random name (``<name>.XXXXXXXXXX`` or
-    ``.sockat.XXXXXXXXXX``)."""
+    ``None``, a fresh random name (``sockat-<uid>.XXXXXXXXXX`` in a place,
+    ``.sockat.XXXXXXXXXX`` in the socket's directory)."""
     if name is not None:
         made = _mkdir_new(kind, place, real_parent, pfd, name, uid, strict=strict)
         if made is not _Taken.TAKEN:
@@ -556,7 +601,7 @@ def _make_in(
             return got
         if strict:
             raise _base_error(got, _path_join(real_parent, name))
-        prefix = name + b"."
+        prefix = b"sockat-%d." % uid
     else:
         prefix = b".sockat."
     for _ in range(ATTEMPTS):
@@ -566,44 +611,18 @@ def _make_in(
     return None
 
 
-class _Taken(Enum):
-    TAKEN = "taken"
-
-
 def _mkdir_new(
     kind: Kind, place: bytes, real_parent: bytes, pfd: int, name: bytes, uid: int, *, strict: bool
 ) -> Base | _Taken | None:
-    """B made fresh at ``name`` (``mkdirat`` 0700, opened ``O_NOFOLLOW``,
-    checked to be a real directory of ours, then 0711); :attr:`_Taken.TAKEN`
-    when the name is taken; ``None`` on any other failure (raised when
-    ``strict``)."""
-    try:
-        os.mkdir(name, 0o700, dir_fd=pfd)
-    except FileExistsError:
-        return _Taken.TAKEN
-    except OSError:
+    """B made fresh at ``name`` (:func:`make_own_dir`);
+    :attr:`_Taken.TAKEN` when the name is taken; ``None`` on any other
+    failure (raised when ``strict``)."""
+    fd = make_own_dir(pfd, name, uid)
+    if fd is _Taken.TAKEN:
+        return fd
+    if isinstance(fd, OSError):
         if strict:
-            raise
-        return None
-    try:
-        fd = _open_own(name, pfd)
-    except OSError:
-        # The umask took the owner's r or x off: remove the empty directory
-        # just made, and go on to the next place (Options.base: the error).
-        with contextlib.suppress(OSError):
-            os.rmdir(name, dir_fd=pfd)
-        if strict:
-            raise
-        return None
-    try:
-        st = os.fstat(fd)
-        if not stat.S_ISDIR(st.st_mode) or st.st_uid != uid:
-            raise _base_error(BaseError.REFUSED, _path_join(real_parent, name))
-        os.fchmod(fd, 0o711)
-    except OSError:
-        os.close(fd)
-        if strict:
-            raise
+            raise fd
         return None
     return Base(kind, _path_join(real_parent, name), fd, place)
 
@@ -652,12 +671,17 @@ class State:
         self.lock = threading.RLock()
         self.auto: Base | None = None
         self.cross: Base | None = None
+        self.places: dict[tuple[bytes, bytes], Base] = {}
+        """B held per place (its real path and B's name there)."""
         self.others: dict[tuple[Kind, bytes], Base] = {}
         self.checked: set[bytes] = set()
 
     def bases(self) -> list[Base]:
-        out = [b for b in (self.auto, self.cross) if b is not None]
-        return out + [b for b in self.others.values() if b not in out]
+        out: list[Base] = []
+        for b in (self.auto, self.cross, *self.places.values(), *self.others.values()):
+            if b is not None and b not in out:
+                out.append(b)
+        return out
 
     def abandon(self) -> None:
         """Close every fd held (a child after a fork: its B and D are the
@@ -666,6 +690,7 @@ class State:
             b.close()
         self.auto = None
         self.cross = None
+        self.places = {}
         self.others = {}
 
 
@@ -698,15 +723,30 @@ class Env:
     def current(cls) -> Env:
         return cls(Config.from_env(), state())
 
+    def _at_place(self, place: Place, *, cross_uid: bool) -> Base | None:
+        """B at ``place``: the one this process holds there already (one B,
+        and one D, per place whatever asks for it), or one made now."""
+        st = self.state
+        key = _place_key(place)
+        if key is not None:
+            held = st.places.get(key)
+            if held is not None and not held.closed:
+                return held if (held.cross_uid or not cross_uid) else None
+        b = make_base(place.kind, place.path, place.name, self.config.uid, checked=st.checked, cross_uid=cross_uid)
+        if b is not None and key is not None:
+            st.places[key] = b
+        return b
+
     def auto_base(self) -> Base | None:
-        """The process's B: the first place where it can be made (kept for
-        the life of the process), or ``None``."""
+        """The process's B: the first place where it can be had, kept for the
+        life of the process once had (a place where it could not be made is
+        tried again by a later call), or ``None``."""
         st = self.state
         with st.lock:
             if st.auto is None or st.auto.closed:
                 st.auto = None
                 for place in self.config.places:
-                    b = make_base(place.kind, place.path, place.name, self.config.uid, checked=st.checked)
+                    b = self._at_place(place, cross_uid=False)
                     if b is not None:
                         st.auto = b
                         break
@@ -714,20 +754,14 @@ class Env:
 
     def cross_base(self) -> Base | None:
         """B another uid can follow a spelling through: the first place that
-        lets others search their way to it, the process's B when that one
-        does."""
+        lets others search their way to it and to B (judged when B was
+        made); the process's B itself when that one does."""
         st = self.state
         with st.lock:
             if st.cross is None or st.cross.closed:
                 st.cross = None
-                auto = st.auto
                 for place in self.config.places:
-                    if auto is not None and auto.kind is place.kind and auto.cross_uid:
-                        st.cross = auto
-                        break
-                    b = make_base(
-                        place.kind, place.path, place.name, self.config.uid, checked=st.checked, cross_uid=True
-                    )
+                    b = self._at_place(place, cross_uid=True)
                     if b is not None:
                         st.cross = b
                         break
@@ -768,27 +802,46 @@ class Env:
             return b
 
     def real_len_guess(self, *, cross_uid: bool, given: bytes | None) -> int | None:
-        """The length of the real path of the B a spelling would go through,
-        known (B made already, or ``Options.base``) or guessed as the
-        shortest the places allow (``None`` when no place resolves), so that
-        B is not made for a spelling that cannot fit."""
+        """The length of the real path of the B a spelling would go through
+        (SPEC-routes: B is not made, and no other place tried, for a spelling
+        known not to fit): the B held already, ``Options.base``'s, or else
+        that of the first place it would be made in (its real path there,
+        its ancestors safe; for ``cross_uid`` searchable by others).
+        ``None`` when no place could hold B."""
         if given is not None:
             parent, name = _path.split(given)
             try:
                 return len(_path_join(os.fsencode(os.path.realpath(parent, strict=True)), name))
             except OSError:
                 return None
-        made = self.state.cross if cross_uid else self.state.auto
-        if made is not None and not made.closed:
-            return len(made.real)
-        lengths = []
+        held = self.state.cross if cross_uid else self.state.auto
+        if held is not None and not held.closed:
+            return len(held.real)
         for place in self.config.places:
-            try:
-                real = os.fsencode(os.path.realpath(place.path, strict=True))
-            except OSError:
+            key = _place_key(place)
+            if key is None:
                 continue
-            lengths.append(len(_path_join(real, place.name)))
-        return min(lengths) if lengths else None
+            made = self.state.places.get(key)
+            if made is not None and not made.closed:
+                if made.cross_uid or not cross_uid:
+                    return len(made.real)
+                continue
+            real_parent = key[0]
+            if not safe_ancestors(real_parent, self.config.uid):
+                continue
+            if cross_uid and not searchable_by_others(real_parent):
+                continue
+            return len(_path_join(real_parent, place.name))
+        return None
+
+
+def _place_key(place: Place) -> tuple[bytes, bytes] | None:
+    """A place by its real path and B's name there (``None`` when it does
+    not resolve)."""
+    try:
+        return os.fsencode(os.path.realpath(place.path, strict=True)), place.name
+    except OSError:
+        return None
 
 
 def check_given(path: bytes, uid: int, checked: set[bytes], *, cross_uid: bool) -> None:

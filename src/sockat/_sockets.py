@@ -3,10 +3,12 @@ whose standard type lets the address be reported differently reports the
 path given; docs/decisions/DR-0003).
 
 For a path longer than ``sun_path``, the kernel reports the spelling the bind
-went through (``R/<name>``, ``/proc/self/fd/<fd>/R/<name>``: through a
-symlink R gone by then), not the path. Code that reads the address back
-(asyncio's ``start_unix_server`` removes the socket file it names when the
-server closes; ``repr``, logging) then works on the wrong file or fails.
+went through (through B, D and E: ``/proc/<pid>/fd/<fd>/D/E/<name>``,
+``<B>/D/E/<name>``, ``<B>/D/E``, or ``E/<name>`` with E removed already),
+not the path. Code that reads the address back (asyncio's
+``start_unix_server`` removes the socket file it names when the server
+closes; ``repr``, logging) then works on another file than the path's, or
+fails.
 :class:`PathSocket` is a :class:`socket.socket` that reports the path given
 instead.
 """
@@ -35,9 +37,9 @@ class PathSocket(socket.socket):
     _sockat_peer: str | None = None
     """What :meth:`getpeername` reports, or ``None`` for the kernel's."""
 
-    def report_path(self, path: str, *, listening: bool) -> None:
+    def report_path(self, path: str | None, *, listening: bool) -> None:
         """Report ``path`` as this listener's own address (``listening``) or
-        as this stream's peer's."""
+        as this socket's peer's (``None``: the kernel's again)."""
         if listening:
             self._sockat_name = path
         else:

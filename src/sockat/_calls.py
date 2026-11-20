@@ -120,7 +120,12 @@ def connect(
     spelled, raw, abstract = _read(path)
     if abstract or len(raw) <= DIRECT_MAX:
         trail.attempt(STANDARD)
-        return call.plain(spelled, standard=True), STANDARD
+        sock = call.plain(spelled, standard=True)
+        if isinstance(sock, PathSocket):
+            # The caller's datagram socket, connected again to a short path:
+            # its peer is the kernel's again.
+            sock.report_path(None, listening=False)
+        return sock, STANDARD
     env = env if env is not None else Env.current()
     # A connect's spelling stays nowhere: usable_cross_uid is not looked at.
     bases = _long(raw, env, opts, cross_uid=False)
@@ -199,6 +204,9 @@ def _resolve(spelled: str | bytes, makers: list[tuple[str, Maker]], env: Env, ba
         except _Unusable as u:
             trail.skip(name, u.why)
             continue
+        except OSError:
+            trail.forget(name)
+            raise
         trail.attempt(name)
         return Resolved(
             _as_given(spelled, through.spelling),

@@ -104,6 +104,12 @@ class Trail:
         self.trying = name
         self.skipped = [s for s in self.skipped if s.name != name]
 
+    def forget(self, name: str) -> None:
+        """Take the route ``name`` off the trail: it was neither found
+        unusable nor tried (the call fails before it got that far)."""
+        self.trying = None
+        self.skipped = [s for s in self.skipped if s.name != name]
+
     def tell(self, e: BaseException) -> None:
         """Add ``skipped`` and ``route`` to the error ``e``.
 
