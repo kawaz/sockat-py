@@ -48,7 +48,7 @@ def test_bound(tmp: TmpDirs) -> None:
     sock, file, spelling, route, base, skipped = bound
     with sock:
         assert route == "link-dir"
-        assert base in ("proc", "base")
+        assert base == "given"
         assert isinstance(spelling, sockat.ex.Linked)
         assert [s.name for s in skipped] == ["standard"]
         assert all(isinstance(s, sockat.ex.Skipped) for s in skipped)
@@ -260,3 +260,69 @@ def test_resolve_for_connect(tmp: TmpDirs) -> None:
 # processes, this one included, stay).
 def test_sweep_runs() -> None:
     sockat.ex.sweep()
+
+
+# ForBind has no remove(): after binding the spelling oneself, socket_file()
+# follows it and remembers the socket file; its remove() removes that file
+# (and E), and leaves a replacement alone, as Bound.file's does. Before the
+# bind there is nothing to follow.
+def test_for_bind_socket_file(tmp: TmpDirs) -> None:
+    o = options(tmp)
+    p = long_path(tmp.new())
+    r = sockat.ex.resolve_for_bind(p, o)
+    assert not hasattr(r, "remove")
+    with pytest.raises(FileNotFoundError):
+        r.socket_file()
+    with socket.socket(socket.AF_UNIX) as s:
+        s.bind(r.path)
+        s.listen()
+        f = r.socket_file()
+        assert is_socket(p)
+        f.remove()
+        assert not os.path.lexists(p)
+        assert e_in(o) == []
+    # A file put in its place while the listener is open is not removed.
+    r = sockat.ex.resolve_for_bind(p, o)
+    with socket.socket(socket.AF_UNIX) as s:
+        s.bind(r.path)
+        f = r.socket_file()
+        os.unlink(p)
+        with open(p, "wb") as fh:
+            fh.write(b"replacement")
+        f.remove()
+        with open(p, "rb") as fh:
+            assert fh.read() == b"replacement"
+
+
+# A relative spelling (a short relative path) whose cwd changed between the
+# resolve and socket_file() is refused (no errno): it would remember a file
+# under another cwd.
+def test_for_bind_socket_file_relative_cwd_changed(tmp: TmpDirs) -> None:
+    a, other = tmp.new(), tmp.new()
+    out = run_child(
+        """
+        import sockat.ex
+        r = sockat.ex.resolve_for_bind("s.sock")
+        s = socket.socket(socket.AF_UNIX)
+        s.bind(r.path)
+        os.chdir(ARGS["other"])
+        try:
+            r.socket_file()
+            report(error="none")
+        except OSError as e:
+            report(error=type(e).__name__, errno=e.errno)
+        """,
+        cwd=a,
+        args={"other": os.fsdecode(other)},
+    )
+    assert out == {**out, "error": "CwdChanged", "errno": None}
+
+
+# ForConnect carries no diagnostic base (a connect's B is not the caller's
+# concern), only route and skipped.
+def test_for_connect_has_no_base(tmp: TmpDirs) -> None:
+    p = long_path(tmp.new())
+    with listener_at(p):
+        r = sockat.ex.resolve_for_connect(p, options(tmp))
+        assert not hasattr(r, "base")
+        r.cleanup()

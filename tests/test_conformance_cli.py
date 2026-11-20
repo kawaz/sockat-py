@@ -73,7 +73,7 @@ def test_a_long_bind(tmp: TmpDirs) -> None:
     assert out["ok"] is True
     assert out["error"] is None
     assert out["route"] == "link-dir"
-    assert out["base"] in ("proc", "base")
+    assert out["base"] == "given"
     assert out["spelling"]["kind"] == "Linked"
     assert set(out["spelling"]) == {"kind", "removable", "until", "usable_cross_uid", "usable_with_private_tmp"}
     assert out["skipped"] == ["standard"]

@@ -75,6 +75,22 @@ class SocketFile:
             self._link.cleanup()
 
 
+def remember_spelling(spelling: bytes, cwd: tuple[int, int] | None, link: Link | None) -> SocketFile:
+    """The :class:`SocketFile` of what a spelling the caller bound names now
+    (SPEC "ForBind の SocketFile"): the spelling is followed to the socket
+    file's realpath and ``(st_dev, st_ino)``. It must be there (bound
+    already): otherwise the error. A relative spelling (``cwd`` given, the
+    cwd's when it was resolved) is refused when the cwd has changed
+    since."""
+    if IS_LINUX and spelling.startswith(b"\0"):
+        return SocketFile(None, link)
+    if cwd is not None and cwd_id() != cwd:
+        raise CwdChanged("the current directory changed since the path relative to it was resolved")
+    real = os.fsencode(os.path.realpath(spelling, strict=True))
+    st = os.lstat(real)
+    return SocketFile((real, (st.st_dev, st.st_ino)), link)
+
+
 def _remove_if_same(real: bytes, made: tuple[int, int]) -> None:
     try:
         now = os.lstat(real)
@@ -95,7 +111,7 @@ class Recorder:
         self.path = path
         self.abstract = IS_LINUX and path.startswith(b"\0")
         self.relative = not path.startswith(b"/") and not self.abstract
-        self.cwd = _cwd_id() if self.relative else None
+        self.cwd = cwd_id() if self.relative else None
         """``(st_dev, st_ino)`` of the cwd before anything is looked up, for
         a relative path."""
         self.file: tuple[bytes, tuple[int, int]] | None = None
@@ -121,7 +137,7 @@ class Recorder:
         # cwd and the file remembered under another, and remove() could then
         # remove an unrelated file of the same name. A change undone before
         # this point is not seen.
-        if self.relative and (self.cwd is None or _cwd_id() != self.cwd):
+        if self.relative and (self.cwd is None or cwd_id() != self.cwd):
             raise CwdChanged(
                 "the current directory changed while binding a path relative to it; the socket was closed"
             ) from failure
@@ -130,7 +146,7 @@ class Recorder:
         self.file = (real, (st.st_dev, st.st_ino))
 
 
-def _cwd_id() -> tuple[int, int] | None:
+def cwd_id() -> tuple[int, int] | None:
     try:
         st = os.stat(".")
     except OSError:

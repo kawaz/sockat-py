@@ -52,7 +52,7 @@ class Kind(Enum):
     RUNTIME = "runtime"
     TMPDIR = "tmpdir"
     SOCKDIR = "sockdir"
-    BASE = "base"
+    BASE = "given"
 
 
 @dataclass(frozen=True)
@@ -233,15 +233,23 @@ _SHARED_TMP = (b"/tmp", b"/var/tmp")
 hides from the other side."""
 
 
-def avoids_shared_tmp(spelling: bytes) -> bool:
-    """Whether ``spelling`` does not go through ``/tmp`` or ``/var/tmp``
-    (``usable_with_private_tmp``)."""
-    comps = _path.components(spelling)
-    for shared in _SHARED_TMP:
-        s = _path.components(shared)
-        if comps[: len(s)] == s:
-            return False
-    return True
+def _shared_tmp_spellings() -> list[list[bytes]]:
+    """``/tmp`` and ``/var/tmp`` as components, and their realpaths
+    (``/private/tmp`` on macOS)."""
+    out = [_path.components(t) for t in _SHARED_TMP]
+    for t in _SHARED_TMP:
+        with contextlib.suppress(OSError):
+            real = _path.components(os.fsencode(os.path.realpath(t, strict=True)))
+            if real not in out:
+                out.append(real)
+    return out
+
+
+def goes_through_shared_tmp(path: bytes) -> bool:
+    """Whether ``path`` goes through ``/tmp`` or ``/var/tmp``: it is one of
+    them or below one, component by component, or below their realpath."""
+    comps = _path.components(path)
+    return any(comps[: len(t)] == t for t in _shared_tmp_spellings())
 
 
 def _is_ours(st: os.stat_result, uid: int) -> bool:
@@ -325,13 +333,19 @@ def _base36(n: int) -> bytes:
 class Base:
     """B: a real directory sockat keeps in a place, held by an fd."""
 
-    def __init__(self, kind: Kind, real: bytes, fd: int) -> None:
+    def __init__(self, kind: Kind, real: bytes, fd: int, place: bytes) -> None:
         self.kind = kind
         self.real = real
         """B's real path (the real-path spelling's start)."""
         self.fd = fd
         self.cross_uid = searchable_by_others(real)
-        """Whether another uid can follow a spelling through B's real path."""
+        """Whether another uid can follow a spelling through B's real path
+        (every directory on the way and B itself let others search them)."""
+        self.private_tmp_ok = not goes_through_shared_tmp(place) and not goes_through_shared_tmp(real)
+        """Whether a spelling through B's real path can be followed with a
+        private ``/tmp`` on either side: neither the place as given (before
+        its realpath) nor B's real path goes through ``/tmp`` /
+        ``/var/tmp``."""
         self.closed = False
         self._d: Dir | None = None
         self._d_tried = False
@@ -340,6 +354,17 @@ class Base:
     def proc(self, proc: bytes, pid: int) -> bytes:
         """procB: ``<proc>/<pid>/fd/<B's fd>``."""
         return b"%s/%d/fd/%d" % (proc, pid, self.fd)
+
+    def proc_usable(self, proc: bytes, pid: int) -> bool:
+        """Whether procB names B: ``stat`` of it gives the ``(st_dev,
+        st_ino)`` of B's fd (a /proc of another PID namespace or mount does
+        not)."""
+        try:
+            via = os.stat(self.proc(proc, pid))
+            st = os.fstat(self.fd)
+        except OSError:
+            return False
+        return (via.st_dev, via.st_ino) == (st.st_dev, st.st_ino)
 
     def dir(self, uid: int) -> Dir | None:
         """D of this process in B, made on the first call; ``None`` when it
@@ -399,6 +424,10 @@ def make_dir(base: Base, uid: int) -> Dir | None:
         except FileNotFoundError:
             continue
         except OSError:
+            # The umask took the owner's r or x off: remove the empty
+            # directory just made.
+            with contextlib.suppress(OSError):
+                os.rmdir(name, dir_fd=base.fd)
             return None
         try:
             st = os.fstat(fd)
@@ -499,7 +528,7 @@ def make_base(
             raise
         return None
     try:
-        made = _make_in(kind, real_parent, pfd, name, uid, strict=strict)
+        made = _make_in(kind, parent, real_parent, pfd, name, uid, strict=strict)
     finally:
         os.close(pfd)
     if made is not None and cross_uid and not made.cross_uid:
@@ -511,16 +540,18 @@ def make_base(
     return made
 
 
-def _make_in(kind: Kind, real_parent: bytes, pfd: int, name: bytes | None, uid: int, *, strict: bool) -> Base | None:
+def _make_in(
+    kind: Kind, place: bytes, real_parent: bytes, pfd: int, name: bytes | None, uid: int, *, strict: bool
+) -> Base | None:
     """B ``name`` (made, or the one there when it passes the checks) in the
     parent held by ``pfd``; where the one there fails them, or ``name`` is
     ``None``, a fresh random name (``<name>.XXXXXXXXXX`` or
     ``.sockat.XXXXXXXXXX``)."""
     if name is not None:
-        made = _mkdir_new(kind, real_parent, pfd, name, uid, strict=strict)
+        made = _mkdir_new(kind, place, real_parent, pfd, name, uid, strict=strict)
         if made is not _Taken.TAKEN:
             return made
-        got = _take_existing(kind, real_parent, pfd, name, uid)
+        got = _take_existing(kind, place, real_parent, pfd, name, uid)
         if isinstance(got, Base):
             return got
         if strict:
@@ -529,7 +560,7 @@ def _make_in(kind: Kind, real_parent: bytes, pfd: int, name: bytes | None, uid: 
     else:
         prefix = b".sockat."
     for _ in range(ATTEMPTS):
-        made = _mkdir_new(kind, real_parent, pfd, random_name(prefix), uid, strict=strict)
+        made = _mkdir_new(kind, place, real_parent, pfd, random_name(prefix), uid, strict=strict)
         if made is not _Taken.TAKEN:
             return made
     return None
@@ -540,7 +571,7 @@ class _Taken(Enum):
 
 
 def _mkdir_new(
-    kind: Kind, real_parent: bytes, pfd: int, name: bytes, uid: int, *, strict: bool
+    kind: Kind, place: bytes, real_parent: bytes, pfd: int, name: bytes, uid: int, *, strict: bool
 ) -> Base | _Taken | None:
     """B made fresh at ``name`` (``mkdirat`` 0700, opened ``O_NOFOLLOW``,
     checked to be a real directory of ours, then 0711); :attr:`_Taken.TAKEN`
@@ -557,8 +588,12 @@ def _mkdir_new(
     try:
         fd = _open_own(name, pfd)
     except OSError:
+        # The umask took the owner's r or x off: remove the empty directory
+        # just made, and go on to the next place (Options.base: the error).
+        with contextlib.suppress(OSError):
+            os.rmdir(name, dir_fd=pfd)
         if strict:
-            raise _base_error(BaseError.REFUSED, _path_join(real_parent, name)) from None
+            raise
         return None
     try:
         st = os.fstat(fd)
@@ -570,10 +605,10 @@ def _mkdir_new(
         if strict:
             raise
         return None
-    return Base(kind, _path_join(real_parent, name), fd)
+    return Base(kind, _path_join(real_parent, name), fd, place)
 
 
-def _take_existing(kind: Kind, real_parent: bytes, pfd: int, name: bytes, uid: int) -> Base | BaseError:
+def _take_existing(kind: Kind, place: bytes, real_parent: bytes, pfd: int, name: bytes, uid: int) -> Base | BaseError:
     """The B already at ``name``, checked (a real directory of ours that
     nobody else can write to), or why it cannot be used."""
     try:
@@ -598,7 +633,7 @@ def _take_existing(kind: Kind, real_parent: bytes, pfd: int, name: bytes, uid: i
     if not _is_ours(st, uid):
         os.close(fd)
         return BaseError.REFUSED
-    return Base(kind, _path_join(real_parent, name), fd)
+    return Base(kind, _path_join(real_parent, name), fd, place)
 
 
 def _path_join(a: bytes, b: bytes) -> bytes:
@@ -714,16 +749,12 @@ class Env:
             return b
 
     def given_base(self, path: bytes, *, cross_uid: bool) -> Base:
-        """B at ``Options.base``, made or checked on the first use; what fails
-        is raised (``ENOENT``, ``ENOTDIR``, ``EPERM``)."""
+        """B at ``Options.base``, made on the first use (checked beforehand
+        by :func:`check_given`); what fails is raised (``ENOENT``,
+        ``ENOTDIR``, ``EPERM``, the ``mkdirat``'s error)."""
         parent, name = _path.split(path)
         st = self.state
-        try:
-            real_parent = os.fsencode(os.path.realpath(parent, strict=True))
-        except FileNotFoundError:
-            raise _base_error(BaseError.NO_DIRECTORY, path) from None
-        except NotADirectoryError:
-            raise _base_error(BaseError.NOT_A_DIRECTORY, path) from None
+        real_parent = os.fsencode(os.path.realpath(parent, strict=True))
         key = (Kind.BASE, _path_join(real_parent, name))
         with st.lock:
             b = st.others.get(key)
@@ -736,33 +767,111 @@ class Env:
                 raise _base_error(BaseError.REFUSED, path)
             return b
 
+    def real_len_guess(self, *, cross_uid: bool, given: bytes | None) -> int | None:
+        """The length of the real path of the B a spelling would go through,
+        known (B made already, or ``Options.base``) or guessed as the
+        shortest the places allow (``None`` when no place resolves), so that
+        B is not made for a spelling that cannot fit."""
+        if given is not None:
+            parent, name = _path.split(given)
+            try:
+                return len(_path_join(os.fsencode(os.path.realpath(parent, strict=True)), name))
+            except OSError:
+                return None
+        made = self.state.cross if cross_uid else self.state.auto
+        if made is not None and not made.closed:
+            return len(made.real)
+        lengths = []
+        for place in self.config.places:
+            try:
+                real = os.fsencode(os.path.realpath(place.path, strict=True))
+            except OSError:
+                continue
+            lengths.append(len(_path_join(real, place.name)))
+        return min(lengths) if lengths else None
+
+
+def check_given(path: bytes, uid: int, checked: set[bytes], *, cross_uid: bool) -> None:
+    """Check ``Options.base`` before any route (SPEC-routes "B の作り方"),
+    making nothing: an absolute path ending with a name (``ValueError``
+    otherwise), its parent there (``ENOENT``) and a directory (``ENOTDIR``),
+    every directory from the root to it safe (``EPERM``), and B itself, when
+    it is there, a real directory of ours nobody else can write to
+    (``ENOTDIR`` / ``EPERM``). With ``cross_uid``, every directory on the
+    way and B itself must let others search them (``EPERM``)."""
+    if not path.startswith(b"/"):
+        raise ValueError("Options.base must be an absolute path")
+    parent, name = _path.split(path)
+    try:
+        real_parent = os.fsencode(os.path.realpath(parent, strict=True))
+        if not stat.S_ISDIR(os.stat(real_parent).st_mode):
+            raise _base_error(BaseError.NOT_A_DIRECTORY, path)
+    except FileNotFoundError:
+        raise _base_error(BaseError.NO_DIRECTORY, path) from None
+    except NotADirectoryError:
+        raise _base_error(BaseError.NOT_A_DIRECTORY, path) from None
+    if real_parent not in checked:
+        if not safe_ancestors(real_parent, uid):
+            raise _base_error(BaseError.REFUSED, path)
+        checked.add(real_parent)
+    if cross_uid and not searchable_by_others(real_parent):
+        raise _base_error(BaseError.REFUSED, path)
+    b = _path_join(real_parent, name)
+    try:
+        st = os.lstat(b)
+    except FileNotFoundError:
+        return
+    if stat.S_ISLNK(st.st_mode):
+        raise _base_error(BaseError.REFUSED, path)
+    if not stat.S_ISDIR(st.st_mode):
+        raise _base_error(BaseError.NOT_A_DIRECTORY, path)
+    if not _is_ours(st, uid):
+        raise _base_error(BaseError.REFUSED, path)
+    if cross_uid and not st.st_mode & stat.S_IXOTH:
+        raise _base_error(BaseError.REFUSED, path)
+
 
 # ---------- sweep ----------
 
 
 def sweep(env: Env) -> None:
     """Remove the D of the processes gone (whose lock can be made exclusive)
-    from B of every place, made or not by this process. B is not made where
-    it is not, and nothing else in B is touched (SPEC "sweep")."""
+    from B of every automatic place (``sockat-<uid>`` / ``sockat``; B is not
+    made where it is not). Nothing else in B is touched (SPEC "sweep")."""
     for place in env.config.places:
-        try:
-            real_parent = os.fsencode(os.path.realpath(place.path, strict=True))
-            pfd = open_dir(real_parent, nofollow=True)
-        except OSError:
-            continue
-        try:
-            got = _take_existing(place.kind, real_parent, pfd, place.name, env.config.uid)
-        finally:
-            os.close(pfd)
-        if not isinstance(got, Base):
-            continue
-        try:
-            _sweep_base(got.fd, env.config.uid)
-        finally:
-            got.close()
+        _sweep_at(place.kind, place.path, place.name, env.config.uid)
+
+
+def sweep_given(env: Env, path: bytes) -> None:
+    """:func:`sweep` for the B given as ``Options.base``, checked as
+    :func:`check_given` checks it (nothing is made)."""
+    check_given(path, env.config.uid, set(), cross_uid=False)
+    parent, name = _path.split(path)
+    _sweep_at(Kind.BASE, parent, name, env.config.uid)
+
+
+def _sweep_at(kind: Kind, place: bytes, name: bytes, uid: int) -> None:
+    try:
+        real_parent = os.fsencode(os.path.realpath(place, strict=True))
+        pfd = open_dir(real_parent, nofollow=True)
+    except OSError:
+        return
+    try:
+        got = _take_existing(kind, place, real_parent, pfd, name, uid)
+    finally:
+        os.close(pfd)
+    if not isinstance(got, Base):
+        return
+    try:
+        _sweep_base(got.fd, uid)
+    finally:
+        got.close()
 
 
 def _sweep_base(bfd: int, uid: int) -> None:
+    """Remove each D in B (``bfd``) whose lock can be made exclusive, with
+    the E in it. A D holding anything but symlinks is left; the E right in B
+    (the default connect's) are not touched."""
     with os.scandir(bfd) as entries:
         names = [os.fsencode(e.name) for e in entries if e.is_dir(follow_symlinks=False)]
     for name in names:
@@ -782,8 +891,10 @@ def _sweep_base(bfd: int, uid: int) -> None:
             if (now.st_dev, now.st_ino) != (st.st_dev, st.st_ino):
                 continue
             with os.scandir(dfd) as inside:
-                links = [os.fsencode(e.name) for e in inside if not e.is_dir(follow_symlinks=False)]
-            for link in links:
+                entries_in = [(os.fsencode(e.name), e.is_symlink()) for e in inside]
+            if not all(is_link for _, is_link in entries_in):
+                continue
+            for link, _ in entries_in:
                 with contextlib.suppress(OSError):
                     os.unlink(link, dir_fd=dfd)
             with contextlib.suppress(OSError):

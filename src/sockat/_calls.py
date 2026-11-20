@@ -10,7 +10,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TypeAlias
 
-from ._place import Env, LinkFile, sweep
+from ._place import Env, LinkFile, check_given, sweep, sweep_given
 from ._routes import (
     LINK_DIR,
     LINK_FILE,
@@ -33,12 +33,12 @@ from ._routes import (
     link_file_real,
     look_up,
 )
-from ._socket_file import Link, Recorder, SocketFile
+from ._socket_file import Link, Recorder, SocketFile, cwd_id
 from ._sockets import PathSocket
 from ._spelling import CwdRelative, Original, Spelling, Trail
 from ._sys import DIRECT_MAX, IS_LINUX, Op
 
-__all__ = ["StrOrBytesPath", "sweep"]
+__all__ = ["StrOrBytesPath", "sweep", "sweep_given"]
 
 
 @dataclass(frozen=True)
@@ -65,6 +65,16 @@ def _read(path: StrOrBytesPath) -> tuple[str | bytes, bytes, bool]:
     return spelled, raw, abstract
 
 
+def _long(raw: bytes, env: Env, opts: Opts, *, cross_uid: bool) -> Bases:
+    """The steps of a long path before any route: the socket's directory
+    looked up, then ``Options.base`` checked (making nothing), so that
+    either fails with no route tried; and the B the routes may use."""
+    t = look_up(raw)
+    if opts.base is not None:
+        check_given(opts.base, env.config.uid, env.state.checked, cross_uid=cross_uid)
+    return Bases(env, t, opts.base, cross_uid)
+
+
 def bind(
     path: StrOrBytesPath,
     *,
@@ -86,8 +96,8 @@ def bind(
         done = bind_standard(call, spelled, raw)
     else:
         env = env if env is not None else Env.current()
-        t = look_up(raw)
-        done = bind_long(call, t, env, Bases(env, t, opts.base, opts.usable_cross_uid), trail)
+        bases = _long(raw, env, opts, cross_uid=opts.usable_cross_uid)
+        done = bind_long(call, bases.target, env, bases, trail)
         if isinstance(done.sock, PathSocket):
             done.sock.report_path(os.fsdecode(raw), listening=True)
     if recorder is None:
@@ -112,8 +122,9 @@ def connect(
         trail.attempt(STANDARD)
         return call.plain(spelled, standard=True), STANDARD
     env = env if env is not None else Env.current()
-    t = look_up(raw)
-    sock, route = connect_long(call, t, env, Bases(env, t, opts.base, opts.usable_cross_uid), trail, order)
+    # A connect's spelling stays nowhere: usable_cross_uid is not looked at.
+    bases = _long(raw, env, opts, cross_uid=False)
+    sock, route = connect_long(call, bases.target, env, bases, trail, order)
     if isinstance(sock, PathSocket):
         sock.report_path(os.fsdecode(raw), listening=False)
     return sock, route
@@ -129,6 +140,11 @@ class Resolved:
     route: str
     base: str | None
     link: Link | None
+    raw: bytes
+    """The spelling's bytes."""
+    cwd: tuple[int, int] | None
+    """For a relative spelling, the cwd's ``(st_dev, st_ino)`` when it was
+    resolved (``ForBind.socket_file`` compares it)."""
 
 
 def _as_given(spelled: str | bytes, spelling: bytes) -> str | bytes:
@@ -136,8 +152,9 @@ def _as_given(spelled: str | bytes, spelling: bytes) -> str | bytes:
 
 
 def _short(spelled: str | bytes, raw: bytes) -> Resolved:
-    spelling: Spelling = Original() if raw.startswith(b"/") or raw.startswith(b"\0") else CwdRelative()
-    return Resolved(spelled, spelling, STANDARD, None, None)
+    if raw.startswith(b"/") or raw.startswith(b"\0"):
+        return Resolved(spelled, Original(), STANDARD, None, None, raw, None)
+    return Resolved(spelled, CwdRelative(), STANDARD, None, None, raw, cwd_id())
 
 
 def resolve_for_bind(path: StrOrBytesPath, *, opts: Opts, trail: Trail, env: Env | None = None) -> Resolved:
@@ -149,8 +166,7 @@ def resolve_for_bind(path: StrOrBytesPath, *, opts: Opts, trail: Trail, env: Env
         trail.attempt(STANDARD)
         return _short(spelled, raw)
     env = env if env is not None else Env.current()
-    t = look_up(raw)
-    bases = Bases(env, t, opts.base, opts.usable_cross_uid)
+    bases = _long(raw, env, opts, cross_uid=opts.usable_cross_uid)
     trail.skip(STANDARD, "path too long")
     makers: list[tuple[str, Maker]] = [(LINK_DIR, link_dir_proc), (LINK_DIR, link_dir_real)]
     if env.config.link_file is LinkFile.FOLLOWS:
@@ -160,14 +176,14 @@ def resolve_for_bind(path: StrOrBytesPath, *, opts: Opts, trail: Trail, env: Env
 
 def resolve_for_connect(path: StrOrBytesPath, *, opts: Opts, trail: Trail, env: Env | None = None) -> Resolved:
     """The SPEC's ``resolve_for_connect``: link-file (procB, then B's real
-    path); ``ENAMETOOLONG`` past it."""
+    path); ``ENAMETOOLONG`` past it. ``usable_cross_uid`` is not looked at
+    (a connect's spelling stays nowhere)."""
     spelled, raw, abstract = _read(path)
     if abstract or len(raw) <= DIRECT_MAX:
         trail.attempt(STANDARD)
         return _short(spelled, raw)
     env = env if env is not None else Env.current()
-    t = look_up(raw)
-    bases = Bases(env, t, opts.base, opts.usable_cross_uid)
+    bases = _long(raw, env, opts, cross_uid=False)
     trail.skip(STANDARD, "path too long")
     makers: list[tuple[str, Maker]] = [(LINK_FILE, link_file_proc), (LINK_FILE, link_file_real)]
     return _resolve(spelled, makers, env, bases, trail)
@@ -184,5 +200,13 @@ def _resolve(spelled: str | bytes, makers: list[tuple[str, Maker]], env: Env, ba
             trail.skip(name, u.why)
             continue
         trail.attempt(name)
-        return Resolved(_as_given(spelled, through.spelling), through.linked, name, through.base, through.link)
+        return Resolved(
+            _as_given(spelled, through.spelling),
+            through.linked,
+            name,
+            through.base,
+            through.link,
+            through.spelling,
+            None,
+        )
     raise enametoolong()

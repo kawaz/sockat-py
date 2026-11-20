@@ -125,7 +125,7 @@ def test_a_spelling_others_cannot_follow_says_so(tmp: TmpDirs) -> None:
 # Where a bind was measured to follow a symlink in the last component
 # (macOS, NetBSD), link-file reaches a file name too long for link-dir:
 # <B>/D/E, E a symlink to the socket file. Unlinking by the spelling removes
-# E, not the file (removable false).
+# E, not the file (removable false). B is under /tmp: a private /tmp hides it.
 @pytest.mark.skipif(not (IS_APPLE or os.uname().sysname == "NetBSD"), reason="a bind follows the symlink here only")
 def test_link_file_where_a_bind_follows_the_symlink(tmp: TmpDirs) -> None:
     env = env_at(tmp.new())
@@ -136,7 +136,7 @@ def test_link_file_where_a_bind_follows_the_symlink(tmp: TmpDirs) -> None:
         assert done.route == "link-file"
         assert [s.name for s in trail.skipped] == ["standard", "link-dir"]
         assert done.spelling == sockat.ex.Linked(
-            removable=False, until=Until.CLEANUP, usable_cross_uid=False, usable_with_private_tmp=True
+            removable=False, until=Until.CLEANUP, usable_cross_uid=False, usable_with_private_tmp=False
         )
         check_served(listener, p, env)
         spelling = os.fsencode(kernel_sockname(listener))
@@ -360,13 +360,13 @@ def test_a_name_no_route_reaches_is_enametoolong(tmp: TmpDirs) -> None:
     assert listing(os.path.dirname(p)) == []
 
 
-# Options.base is B: the spelling goes through it (procB, or its real path:
-# base "base").
+# Options.base is B: the spelling goes through it, and the diagnostic base
+# says "given" (procB or its real path alike).
 def test_options_base_carries_the_spelling(tmp: TmpDirs) -> None:
     given = tmp.new() + b"/b"
     env = env_at(tmp.new(), proc=NO_PROC)
     done = bind_in(env, long_path(tmp.new()), opts=_calls.Opts(base=given))
     with done.sock as listener:
         assert done.route == "link-dir"
-        assert done.base == "base"
+        assert done.base == "given"
         assert os.fsencode(kernel_sockname(listener)).startswith(os.path.realpath(given) + b"/")

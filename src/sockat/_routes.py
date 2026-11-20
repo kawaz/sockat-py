@@ -17,7 +17,7 @@ from typing import TypeAlias
 
 from . import _path
 from ._errors import CwdChanged
-from ._place import RANDOM_LEN, Base, Env, Kind, LinkFile, avoids_shared_tmp, open_dir
+from ._place import RANDOM_LEN, Base, Env, Kind, LinkFile, open_dir
 from ._socket_file import Link, Recorder
 from ._sockets import PathSocket
 from ._spelling import CwdRelative, Dangling, Linked, Original, Spelling, Trail, Until
@@ -185,8 +185,10 @@ def absolute(path: bytes) -> bytes | None:
 
 def proc_usable(env: Env, fd: int | None = None) -> bool:
     """Whether /proc lists this process's fds, both as ``/proc/self/fd/<fd>``
-    and ``/proc/<pid>/fd/<fd>`` (looked up for ``fd``, or for an fd of ``/``
-    opened for the purpose)."""
+    and ``/proc/<pid>/fd/<fd>``, each naming what the fd is (the same
+    ``(st_dev, st_ino)``: a /proc of another PID namespace or mount does
+    not). Looked up for ``fd``, or for an fd of ``/`` opened for the
+    purpose."""
     proc = env.config.proc
     if proc is None:
         return False
@@ -197,10 +199,13 @@ def proc_usable(env: Env, fd: int | None = None) -> bool:
         except OSError:
             return False
     try:
+        held = os.fstat(probe)
         for who in (b"self", b"%d" % os.getpid()):
             try:
-                os.stat(b"%s/%s/fd/%d" % (proc, who, probe))
+                via = os.stat(b"%s/%s/fd/%d" % (proc, who, probe))
             except OSError:
+                return False
+            if (via.st_dev, via.st_ino) != (held.st_dev, held.st_ino):
                 return False
         return True
     finally:
@@ -234,6 +239,16 @@ class Bases:
             else:
                 self._plain = self.env.auto_base()
         return self._plain
+
+    def made_plain(self) -> Base | None:
+        """The process's B (or ``Options.base``'s) when it is made already;
+        nothing is made."""
+        if self._plain_tried:
+            return self._plain
+        if self.given is not None:
+            return None
+        auto = self.env.state.auto
+        return auto if auto is not None and not auto.closed else None
 
     def cross(self) -> Base | None:
         """B another uid can follow a spelling through (``Options.base`` when
@@ -298,119 +313,104 @@ def _proc_len(env: Env, b: Base | None, fd_digits: int) -> int:
     return len(b"%s/%d/fd/" % (proc, os.getpid())) + fd_part
 
 
-def link_dir_proc(env: Env, t: Target, bases: Bases) -> Through:
-    """link-dir with procB: ``/proc/<pid>/fd/<B's fd>/D/E/<name>``, E a
-    symlink in D to the realpath of the socket's directory."""
+def _proc_base_name(b: Base) -> str:
+    """The diagnostic ``base`` of procB: ``proc`` for B in a temporary place
+    (the same spelling whichever it is), the B itself for one that is not
+    (``sockdir``, ``given``)."""
+    return b.kind.value if b.kind in (Kind.SOCKDIR, Kind.BASE) else "proc"
+
+
+def _through_procb(env: Env, t: Target, bases: Bases, route: str, target: bytes, name: bytes | None) -> Through:
+    """procB: ``/proc/<pid>/fd/<B's fd>/D/E[/<name>]``, E a symlink in D to
+    ``target``. Not for ``usable_cross_uid`` (another uid cannot follow it);
+    only where /proc names B (:meth:`Base.proc_usable`). The length is judged
+    before B is made (E's name at least one character)."""
     if bases.cross_uid:
         raise _Unusable("procB not followed by other uids")
     if not proc_usable(env):
         raise _Unusable(PROC_UNUSABLE)
-    # The length is judged before anything is made: E's name is at least
-    # one character.
-    tail = 1 + RANDOM_LEN + 1 + 1 + 1 + len(t.name)
-    b = bases.plain()
-    if b is None and bases.given is None:
-        if _proc_len(env, None, _fd_digits_guess()) + tail > DIRECT_MAX:
-            raise _Unusable(TOO_LONG)
-        b = bases.with_sockdir()
+    tail = 1 + RANDOM_LEN + 1 + 1 + (1 + len(name) if name is not None else 0)
+    made = bases.made_plain()
+    if _proc_len(env, made, _fd_digits_guess()) + tail > DIRECT_MAX:
+        raise _Unusable(TOO_LONG)
+    b = bases.with_sockdir()
     if b is None:
         raise _Unusable(NO_PLACE_FOR_B)
     proc = env.config.proc
     assert proc is not None
-    head = b.proc(proc, os.getpid())
+    pid = os.getpid()
+    if not b.proc_usable(proc, pid):
+        raise _Unusable(PROC_UNUSABLE)
+    head = b.proc(proc, pid)
     if len(head) + tail > DIRECT_MAX:
         raise _Unusable(TOO_LONG)
-    made = _link_in_d(env, b, head, t.real_dir, t.name)
-    kind = "sockdir" if b.kind is Kind.SOCKDIR else "proc"
+    spelling, link = _link_in_d(env, b, head, target, name)
     return Through(
-        made[0],
-        LINK_DIR,
-        kind,
-        made[1],
-        Linked(removable=True, until=Until.PROCESS, usable_cross_uid=False, usable_with_private_tmp=True),
+        spelling,
+        route,
+        _proc_base_name(b),
+        link,
+        Linked(removable=name is not None, until=Until.PROCESS, usable_cross_uid=False, usable_with_private_tmp=True),
     )
+
+
+def _through_real(env: Env, t: Target, bases: Bases, route: str, target: bytes, name: bytes | None) -> Through:
+    """B's real path: ``<B>/D/E[/<name>]``. B is not made when the spelling
+    cannot fit through any place (judged from the places' real paths)."""
+    tail = 1 + RANDOM_LEN + 1 + 1 + (1 + len(name) if name is not None else 0)
+    guess = env.real_len_guess(cross_uid=bases.cross_uid, given=bases.given)
+    if guess is None:
+        raise _Unusable(NO_PLACE_FOR_B)
+    if guess + tail > DIRECT_MAX:
+        raise _Unusable(TOO_LONG)
+    b = bases.for_real_path()
+    if b is None:
+        raise _Unusable(NO_CROSS_UID_B if bases.cross_uid else NO_PLACE_FOR_B)
+    if len(b.real) + tail > DIRECT_MAX:
+        raise _Unusable(TOO_LONG)
+    spelling, link = _link_in_d(env, b, b.real, target, name)
+    return Through(
+        spelling,
+        route,
+        b.kind.value,
+        link,
+        Linked(
+            removable=name is not None,
+            until=Until.CLEANUP,
+            usable_cross_uid=b.cross_uid,
+            usable_with_private_tmp=b.private_tmp_ok,
+        ),
+    )
+
+
+def link_dir_proc(env: Env, t: Target, bases: Bases) -> Through:
+    """link-dir with procB: ``/proc/<pid>/fd/<B's fd>/D/E/<name>``, E a
+    symlink in D to the realpath of the socket's directory."""
+    return _through_procb(env, t, bases, LINK_DIR, t.real_dir, t.name)
 
 
 def link_dir_real(env: Env, t: Target, bases: Bases) -> Through:
     """link-dir with B's real path: ``<B>/D/E/<name>``."""
-    b = bases.for_real_path()
-    if b is None:
-        raise _Unusable(NO_CROSS_UID_B if bases.cross_uid else NO_PLACE_FOR_B)
-    if len(b.real) + 1 + RANDOM_LEN + 1 + 1 + 1 + len(t.name) > DIRECT_MAX:
-        raise _Unusable(TOO_LONG)
-    spelling, link = _link_in_d(env, b, b.real, t.real_dir, t.name)
-    return Through(
-        spelling,
-        LINK_DIR,
-        b.kind.value,
-        link,
-        Linked(
-            removable=True,
-            until=Until.CLEANUP,
-            usable_cross_uid=b.cross_uid,
-            usable_with_private_tmp=avoids_shared_tmp(spelling),
-        ),
-    )
+    return _through_real(env, t, bases, LINK_DIR, t.real_dir, t.name)
+
+
+def _file_target(t: Target) -> bytes:
+    target = absolute(t.path)
+    if target is None:
+        raise _Unusable("cwd unreadable")
+    return target
 
 
 def link_file_real(env: Env, t: Target, bases: Bases) -> Through:
     """link-file with B's real path: ``<B>/D/E``, E a symlink in D to the
     socket file (the path made absolute against the cwd)."""
-    b = bases.for_real_path()
-    if b is None:
-        raise _Unusable(NO_CROSS_UID_B if bases.cross_uid else NO_PLACE_FOR_B)
-    if len(b.real) + 1 + RANDOM_LEN + 1 + 1 > DIRECT_MAX:
-        raise _Unusable(TOO_LONG)
-    target = absolute(t.path)
-    if target is None:
-        raise _Unusable("cwd unreadable")
-    spelling, link = _link_in_d(env, b, b.real, target, None)
-    return Through(
-        spelling,
-        LINK_FILE,
-        b.kind.value,
-        link,
-        Linked(
-            removable=False,
-            until=Until.CLEANUP,
-            usable_cross_uid=b.cross_uid,
-            usable_with_private_tmp=avoids_shared_tmp(spelling),
-        ),
-    )
+    return _through_real(env, t, bases, LINK_FILE, _file_target(t), None)
 
 
 def link_file_proc(env: Env, t: Target, bases: Bases) -> Through:
     """link-file with procB: ``/proc/<pid>/fd/<B's fd>/D/E`` (only
     ``resolve_for_connect``: a bind does not follow it where /proc is)."""
-    if bases.cross_uid:
-        raise _Unusable("procB not followed by other uids")
-    if not proc_usable(env):
-        raise _Unusable(PROC_UNUSABLE)
-    tail = 1 + RANDOM_LEN + 1 + 1
-    b = bases.plain()
-    if b is None and bases.given is None:
-        if _proc_len(env, None, _fd_digits_guess()) + tail > DIRECT_MAX:
-            raise _Unusable(TOO_LONG)
-        b = bases.with_sockdir()
-    if b is None:
-        raise _Unusable(NO_PLACE_FOR_B)
-    proc = env.config.proc
-    assert proc is not None
-    head = b.proc(proc, os.getpid())
-    if len(head) + tail > DIRECT_MAX:
-        raise _Unusable(TOO_LONG)
-    target = absolute(t.path)
-    if target is None:
-        raise _Unusable("cwd unreadable")
-    spelling, link = _link_in_d(env, b, head, target, None)
-    kind = "sockdir" if b.kind is Kind.SOCKDIR else "proc"
-    return Through(
-        spelling,
-        LINK_FILE,
-        kind,
-        link,
-        Linked(removable=False, until=Until.PROCESS, usable_cross_uid=False, usable_with_private_tmp=True),
-    )
+    return _through_procb(env, t, bases, LINK_FILE, _file_target(t), None)
 
 
 def _link_in_d(env: Env, b: Base, head: bytes, target: bytes, name: bytes | None) -> tuple[bytes, Link]:
@@ -783,7 +783,13 @@ def connect_thread_cwd_direct(cc: ConnectCall) -> socket.socket | str:
 def connect_link_file(cc: ConnectCall) -> socket.socket | str:
     """A random symlink E right in B to the socket file, connected as
     ``<B's real path>/E`` and removed right after, whatever the outcome (no
-    D, nothing left in the process)."""
+    D, nothing left in the process). B is not made when the spelling cannot
+    fit through any place."""
+    guess = cc.env.real_len_guess(cross_uid=False, given=cc.bases.given)
+    if guess is None:
+        return NO_PLACE_FOR_B
+    if guess + 1 + RANDOM_LEN > DIRECT_MAX:
+        return TOO_LONG
     b = cc.bases.plain()
     if b is None:
         return NO_PLACE_FOR_B

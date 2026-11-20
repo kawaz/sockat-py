@@ -236,14 +236,14 @@ def test_widened_reaches_253_bytes(tmp: TmpDirs) -> None:
 
 
 # A nonblocking connect to a full backlog fails at once (Linux EAGAIN,
-# macOS ECONNREFUSED), on every route of this system, rather than wait.
+# macOS ECONNREFUSED), on every route of this system that does not need the
+# cwd moved near the socket (relative is the standard's own connect on a
+# relative spelling), rather than wait.
 @pytest.mark.skipif(not (IS_LINUX or IS_APPLE), reason="confirmed on Linux and macOS only")
-@pytest.mark.parametrize("route", ROUTES_HERE)
+@pytest.mark.parametrize("route", [r for r in ROUTES_HERE if r != "relative"])
 def test_a_nonblocking_connect_to_a_full_backlog_fails_at_once(tmp: TmpDirs, route: str) -> None:
     env = env_at(tmp.new())
     p = long_path(tmp.new())
-    if route == "relative":
-        pytest.skip("needs the cwd near the socket (the route itself is tested above)")
     with listener_at(p) as listener:
         listener.listen(1)
         queued: list[socket.socket] = []

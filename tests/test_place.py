@@ -5,6 +5,7 @@ them at once, and ``sweep``."""
 
 from __future__ import annotations
 
+import contextlib
 import errno
 import fcntl
 import os
@@ -18,6 +19,7 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 from _support import (
     HAS_THREAD_ROUTE,
+    NO_PROC,
     PRELUDE,
     ROOT,
     TmpDirs,
@@ -25,9 +27,11 @@ from _support import (
     base_of,
     bind_in,
     connect_in,
+    deep_dir,
     ds,
     env_at,
     is_socket,
+    listener_at,
     listing,
     long_path,
     raises_errno,
@@ -151,7 +155,7 @@ def test_options_base_is_b(tmp: TmpDirs) -> None:
         assert len(ds(given)) == 1
         assert bound.route in ("link-dir", "link-file", "thread-cwd", "at")
         if bound.route in ("link-dir", "link-file"):
-            assert bound.base in ("proc", "base")
+            assert bound.base == "given"
         bound.file.remove()
 
 
@@ -477,3 +481,178 @@ def test_threads_making_b_at_once(tmp: TmpDirs) -> None:
     for t in ts:
         t.join()
     assert len(set(got)) == 1
+
+
+# Options.base is checked once the socket's directory is looked up and before
+# any route, for a bind and a connect alike, making nothing: a failure has no
+# route and no skipped, and nothing appears (even where an earlier connect
+# route would have reached the socket without B).
+@pytest.mark.parametrize("op", ["bind", "connect"])
+def test_options_base_is_checked_before_any_route(tmp: TmpDirs, op: str) -> None:
+    root = tmp.new()
+    os.chmod(root, 0o777)
+    given = root + b"/b"
+    p = long_path(tmp.new())
+    with listener_at(p) if op == "connect" else contextlib.nullcontext(), raises_errno(errno.EPERM) as e:
+        if op == "bind":
+            sockat.ex.bind(p, sockat.ex.Options(base=given))
+        else:
+            sockat.ex.connect(p, sockat.ex.Options(base=given))
+    assert e.value.route is None  # type: ignore[attr-defined]
+    assert e.value.skipped == ()  # type: ignore[attr-defined]
+    assert listing(root) == []
+
+
+# Options.base that is not an absolute path ending with a name is an argument
+# error (ValueError), whatever the path to bind / connect.
+@pytest.mark.parametrize("given", [b"relative/b", b"/tmp/x/", b"/tmp/x/..", b"/"])
+def test_options_base_must_be_an_absolute_path_ending_with_a_name(tmp: TmpDirs, given: bytes) -> None:
+    p = long_path(tmp.new())
+    for call in (sockat.ex.bind, sockat.ex.connect, sockat.ex.resolve_for_bind, sockat.ex.resolve_for_connect):
+        with pytest.raises(ValueError, match=r"base|file name"):
+            call(p, sockat.ex.Options(base=given))
+    with pytest.raises(ValueError, match=r"base|file name"):
+        sockat.ex.sweep_base(given)
+
+
+# A connect's spelling stays nowhere: usable_cross_uid is not looked at by
+# the connect calls (a base others cannot reach is not refused for it).
+def test_connects_do_not_look_at_usable_cross_uid(tmp: TmpDirs) -> None:
+    root = tmp.new()  # 0700: others cannot search it
+    p = long_path(tmp.new())
+    o = sockat.ex.Options(usable_cross_uid=True, base=root + b"/b")
+    with listener_at(p) as listener:
+        c = sockat.ex.connect(p, o)
+        with c.socket:
+            accept_ping(listener, c.socket)
+        r = sockat.ex.resolve_for_connect(p, o)
+        r.cleanup()
+    with raises_errno(errno.EPERM):
+        sockat.ex.resolve_for_bind(p, o)
+
+
+# B is not made where the spelling through it is known not to fit (judged
+# from the places' real paths), for a bind and the default connect.
+def test_b_is_not_made_for_a_spelling_that_cannot_fit(tmp: TmpDirs) -> None:
+    place = deep_dir(tmp.new(), 95)
+    env = env_at(place, proc=NO_PROC, thread_cwd=False, link_file=_place.LinkFile.NOT_TRIED)
+    p = long_path(tmp.new())
+    with raises_errno(errno.ENAMETOOLONG):
+        bind_in(env, p)
+    with listener_at(p), raises_errno(errno.ENAMETOOLONG):
+        connect_in(env, p, order=("link-file",))
+    assert listing(place) == []
+
+
+# A umask that takes the owner's r or x off leaves B (and D) unopenable: the
+# empty directory just made is removed and the place passed over, leaving
+# nothing behind.
+@pytest.mark.skipif(ROOT, reason="root opens anything")
+def test_a_umask_that_hides_b_from_its_owner_leaves_nothing(tmp: TmpDirs) -> None:
+    first, second = tmp.new(), tmp.new()
+    out = run_child(
+        """
+        from _support import env_at
+        os.umask(0o700)
+        env = env_at(os.fsencode(ARGS["first"]), os.fsencode(ARGS["second"]))
+        report(b=env.auto_base() is not None)
+        """,
+        args={"first": os.fsdecode(first), "second": os.fsdecode(second)},
+    )
+    assert out["b"] is False
+    assert listing(first) == []
+    assert listing(second) == []
+
+
+# A B already there that is ours but 0700 is used as it is (its mode is not
+# changed); others cannot follow spellings through it, so usable_cross_uid
+# does not take it (and goes on to thread-cwd / at, or ENAMETOOLONG without
+# them).
+def test_an_existing_0700_b_is_used_as_it_is(tmp: TmpDirs) -> None:
+    place = tmp.new()
+    os.chmod(place, 0o755)
+    b = place + b"/" + uid_name()
+    os.mkdir(b, 0o700)
+    os.chmod(b, 0o700)
+    env = env_at(place, proc=NO_PROC)
+    done = bind_in(env, long_path(tmp.new()))
+    done.sock.close()
+    assert base_of(env) == os.path.realpath(b)
+    assert mode(b) == 0o700
+    assert isinstance(done.spelling, sockat.ex.Linked)
+    assert not done.spelling.usable_cross_uid
+    opts = _calls.Opts(usable_cross_uid=True)
+    if not HAS_THREAD_ROUTE:
+        with raises_errno(errno.ENAMETOOLONG):
+            bind_in(env, long_path(tmp.new()), opts=opts)
+        return
+    cross = bind_in(env, long_path(tmp.new()), opts=opts)
+    cross.sock.close()
+    assert cross.spelling == sockat.ex.Dangling()
+
+
+# usable_with_private_tmp: a spelling through B in a place under /tmp (or
+# whose real path is) cannot be followed with a private /tmp; one in a place
+# elsewhere can.
+def test_usable_with_private_tmp_follows_the_place(tmp: TmpDirs) -> None:
+    under_tmp = tmp.new()
+    elsewhere = _not_under_tmp(tmp)
+    for place, want in ((under_tmp, False), (elsewhere, True)):
+        env = env_at(place, proc=NO_PROC)
+        done = bind_in(env, long_path(tmp.new()))
+        done.sock.close()
+        assert isinstance(done.spelling, sockat.ex.Linked)
+        assert done.spelling.usable_with_private_tmp is want, place
+
+
+def _not_under_tmp(tmp: TmpDirs) -> bytes:
+    """A new directory under neither /tmp nor /var/tmp (their realpaths
+    included): ``$TMPDIR`` when it is so (macOS), else ``/dev/shm`` (Linux)."""
+    for candidate in (os.environ.get("TMPDIR"), "/dev/shm"):
+        if not candidate or not os.path.isdir(candidate) or not os.access(candidate, os.W_OK):
+            continue
+        if _place.goes_through_shared_tmp(os.fsencode(os.path.realpath(candidate))):
+            continue
+        d = tmp.new(under=candidate)
+        if _place.goes_through_shared_tmp(os.fsencode(os.path.realpath(d))):
+            continue
+        return d
+    pytest.skip("no writable place outside /tmp here")
+
+
+# sweep leaves a D holding anything but symlinks (not one sockat made as it
+# is), and never touches the E right in B.
+def test_sweep_leaves_a_d_with_more_than_symlinks(tmp: TmpDirs) -> None:
+    place = tmp.new()
+    b = place + b"/" + uid_name()
+    os.mkdir(b, 0o711)
+    os.mkdir(b + b"/dead1", 0o711)
+    os.symlink(b"/nowhere", b + b"/dead1/1")
+    os.mkdir(b + b"/kept", 0o711)
+    with open(b + b"/kept/file", "wb"):
+        pass
+    _place.sweep(env_at(place))
+    assert listing(b) == [b"kept"]
+
+
+# sweep_base does for Options.base's B what sweep does for the automatic
+# places: the D of a process gone is removed, a live one stays.
+def test_sweep_base(tmp: TmpDirs) -> None:
+    given = tmp.new() + b"/b"
+    work = tmp.new()
+    out = run_child(
+        """
+        import sockat.ex
+        from _support import long_path
+        b = sockat.ex.bind(long_path(os.fsencode(ARGS["work"])), sockat.ex.Options(base=os.fsencode(ARGS["given"])))
+        report(route=b.route)
+        """,
+        args={"given": os.fsdecode(given), "work": os.fsdecode(work)},
+    )
+    assert out["route"] == "link-dir"
+    mine = sockat.ex.bind(long_path(work + b"/mine"), sockat.ex.Options(base=given))
+    with mine.socket:
+        assert len(ds(given)) == 2
+        sockat.ex.sweep_base(given)
+        assert len(ds(given)) == 1
+        mine.file.remove()

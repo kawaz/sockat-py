@@ -41,9 +41,10 @@ from dataclasses import dataclass, field
 from typing import NamedTuple
 
 from .. import _calls
+from .._path import split
 from .._place import Env
 from .._routes import Call, StrOrBytesPath
-from .._socket_file import SocketFile
+from .._socket_file import SocketFile, remember_spelling
 from .._spelling import CwdRelative, Dangling, Linked, Original, Skipped, Spelling, Trail, Until
 from .._sys import Op
 
@@ -68,6 +69,7 @@ __all__ = [
     "resolve_for_bind",
     "resolve_for_connect",
     "sweep",
+    "sweep_base",
 ]
 
 
@@ -92,8 +94,20 @@ class Options:
 def _opts(options: Options | None) -> _calls.Opts:
     if options is None:
         return _calls.PLAIN
-    base = None if options.base is None else os.fsencode(os.fspath(options.base))
+    base = None if options.base is None else _base_path(options.base)
     return _calls.Opts(usable_cross_uid=options.usable_cross_uid, base=base)
+
+
+def _base_path(path: StrOrBytesPath) -> bytes:
+    """``Options.base`` as bytes: an absolute path ending with a name, with
+    no NUL (``ValueError`` otherwise, as for any argument error)."""
+    raw = os.fsencode(os.fspath(path))
+    if b"\0" in raw:
+        raise ValueError("Options.base must not contain a NUL byte")
+    if not raw.startswith(b"/"):
+        raise ValueError("Options.base must be an absolute path")
+    split(raw)
+    return raw
 
 
 class Bound(NamedTuple):
@@ -139,7 +153,8 @@ class Report(NamedTuple):
 @dataclass(frozen=True)
 class ForBind:
     """What :func:`resolve_for_bind` returns: a spelling to bind with the
-    standard library."""
+    standard library. It has no ``remove()``: bind, then take the socket
+    file with :meth:`socket_file`."""
 
     path: str | bytes
     """The spelling (``str`` or ``bytes`` as the path was given)."""
@@ -147,12 +162,26 @@ class ForBind:
     route: str
     base: str | None
     skipped: tuple[Skipped, ...]
-    _cleanup: Callable[[], None] = field(repr=False, compare=False)
+    _resolved: _calls.Resolved = field(repr=False, compare=False)
 
     def cleanup(self) -> None:
         """Remove the E the spelling goes through, once. Do not use the
         spelling afterwards."""
-        self._cleanup()
+        if self._resolved.link is not None:
+            self._resolved.link.cleanup()
+
+    def socket_file(self) -> SocketFile:
+        """The :class:`SocketFile` of the socket file bound at the spelling:
+        call it after the bind, before the listener is closed. The spelling
+        is followed now and the socket file's realpath and ``(st_dev,
+        st_ino)`` remembered, so ``remove()`` removes that file only (as
+        :attr:`Bound.file` does; a replacement between the bind and this call
+        cannot be told). Its ``cleanup()`` is this one's. Raises the error of
+        the lookup when nothing is bound there yet, and an :class:`OSError`
+        without errno for a relative spelling whose cwd has changed since the
+        resolve."""
+        r = self._resolved
+        return remember_spelling(r.raw, r.cwd, r.link)
 
 
 @dataclass(frozen=True)
@@ -163,7 +192,6 @@ class ForConnect:
 
     path: str | bytes
     route: str
-    base: str | None
     skipped: tuple[Skipped, ...]
     _cleanup: Callable[[], None] = field(repr=False, compare=False)
 
@@ -228,7 +256,7 @@ def resolve_for_bind(path: StrOrBytesPath, options: Options | None = None) -> Fo
     trail = Trail()
     with _telling(trail):
         r = _calls.resolve_for_bind(path, opts=_opts(options), trail=trail)
-    return ForBind(r.path, r.spelling, r.route, r.base, tuple(trail.skipped), r.link.cleanup if r.link else _nothing)
+    return ForBind(r.path, r.spelling, r.route, r.base, tuple(trail.skipped), r)
 
 
 def resolve_for_connect(path: StrOrBytesPath, options: Options | None = None) -> ForConnect:
@@ -240,11 +268,20 @@ def resolve_for_connect(path: StrOrBytesPath, options: Options | None = None) ->
     trail = Trail()
     with _telling(trail):
         r = _calls.resolve_for_connect(path, opts=_opts(options), trail=trail)
-    return ForConnect(r.path, r.route, r.base, tuple(trail.skipped), r.link.cleanup if r.link else _nothing)
+    return ForConnect(r.path, r.route, tuple(trail.skipped), r.link.cleanup if r.link else _nothing)
 
 
 def sweep() -> None:
-    """Remove, from B of every automatic place, each D whose process has
-    ended (its lock is gone). Only when called; another live process's D is
-    never removed."""
+    """Remove, from B of every automatic place (``/tmp/sockat-<uid>``,
+    ``$XDG_RUNTIME_DIR/sockat``, ``$TMPDIR/sockat-<uid>``), each D whose
+    process has ended (its lock is gone). Only when called; another live
+    process's D is never removed, B is not made, and nothing else in B is
+    touched."""
     _calls.sweep(Env.current())
+
+
+def sweep_base(path: StrOrBytesPath) -> None:
+    """:func:`sweep` for the B an application gives as ``Options.base``
+    (checked as ``Options.base`` is; nothing is made). For the application
+    that manages that B."""
+    _calls.sweep_given(Env.current(), _base_path(path))
