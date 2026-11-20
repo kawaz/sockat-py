@@ -423,3 +423,19 @@ def test_a_long_relative_path(tmp: TmpDirs) -> None:
     assert out["got"] == "x"
     assert out["here"] is True
     assert out["gone"] is True
+
+
+# socket_file() before the bind, with an unrelated regular file at the path:
+# not a socket, so an error (ENOTSOCK), and the file stays (remove() could
+# otherwise remove it).
+def test_for_bind_socket_file_refuses_a_file_that_is_not_a_socket(tmp: TmpDirs) -> None:
+    o = options(tmp)
+    p = long_path(tmp.new())
+    with open(p, "wb") as f:
+        f.write(b"unrelated")
+    r = sockat.ex.resolve_for_bind(p, options=o)
+    with raises_errno(errno.ENOTSOCK):
+        r.socket_file()
+    with open(p, "rb") as f:
+        assert f.read() == b"unrelated"
+    r.cleanup()

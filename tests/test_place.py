@@ -10,6 +10,7 @@ import dataclasses
 import errno
 import fcntl
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -46,7 +47,7 @@ from sockat import _calls, _place
 from sockat._place import Kind, State
 from sockat._routes import Call
 from sockat._spelling import Trail
-from sockat._sys import Op
+from sockat._sys import DIRECT_MAX, Op
 
 
 def uid_name() -> bytes:
@@ -158,8 +159,10 @@ def test_options_base_is_b(tmp: TmpDirs) -> None:
     with bound.socket:
         assert mode(given) == 0o711
         assert len(ds(given)) == 1
-        # A short B: link-dir (procB where /proc is, its real path elsewhere),
-        # either way base "given".
+        # A short B: link-dir, by procB where /proc is and by its real path
+        # elsewhere; base is "given" either way (SPEC "診断": given is
+        # Options.base's B, procB or real path alike), so the route and base
+        # are the same on every system.
         assert bound.route == "link-dir"
         assert bound.base == "given"
         bound.file.remove()
@@ -840,3 +843,61 @@ def test_options_base_that_cannot_be_made(tmp: TmpDirs, op: str) -> None:
 
 def connect_in_opts(env: _place.Env, p: bytes, given: bytes, trail: Trail) -> None:
     _calls.connect(p, call=Call(Op.CONNECT), env=env, opts=_calls.Opts(base=given), trail=trail, order=("link-file",))
+
+
+# A B removed while the process holds it (an old systemd-tmpfiles, macOS's
+# cleaning of $TMPDIR, by hand) is let go by the next call and made again:
+# the bind and the connect after it go through B as before.
+def test_b_removed_is_made_again(tmp: TmpDirs) -> None:
+    place = tmp.new()
+    env = env_at(place, proc=NO_PROC, thread_cwd=False)
+    bind_in(env, long_path(tmp.new())).sock.close()
+    b = base_of(env)
+    shutil.rmtree(b)
+    done = bind_in(env, long_path(tmp.new()))
+    done.sock.close()
+    assert done.route == "link-dir"
+    assert base_of(env) == b
+    assert len(ds(b)) == 1
+    shutil.rmtree(b)
+    p = long_path(tmp.new())
+    with listener_at(p) as listener:
+        sock, route = connect_in(env, p, order=("link-file",))
+        with sock:
+            accept_ping(listener, sock)
+    assert route == "link-file"
+    assert listing(place) == [uid_name()]
+
+
+# A D removed while held is let go and made again by the next bind.
+def test_d_removed_is_made_again(tmp: TmpDirs) -> None:
+    env = env_at(tmp.new(), proc=NO_PROC, thread_cwd=False)
+    bind_in(env, long_path(tmp.new())).sock.close()
+    b = base_of(env)
+    (old,) = ds(b)
+    shutil.rmtree(b + b"/" + old)
+    done = bind_in(env, long_path(tmp.new()))
+    done.sock.close()
+    assert done.route == "link-dir"
+    (new,) = ds(b)
+    assert new != old
+
+
+# A route the system has no means for is not in its row, so not in skipped:
+# where no thread can be given a cwd of its own (NetBSD, OpenBSD, illumos),
+# neither the bind's thread-cwd nor the connect's thread-cwd-direct shows.
+# Stood in for here by turning the means off; where the means exist but are
+# turned off (or refused), the route is skipped with its reason.
+def test_routes_without_means_are_not_skipped(tmp: TmpDirs, monkeypatch: pytest.MonkeyPatch) -> None:
+    from sockat import _routes
+
+    env = env_at(tmp.new(), proc=NO_PROC, thread_cwd=False, link_file=_place.LinkFile.NOT_TRIED)
+    name = b"n" * (DIRECT_MAX - 7)
+    for has in (True, False):
+        monkeypatch.setattr(_routes, "HAS_THREAD_CWD", has)
+        monkeypatch.setattr(_routes, "IS_FREEBSD", False)
+        trail = Trail()
+        with raises_errno(errno.ENAMETOOLONG):
+            bind_in(env, long_path(tmp.new(), name=name), trail=trail)
+        assert ("thread-cwd" in [s.name for s in trail.skipped]) is has
+        assert ("thread-cwd-direct" in _routes.connect_order(env, False)) is has
