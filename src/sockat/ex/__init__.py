@@ -73,7 +73,7 @@ __all__ = [
 ]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)
 class Options:
     """What the ``_ex`` and resolve calls may be asked for."""
 
