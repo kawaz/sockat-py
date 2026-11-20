@@ -17,7 +17,7 @@ from typing import TypeAlias
 
 from . import _path
 from ._errors import CwdChanged
-from ._place import RANDOM_LEN, Base, Env, Kind, LinkFile, open_dir
+from ._place import RANDOM_LEN, Base, Dir, Env, Kind, LinkFile, open_dir
 from ._socket_file import Link, Recorder
 from ._sockets import PathSocket
 from ._spelling import CwdRelative, Dangling, Linked, Original, Spelling, Trail, Until
@@ -231,6 +231,19 @@ class Bases:
     _plain_tried: bool = field(default=False, init=False)
     _cross: Base | None = field(default=None, init=False)
     _cross_tried: bool = field(default=False, init=False)
+    _no_d: list[Base] = field(default_factory=list, init=False)
+    """The B whose D could not be made in this call (SPEC-routes: not tried
+    again on the same B within the call; a later call tries again)."""
+
+    def dir(self, b: Base) -> Dir | None:
+        """D of ``b`` for this call, or ``None`` when it cannot be made (then
+        remembered for the rest of the call)."""
+        if b in self._no_d:
+            return None
+        d = b.dir(self.env.config.uid)
+        if d is None:
+            self._no_d.append(b)
+        return d
 
     def plain(self) -> Base | None:
         """The process's B (``Options.base`` when given, raising what fails),
@@ -347,7 +360,7 @@ def _through_procb(env: Env, t: Target, bases: Bases, route: str, target: bytes,
     head = b.proc(proc, pid)
     if len(head) + tail > DIRECT_MAX:
         raise _Unusable(TOO_LONG)
-    spelling, link = _link_in_d(env, b, head, target, name)
+    spelling, link = _link_in_d(bases, b, head, target, name)
     return Through(
         spelling,
         route,
@@ -371,7 +384,7 @@ def _through_real(env: Env, t: Target, bases: Bases, route: str, target: bytes, 
         raise _Unusable(NO_CROSS_UID_B if bases.cross_uid else NO_PLACE_FOR_B)
     if len(b.real) + tail > DIRECT_MAX:
         raise _Unusable(TOO_LONG)
-    spelling, link = _link_in_d(env, b, b.real, target, name)
+    spelling, link = _link_in_d(bases, b, b.real, target, name)
     return Through(
         spelling,
         route,
@@ -416,10 +429,10 @@ def link_file_proc(env: Env, t: Target, bases: Bases) -> Through:
     return _through_procb(env, t, bases, LINK_FILE, _file_target(t), None)
 
 
-def _link_in_d(env: Env, b: Base, head: bytes, target: bytes, name: bytes | None) -> tuple[bytes, Link]:
+def _link_in_d(bases: Bases, b: Base, head: bytes, target: bytes, name: bytes | None) -> tuple[bytes, Link]:
     """E in D of ``b`` pointing to ``target``, and the spelling
     ``<head>/D/E[/<name>]`` (checked again to fit, E's name now known)."""
-    d = b.dir(env.config.uid)
+    d = bases.dir(b)
     if d is None:
         raise _Unusable(NO_D)
     e = d.link(target)
@@ -631,7 +644,7 @@ def bind_thread_cwd_or_at(call: Call, t: Target, env: Env, bases: Bases, trail: 
         trail.skip(route, TOO_LONG)
         return None
     b = bases.with_sockdir()
-    d = b.dir(env.config.uid) if b is not None else None
+    d = bases.dir(b) if b is not None else None
     if d is None:
         trail.skip(route, NO_D if b is not None else NO_PLACE_FOR_B)
         return None

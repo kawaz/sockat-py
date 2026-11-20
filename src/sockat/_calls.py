@@ -71,7 +71,7 @@ def _long(raw: bytes, env: Env, opts: Opts, *, cross_uid: bool) -> Bases:
     either fails with no route tried; and the B the routes may use."""
     t = look_up(raw)
     if opts.base is not None:
-        check_given(opts.base, env.config.uid, env.state.checked, cross_uid=cross_uid)
+        check_given(opts.base, env.config.uid, cross_uid=cross_uid, held=env.held_given(opts.base))
     return Bases(env, t, opts.base, cross_uid)
 
 

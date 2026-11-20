@@ -812,6 +812,20 @@ class Env:
                 st.others[key] = b
             return b
 
+    def held_given(self, path: bytes) -> Base | None:
+        """The B at ``Options.base`` this process holds (still there), or
+        ``None``."""
+        parent, name = _path.split(path)
+        try:
+            key = (Kind.BASE, _path_join(os.fsencode(os.path.realpath(parent, strict=True)), name))
+        except OSError:
+            return None
+        with self.state.lock:
+            b = _alive(self.state.others.get(key))
+            if b is None:
+                self.state.others.pop(key, None)
+            return b
+
     def given_base(self, path: bytes, *, cross_uid: bool) -> Base:
         """B at ``Options.base``, made on the first use (checked beforehand
         by :func:`check_given`); what fails is raised (``ENOENT``,
@@ -885,14 +899,15 @@ def _place_key(place: Place) -> tuple[bytes, bytes] | None:
         return None
 
 
-def check_given(path: bytes, uid: int, checked: set[bytes], *, cross_uid: bool) -> None:
+def check_given(path: bytes, uid: int, *, cross_uid: bool, held: Base | None = None) -> None:
     """Check ``Options.base`` before any route (SPEC-routes "B の作り方"),
-    making nothing: an absolute path ending with a name (``ValueError``
-    otherwise), its parent there (``ENOENT``) and a directory (``ENOTDIR``),
-    every directory from the root to it safe (``EPERM``), and B itself, when
-    it is there, a real directory of ours nobody else can write to
-    (``ENOTDIR`` / ``EPERM``). With ``cross_uid``, every directory on the
-    way and B itself must let others search them (``EPERM``)."""
+    making nothing, on every call: an absolute path ending with a name
+    (``ValueError`` otherwise), its parent there (``ENOENT``) and a
+    directory (``ENOTDIR``), every directory from the root to it safe
+    (``EPERM``), and B itself, when it is there, a real directory of ours
+    nobody else can write to (``ENOTDIR`` / ``EPERM``). With ``cross_uid``,
+    every directory on the way and B itself must let others search them
+    (``EPERM``): judged when B was first held (``held``) and not again."""
     if not path.startswith(b"/"):
         raise ValueError("Options.base must be an absolute path")
     parent, name = _path.split(path)
@@ -904,10 +919,12 @@ def check_given(path: bytes, uid: int, checked: set[bytes], *, cross_uid: bool) 
         raise _base_error(BaseError.NO_DIRECTORY, path) from None
     except NotADirectoryError:
         raise _base_error(BaseError.NOT_A_DIRECTORY, path) from None
-    if real_parent not in checked:
-        if not safe_ancestors(real_parent, uid):
+    if not safe_ancestors(real_parent, uid):
+        raise _base_error(BaseError.REFUSED, path)
+    if cross_uid and held is not None:
+        if not held.cross_uid:
             raise _base_error(BaseError.REFUSED, path)
-        checked.add(real_parent)
+        cross_uid = False
     if cross_uid and not searchable_by_others(real_parent):
         raise _base_error(BaseError.REFUSED, path)
     b = _path_join(real_parent, name)
@@ -939,7 +956,7 @@ def sweep(env: Env) -> None:
 def sweep_given(env: Env, path: bytes) -> None:
     """:func:`sweep` for the B given as ``Options.base``, checked as
     :func:`check_given` checks it (nothing is made)."""
-    check_given(path, env.config.uid, set(), cross_uid=False)
+    check_given(path, env.config.uid, cross_uid=False)
     parent, name = _path.split(path)
     _sweep_at(Kind.BASE, parent, name, env.config.uid)
 
