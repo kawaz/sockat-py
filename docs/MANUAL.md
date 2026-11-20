@@ -25,8 +25,8 @@ assert server.recv(4) == b"ping"
 | `sockat.datagram.bind(path)` | `socket(AF_UNIX, SOCK_DGRAM)` → `bind(path)` | `socket.socket` |
 | `sockat.datagram.unbound()` | `socket(AF_UNIX, SOCK_DGRAM)` | `socket.socket` |
 | `sockat.datagram.connect(sock, path)` | `sock.connect(path)` | `None` |
-| `sockat.ex.bind(path, options)` and so on | the same + spelling properties, clean up, diagnostics | `Bound` / `Connected` / `Report` ([sockat.ex](#sockatex)) |
-| `sockat.ex.resolve_for_bind(path, options)` / `resolve_for_connect` | a short spelling you pass to the standard library yourself | `ForBind` / `ForConnect` ([resolve](#resolve)) |
+| `sockat.ex.bind(path, options=options)` and so on | the same + spelling properties, clean up, diagnostics | `Bound` / `Connected` / `Report` ([sockat.ex](#sockatex)) |
+| `sockat.ex.resolve_for_bind(path, options=options)` / `resolve_for_connect` | a short spelling you pass to the standard library yourself | `ForBind` / `ForConnect` ([resolve](#resolve)) |
 | `sockat.ex.sweep()` / `sweep_base(path)` | — | `None` ([sweep](#sweep)) |
 
 - For a path of a length the standard library accepts, what is returned is a plain `socket.socket`. For a long path, it is a subclass of `socket.socket` that returns the original path as its address ([Addresses return the original path](#addresses-return-the-original-path))
@@ -79,15 +79,16 @@ connected = sockat.ex.connect(path)
 
 | Function | Returns |
 |---|---|
-| `sockat.ex.bind(path, options=None)` | `Bound(socket, file, spelling, route, base, skipped)` |
-| `sockat.ex.connect(path, options=None)` / `connect_nonblocking` | `Connected(socket, route, skipped)` |
-| `sockat.ex.datagram.bind(path, options=None)` | `Bound` (the socket is DGRAM) |
-| `sockat.ex.datagram.connect(sock, path, options=None)` | `Report(route, skipped)` |
-| `sockat.ex.resolve_for_bind(path, options=None)` | `ForBind(path, spelling, route, base, skipped)` and `cleanup()`, `socket_file()` |
-| `sockat.ex.resolve_for_connect(path, options=None)` | `ForConnect(path, route, skipped)` and `cleanup()` |
+| `sockat.ex.bind(path, *, options=None)` | `Bound(socket, file, spelling, route, base, skipped)` |
+| `sockat.ex.connect(path, *, options=None)` / `connect_nonblocking` | `Connected(socket, route, skipped)` |
+| `sockat.ex.datagram.bind(path, *, options=None)` | `Bound` (the socket is DGRAM) |
+| `sockat.ex.datagram.connect(sock, path, *, options=None)` | `Report(route, skipped)` |
+| `sockat.ex.resolve_for_bind(path, *, options=None)` | `ForBind(path, spelling, route, base, skipped)` and `cleanup()`, `socket_file()` |
+| `sockat.ex.resolve_for_connect(path, *, options=None)` | `ForConnect(path, route, skipped)` and `cleanup()` |
 | `sockat.ex.sweep()` / `sockat.ex.sweep_base(path)` | `None` |
 
 - They try the same routes in the same order as the default calls
+- `options` can only be passed by keyword (`sockat.ex.bind(path, options=sockat.ex.Options(...))`). The fields of `Options` are given by keyword too
 - `Bound` / `Connected` / `Report` are named tuples and can be unpacked in the order above
 
 ### Options
@@ -129,7 +130,7 @@ match bound.spelling:
 
 ### remove and cleanup
 
-The two handles of `Bound.file` (`SocketFile`). Each works only when called (neither closing the listener nor garbage collection removes anything) and works once.
+The two handles of `Bound.file` (`SocketFile`). Each works only when called (neither closing the listener nor garbage collection removes anything). `remove()` tries again on every call until it has succeeded, and does nothing after that. `cleanup()` works once (`remove()` goes on to `cleanup()` even when it fails).
 
 | Handle | What it does |
 |---|---|
@@ -255,7 +256,7 @@ B's place is the first of the following where it can be made (only that one when
 | — | `Options.base` | the given name | `given` |
 
 - The place is used after being turned into its realpath (macOS's `/tmp` is `/private/tmp`). It is not used unless every directory from the root to the place is owned by root or yourself and not writable by others (including the group), or is sticky (the same idea as OpenSSH's StrictModes). `$TMPDIR` and `$XDG_RUNTIME_DIR` are not used if empty or relative
-- B is made with `mkdirat`, opened with `O_NOFOLLOW`, checked to be a real directory owned by yourself, and then set to 0711. If it already exists it is checked the same way (including that others cannot write to it), and used without changing its mode even if it is not 0711. If the check fails, a B named `sockat-<uid>.XXXXXXXXXX` is made beside it. If the umask leaves the owner unable to open it, the empty directory made is removed and the next place is tried
+- B is made with `mkdirat`, set to 0711 by its name right away (giving back what the umask took), opened with `O_NOFOLLOW` and checked to be a real directory owned by yourself. If it already exists it is checked the same way (including that others cannot write to it), and used without changing its mode even if it is not 0711. If the check fails, a B named `sockat-<uid>.XXXXXXXXXX` is made beside it. If the mode cannot be set, it cannot be opened, or the check fails, the empty directory made is removed and the next place is tried. D is made by the same steps; if it cannot be made, that call does without the routes that use D (no other B is looked for, and a later call tries again)
 - When the length of the place's real path shows that the spelling will not fit, B is not made
 - A process uses one B among places 1 to 3 (even when the default connect made it first, that B is used from then on). A B in the socket's directory is per directory
 - D is made with a random name, and the process keeps an fd holding a shared flock lock on it. After taking the lock the name is looked up again, and if another process's `sweep()` removed it, it is made again. A forked child does not use the parent's B and D but makes its own D
@@ -284,7 +285,7 @@ A name is "means + what it is about". The suffix `-direct` is the form that pass
 
 ### How a failing route is treated
 
-If a route actually binds / connects and fails (`ENOENT`, `EADDRINUSE`, `ECONNREFUSED` and so on), that error is returned and the next route is not tried. It moves on only when the route itself cannot be used (the spelling does not fit, B / D / E cannot be made, there is no means, `/proc` cannot be used, the kernel does not accept widened, the kernel did not follow the link-file bind, the directory of the relative spelling does not match the original).
+If a route actually binds / connects and fails (`ENOENT`, `EADDRINUSE`, `ECONNREFUSED` and so on), that error is returned and the next route is not tried. It moves on only when the route itself cannot be used (the spelling does not fit, B / D / E cannot be made, there is no means, `/proc` cannot be used, the kernel does not accept widened, the kernel did not follow the link-file bind, the directory of the relative spelling does not match the original or the cwd has already changed, there is no B that meets `usable_cross_uid`).
 
 ### How far it reaches
 
@@ -292,7 +293,7 @@ The length of the spelling decides which file names are reached (figures are byt
 
 | Route | File names reached |
 |---|---|
-| link-dir (procB) | 107 − (`/proc/<pid>/fd/<fd>/` + D 10 + E + separators). About 75 |
+| link-dir (procB) | 107 − (`/proc/<pid>/fd/<fd>/` + D 10 + E + separators). About 70 |
 | link-dir (B's real path) | sockaddr − (B's real path + D 10 + E + separators). About 77 with `/tmp/sockat-1000`, about 66 with macOS's `/private/tmp/sockat-501` |
 | link-file | regardless of the file name (as long as the spelling `B/D/E` fits) |
 | thread-cwd, at | sockaddr − 11 (96 on Linux, 92 elsewhere) |
@@ -457,7 +458,7 @@ bound.socket.close()
 ```python
 import sockat.ex
 
-bound = sockat.ex.bind(path, sockat.ex.Options(usable_cross_uid=True))
+bound = sockat.ex.bind(path, options=sockat.ex.Options(usable_cross_uid=True))
 match bound.spelling:
     case sockat.ex.Linked(usable_cross_uid=True):
         ...  # a peer of another uid can follow the kernel's spelling

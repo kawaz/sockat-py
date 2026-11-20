@@ -27,10 +27,11 @@ Instead of making a `socket.socket(AF_UNIX, ...)` and calling `bind` (+ `listen`
 | `sockat.connect(path)` | `socket()` → `connect(path)` | `socket.socket` |
 | `sockat.connect_nonblocking(path)` | `socket()` → `setblocking(False)` → `connect(path)` | a non-blocking `socket.socket` |
 | `sockat.datagram.bind(path)` / `unbound()` / `connect(sock, path)` | the same code with `SOCK_DGRAM` | `socket.socket` / `None` |
-| `sockat.ex.bind(path, options)` and so on | the same + spelling properties, clean up, diagnostics | `Bound` / `Connected` / `Report` ([below](#calls-with-clean-up-and-diagnostics-sockatex)) |
+| `sockat.ex.bind(path, options=options)` and so on | the same + spelling properties, clean up, diagnostics | `Bound` / `Connected` / `Report` ([below](#calls-with-clean-up-and-diagnostics-sockatex)) |
 | `sockat.ex.resolve_for_bind` / `resolve_for_connect` | a short spelling you pass to the standard library yourself | `ForBind` / `ForConnect` |
 
 - What is returned is the standard `socket.socket` (for a long path, a subclass of `socket.socket` that returns the original path as its address)
+- `sockat.datagram.unbound()` returns that subclass whatever the path, so that once it is connected to a long path with `sockat.datagram.connect`, its `getpeername()` returns the original path (it is not bound, so its `getsockname()` stays the kernel's). The subclass is a `socket.socket`, so it is used as the standard type
 - A path of a length the standard library accepts is passed to it as it is, so it behaves the same as the standard library
 - Even for a long path, the socket file is made at the path you gave
 - `path` is `str` / `bytes` / `os.PathLike`

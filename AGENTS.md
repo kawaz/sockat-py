@@ -30,7 +30,7 @@ sockat-py は、`sun_path` の上限を超えるパスでも Unix domain socket 
 ## 守ること
 
 - **振る舞いを変える時は、先にハブの SPEC を直す。** sockat-py の docs と実装はその後に追従させる
-- **ctypes は `src/sockat/_sys.py` にだけ書く。** 最初に要った時に import する (Linux は読み込まない)
+- **ctypes は `src/sockat/_sys.py` にだけ書く。** 最初に要った時に import する (要るのはスレッドの cwd・広げた sockaddr・`bindat` / `connectat` を使う時だけで、それ以外の経路では読み込まない)
 - **標準が受け付けるパス (OS ごとの `sun_path` − 1 バイト以内) には何も足さない。** `socket` モジュールをそのまま呼ぶ
 - **どの経路のソケットも `socket.socket(AF_UNIX, SOCK_STREAM)` (DGRAM は `SOCK_DGRAM`) で作る。** 標準と同じ設定にするため。DGRAM の connect は渡されたソケットで試す
 - **経路の本当の失敗は次の経路でやり直さない。** 次へ進むのは経路自体が使えない時だけ

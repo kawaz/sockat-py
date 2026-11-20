@@ -27,10 +27,11 @@ pip install sockat
 | `sockat.connect(path)` | `socket()` → `connect(path)` | `socket.socket` |
 | `sockat.connect_nonblocking(path)` | `socket()` → `setblocking(False)` → `connect(path)` | 非ブロッキングの `socket.socket` |
 | `sockat.datagram.bind(path)` / `unbound()` / `connect(sock, path)` | `SOCK_DGRAM` の同じ書き方 | `socket.socket` / `None` |
-| `sockat.ex.bind(path, options)` など | 同じ + 綴りの性質・片付け・診断 | `Bound` / `Connected` / `Report` ([後述](#片付け診断つきの呼び出し-sockatex)) |
+| `sockat.ex.bind(path, options=options)` など | 同じ + 綴りの性質・片付け・診断 | `Bound` / `Connected` / `Report` ([後述](#片付け診断つきの呼び出し-sockatex)) |
 | `sockat.ex.resolve_for_bind` / `resolve_for_connect` | 標準に自分で渡す短い綴り | `ForBind` / `ForConnect` |
 
 - 戻り値は標準の `socket.socket` (長いパスでは、アドレスを元のパスで返す `socket.socket` の subclass)
+- `sockat.datagram.unbound()` は、パスによらずその subclass を返す。後で `sockat.datagram.connect` で長いパスに connect した時に、`getpeername()` が元のパスを返すようにするため (bind していないので `getsockname()` はカーネルの値のまま)。subclass も `socket.socket` なので、標準の型として使える
 - 標準が受け付ける長さのパスは標準にそのまま渡すので、標準と同じに振る舞う
 - 長いパスでも、ソケットファイルは渡したパスにできる
 - `path` は `str` / `bytes` / `os.PathLike`

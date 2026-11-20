@@ -25,8 +25,8 @@ assert server.recv(4) == b"ping"
 | `sockat.datagram.bind(path)` | `socket(AF_UNIX, SOCK_DGRAM)` → `bind(path)` | `socket.socket` |
 | `sockat.datagram.unbound()` | `socket(AF_UNIX, SOCK_DGRAM)` | `socket.socket` |
 | `sockat.datagram.connect(sock, path)` | `sock.connect(path)` | `None` |
-| `sockat.ex.bind(path, options)` など | 同じ + 綴りの性質・片付け・診断 | `Bound` / `Connected` / `Report` ([sockat.ex](#sockatex)) |
-| `sockat.ex.resolve_for_bind(path, options)` / `resolve_for_connect` | 標準に自分で渡す短い綴り | `ForBind` / `ForConnect` ([resolve](#resolve)) |
+| `sockat.ex.bind(path, options=options)` など | 同じ + 綴りの性質・片付け・診断 | `Bound` / `Connected` / `Report` ([sockat.ex](#sockatex)) |
+| `sockat.ex.resolve_for_bind(path, options=options)` / `resolve_for_connect` | 標準に自分で渡す短い綴り | `ForBind` / `ForConnect` ([resolve](#resolve)) |
 | `sockat.ex.sweep()` / `sweep_base(path)` | — | `None` ([sweep](#sweep)) |
 
 - 標準が受け付ける長さのパスでは、戻り値は素の `socket.socket`。長いパスでは、アドレスを元のパスで返す `socket.socket` の subclass ([アドレスは元のパスを返す](#アドレスは元のパスを返す))
@@ -79,15 +79,16 @@ connected = sockat.ex.connect(path)
 
 | 関数 | 戻り値 |
 |---|---|
-| `sockat.ex.bind(path, options=None)` | `Bound(socket, file, spelling, route, base, skipped)` |
-| `sockat.ex.connect(path, options=None)` / `connect_nonblocking` | `Connected(socket, route, skipped)` |
-| `sockat.ex.datagram.bind(path, options=None)` | `Bound` (socket は DGRAM) |
-| `sockat.ex.datagram.connect(sock, path, options=None)` | `Report(route, skipped)` |
-| `sockat.ex.resolve_for_bind(path, options=None)` | `ForBind(path, spelling, route, base, skipped)` と `cleanup()`・`socket_file()` |
-| `sockat.ex.resolve_for_connect(path, options=None)` | `ForConnect(path, route, skipped)` と `cleanup()` |
+| `sockat.ex.bind(path, *, options=None)` | `Bound(socket, file, spelling, route, base, skipped)` |
+| `sockat.ex.connect(path, *, options=None)` / `connect_nonblocking` | `Connected(socket, route, skipped)` |
+| `sockat.ex.datagram.bind(path, *, options=None)` | `Bound` (socket は DGRAM) |
+| `sockat.ex.datagram.connect(sock, path, *, options=None)` | `Report(route, skipped)` |
+| `sockat.ex.resolve_for_bind(path, *, options=None)` | `ForBind(path, spelling, route, base, skipped)` と `cleanup()`・`socket_file()` |
+| `sockat.ex.resolve_for_connect(path, *, options=None)` | `ForConnect(path, route, skipped)` と `cleanup()` |
 | `sockat.ex.sweep()` / `sockat.ex.sweep_base(path)` | `None` |
 
 - 既定の呼び出しと同じ経路を同じ順に試す
+- `options` はキーワードでだけ渡せる (`sockat.ex.bind(path, options=sockat.ex.Options(...))`)。`Options` の項目もキーワードで書く
 - `Bound` / `Connected` / `Report` は名前付きタプルで、上の順に分解できる
 
 ### Options
@@ -129,7 +130,7 @@ match bound.spelling:
 
 ### remove と cleanup
 
-`Bound.file` (`SocketFile`) の 2 つの口。どちらも呼んだ時だけ働き (listener を閉じても、ガベージコレクションでも消さない)、1 回だけ働く。
+`Bound.file` (`SocketFile`) の 2 つの口。どちらも呼んだ時だけ働く (listener を閉じても、ガベージコレクションでも消さない)。`remove()` は成功するまでは呼ぶたびに消し直し、成功した後は何もしない。`cleanup()` は 1 回だけ働く (`remove()` が失敗した時も `cleanup()` まで行う)。
 
 | 口 | すること |
 |---|---|
@@ -255,7 +256,7 @@ B の置き場は次の順で最初に作れた所 (`Options.base` を指定し�
 | — | `Options.base` | 指定の名前 | `given` |
 
 - 置き場は realpath にしてから使う (macOS の `/tmp` は `/private/tmp`)。ルートから置き場までのディレクトリがどれも、持ち主が root か自分で他人 (group を含む) が書けない、か sticky でなければ使わない (OpenSSH の StrictModes と同じ考え)。`$TMPDIR`・`$XDG_RUNTIME_DIR` が空か相対パスなら使わない
-- B は `mkdirat` で作り、`O_NOFOLLOW` で開いて実ディレクトリで持ち主が自分なことを確かめてから 0711 にする。既にあれば同じく確かめ (他人が書けないことも)、0711 でなくても mode を変えずに使う。外れたら `sockat-<uid>.XXXXXXXXXX` の B を横に作る。umask で持ち主が開けない時は、作った空のディレクトリを消して次の置き場へ
+- B は `mkdirat` で作り、すぐ名前で 0711 にそろえ (umask で削られた分を戻す)、`O_NOFOLLOW` で開いて実ディレクトリで持ち主が自分なことを確かめる。既にあれば同じく確かめ (他人が書けないことも)、0711 でなくても mode を変えずに使う。外れたら `sockat-<uid>.XXXXXXXXXX` の B を横に作る。そろえられない・開けない・確かめに外れた時は、作った空のディレクトリを消して次の置き場へ。D も同じ手順で作り、作れなければその呼び出しでは D を使う経路を使わない (別の B は探さず、次の呼び出しで作り直す)
 - 綴りが収まらないと置き場の実パスの長さから分かる時は、B を作らない
 - 1 つのプロセスが使う B は置き場 1〜3 で 1 つ (既定の connect が初めて作った時も、以後その B を使う)。ソケットのディレクトリの B はディレクトリごと
 - D は乱数の名前で作り、flock の共有ロックを掛けた fd をプロセスが持ち続ける。ロックを掛けた後に名前を引き直し、他のプロセスの `sweep()` に消されていたら作り直す。fork した子は親の B と D を使わず、自分の D を作る
@@ -284,7 +285,7 @@ B の置き場は次の順で最初に作れた所 (`Options.base` を指定し�
 
 ### 経路の失敗の扱い
 
-経路が実際に bind / connect して失敗したら (`ENOENT`、`EADDRINUSE`、`ECONNREFUSED` 等)、そのエラーを返して次の経路を試さない。次へ進むのは、経路自体が使えない時 (綴りが収まらない、B・D・E を作れない、手段が無い、`/proc` を使えない、widened をカーネルが受け付けない、link-file の bind をカーネルが辿らなかった、relative の綴りのディレクトリが元と一致しない) だけ。
+経路が実際に bind / connect して失敗したら (`ENOENT`、`EADDRINUSE`、`ECONNREFUSED` 等)、そのエラーを返して次の経路を試さない。次へ進むのは、経路自体が使えない時 (綴りが収まらない、B・D・E を作れない、手段が無い、`/proc` を使えない、widened をカーネルが受け付けない、link-file の bind をカーネルが辿らなかった、relative の綴りのディレクトリが元と一致しないか cwd が既に変わっている、`usable_cross_uid` を満たす B が無い) だけ。
 
 ### どこまで届くか
 
@@ -292,7 +293,7 @@ B の置き場は次の順で最初に作れた所 (`Options.base` を指定し�
 
 | 経路 | 届くファイル名 |
 |---|---|
-| link-dir (procB) | 107 − (`/proc/<pid>/fd/<fd>/` + D 10 + E + 区切り)。おおよそ 75 |
+| link-dir (procB) | 107 − (`/proc/<pid>/fd/<fd>/` + D 10 + E + 区切り)。およそ 70 |
 | link-dir (B の実パス) | sockaddr − (B の実パス + D 10 + E + 区切り)。`/tmp/sockat-1000` でおおよそ 77、macOS の `/private/tmp/sockat-501` でおおよそ 66 |
 | link-file | ファイル名によらない (綴り `B/D/E` が収まれば) |
 | thread-cwd・at | sockaddr − 11 (Linux 96、他 92) |
@@ -457,7 +458,7 @@ bound.socket.close()
 ```python
 import sockat.ex
 
-bound = sockat.ex.bind(path, sockat.ex.Options(usable_cross_uid=True))
+bound = sockat.ex.bind(path, options=sockat.ex.Options(usable_cross_uid=True))
 match bound.spelling:
     case sockat.ex.Linked(usable_cross_uid=True):
         ...  # a peer of another uid can follow the kernel's spelling

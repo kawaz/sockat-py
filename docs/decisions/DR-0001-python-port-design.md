@@ -33,16 +33,18 @@
 
 | 点 | 決定 |
 |---|---|
-| B の置き場 | `/tmp` → `$XDG_RUNTIME_DIR` → `$TMPDIR` → ソケットのディレクトリ。環境変数は空・相対パスなら使わない。1 つのプロセスが使う B は置き場 1〜3 で 1 つ (既定の connect が初めて作った B も以後使う)、ソケットのディレクトリの B はディレクトリごと |
-| 置き場のパス | realpath にしてから、ルートからの途中を確かめ、`O_DIRECTORY \| O_NOFOLLOW` で開いて `mkdirat` する。実パスの綴りもこの realpath から作る |
-| B を作る時 | B を使う経路に来た時だけ。綴りが収まらないと置き場の実パスの長さから分かる時は作らない。umask で持ち主が開けない時は作った空のディレクトリを消して次の置き場へ |
+| B の置き場 | `/tmp` → `$XDG_RUNTIME_DIR` → `$TMPDIR` → ソケットのディレクトリ。環境変数は空・相対パスなら使わない。1 つのプロセスが使う B は置き場 1〜3 で 1 つ (既定の connect が初めて作った B も以後使う。`usable_cross_uid` の B と同じ置き場なら同じ B)、ソケットのディレクトリの B はディレクトリごと。実パスが同じ置き場は 1 回だけ試す。作れなかった置き場は覚えず、次の呼び出しで試し直す |
+| 持ち主の uid | 実効 uid (`os.geteuid()`)。作った物の持ち主で、`sockat-<uid>` の uid |
+| 置き場のパス | realpath にしてから、ルートからの途中 (どれも持ち主が root か自分で、かつ他人が書けないか sticky) を確かめ、`O_DIRECTORY \| O_NOFOLLOW` で開いて `mkdirat` する。実パスの綴りもこの realpath から作る |
+| B を作る時 | B を使う経路に来た時だけ。綴りの長さは最初に持てる置き場の実パスで見積もり、収まらなければ作らず、次の置き場にも移らない (B を使う経路を飛ばす) |
+| B と D の作り方 | `mkdirat` 0700 の直後に名前で `os.chmod(..., 0o711, dir_fd=親)` (umask で削られた分を戻す)、それから `O_DIRECTORY \| O_NOFOLLOW` で開いて `fstat` で実ディレクトリ・持ち主を確かめる。外れた・開けない時は作った空のディレクトリを消す。名前で chmod するのは Linux の `fchmodat` が `AT_SYMLINK_NOFOLLOW` を受け付けないためで、`mkdirat` が通った後の名前は他人に消せず差し替えられないので、開いた後の `fstat` で足りる |
 | 既にある B | `O_NOFOLLOW` で開いて実ディレクトリ・持ち主が自分・他人 (group を含む) が書けないことを確かめ、0711 でなくても mode を変えずに使う。外れたら自動の置き場は `sockat-<uid>.XXXXXXXXXX` の B を横に作る。`Options.base` は symlink なら `EPERM`、ディレクトリでも symlink でもなければ `ENOTDIR` (OS ごとに違う `O_NOFOLLOW` の errno でなく `lstat` で見分ける) |
 | `Options.base` の確かめ | 絶対パスで名前で終わらなければ `ValueError`。長いパスでは、ソケットのディレクトリを引いた後・経路を試す前に、bind でも connect でも何も作らずに確かめる (途中と、あれば B 自身) |
 | `/proc` を使えるか | `/proc/self/fd/<fd>` と `/proc/<pid>/fd/<fd>` を stat した `(st_dev, st_ino)` が fd の `fstat` と同じ時だけ (procB は B の fd で) |
 | `usable_cross_uid` | bind 系だけが見る。途中と B 自身が other に x を持つ B だけを使う |
 | `usable_with_private_tmp` | procB はいつも真。B の実パスは、置き場の realpath する前のパスと B の実パスのどちらかが `/tmp`・`/var/tmp` (とその realpath) を通れば偽 |
 | 診断の `base` | 一時の置き場の B は綴りの形 (`proc`・`tmp`・`runtime`・`tmpdir`)、ソケットのディレクトリと `Options.base` の B は `sockdir`・`given` |
-| D | 乱数 10 文字の名前で `mkdir(dir_fd=B)`、`O_NOFOLLOW` で開いて確かめ、`os.fchmod` で 0711、`fcntl.flock(LOCK_SH)` を掛けた fd を持ち続ける |
+| D | 乱数 10 文字の名前で上の手順で作り、`fcntl.flock(LOCK_SH)` を掛けた fd を持ち続ける。作れない時はその呼び出しだけ D を使う経路を使わず (別の B は探さない)、次の呼び出しで作り直す |
 | D と `sweep` の競合 | flock を掛けた後に名前を引き直し、`(st_dev, st_ino)` が開いた物と違えば (他のプロセスの `sweep` が、ロックの掛かる前の D を消した) 別の名前で作り直す |
 | E の名前 | resolve の E は D ごとのカウンタ (36 進)。thread-cwd・at と B の直下の E は乱数 10 文字 |
 | プロセスの状態 | B (と fd、D) はモジュールの `State` に持つ。`os.register_at_fork(after_in_child=...)` で、fork の子では親の B・D の fd を閉じて状態を作り直す (子は親の D を使わず自分の D を作る) |
@@ -54,11 +56,11 @@
 |---|---|
 | `sockat` | `bind(path)`・`connect(path)`・`connect_nonblocking(path)` (`socket.socket` を返す) |
 | `sockat.datagram` | `bind(path)`・`unbound()`・`connect(sock, path)` |
-| `sockat.ex` | `bind`・`connect`・`connect_nonblocking` (各 `(path, options=None)`)、`resolve_for_bind`・`resolve_for_connect`、`sweep()`・`sweep_base(path)`、型 `Options`・`Bound`・`Connected`・`Report`・`ForBind`・`ForConnect`・`SocketFile`・`Skipped`・`Spelling` (`Original`・`CwdRelative`・`Linked`・`Dangling`)・`Until` |
-| `sockat.ex.datagram` | `bind(path, options=None)`・`connect(sock, path, options=None)` |
+| `sockat.ex` | `bind`・`connect`・`connect_nonblocking` (各 `(path, *, options=None)`。`options` はキーワードでだけ渡せる)、`resolve_for_bind`・`resolve_for_connect`、`sweep()`・`sweep_base(path)`、型 `Options`・`Bound`・`Connected`・`Report`・`ForBind`・`ForConnect`・`SocketFile`・`Skipped`・`Spelling` (`Original`・`CwdRelative`・`Linked`・`Dangling`)・`Until` |
+| `sockat.ex.datagram` | `bind(path, *, options=None)`・`connect(sock, path, *, options=None)` |
 
 - `sockat.ex` は `import sockat` では読み込まない (標準の `socket.connect_ex` と紛れるため、使う人が `import sockat.ex` で選ぶ)。`sockat.datagram` は読み込む
-- `Options` は frozen dataclass (`usable_cross_uid: bool = False`、`base: str | bytes | os.PathLike | None = None`)
+- `Options` はキーワード専用の frozen dataclass (`usable_cross_uid: bool = False`、`base: str | bytes | os.PathLike | None = None`)
 - `Bound(socket, file, spelling, route, base, skipped)`・`Connected(socket, route, skipped)`・`Report(route, skipped)` は NamedTuple (分解して受け取れる)。`ForBind(path, spelling, route, base, skipped)` / `ForConnect(path, route, skipped)` は frozen dataclass と `cleanup()`。どちらも `remove()` を持たず、`ForBind` は bind の後に呼ぶ `socket_file()` で `SocketFile` を返す (綴りを辿って realpath と `(st_dev, st_ino)` を覚える。相対の綴りは resolve の時と cwd を比べる)
 - `Spelling` は基底のクラスと、値ごとの frozen dataclass。`match bound.spelling: case sockat.ex.Linked(removable=True): ...` で分岐できる。`Until` は `StrEnum` (`"Process"` / `"Cleanup"`)
 - `SocketFile` は `remove()` と `cleanup()` を持つ (SPEC の Python の形「戻り値に引数なしの関数を含める」を、引数なしのメソッドで満たす)
