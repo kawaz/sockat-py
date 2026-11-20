@@ -34,6 +34,7 @@ Instead of making a `socket.socket(AF_UNIX, ...)` and calling `bind` (+ `listen`
 - `sockat.datagram.unbound()` returns that subclass whatever the path, so that once it is connected to a long path with `sockat.datagram.connect`, its `getpeername()` returns the original path (it is not bound, so its `getsockname()` stays the kernel's). The subclass is a `socket.socket`, so it is used as the standard type
 - A path of a length the standard library accepts is passed to it as it is, so it behaves the same as the standard library
 - Even for a long path, the socket file is made at the path you gave
+- A bind's spelling is kept. While it lives, upper libraries that remove by the `getsockname` spelling and DGRAM replies work as with the original path. So a bind at a long path leaves D and E outside the app's own directories (`/tmp/sockat-<uid>` etc.; they go with the OS's temporary-directory cleaning or `sockat.ex.sweep()`. Removing a live process's D by hand only makes the spelling unreachable; the socket at the original path keeps working. Where tests run over and over, one call of `sockat.ex.sweep()` removes the dead D. [State grows outside the app's own place](./docs/MANUAL.md#state-grows-outside-the-apps-own-place))
 - `path` is `str` / `bytes` / `os.PathLike`
 - Python 3.11 or later. No dependencies (pure Python)
 

@@ -34,6 +34,7 @@ pip install sockat
 - `sockat.datagram.unbound()` は、パスによらずその subclass を返す。後で `sockat.datagram.connect` で長いパスに connect した時に、`getpeername()` が元のパスを返すようにするため (bind していないので `getsockname()` はカーネルの値のまま)。subclass も `socket.socket` なので、標準の型として使える
 - 標準が受け付ける長さのパスは標準にそのまま渡すので、標準と同じに振る舞う
 - 長いパスでも、ソケットファイルは渡したパスにできる
+- bind の綴りは消さずに残す。綴りが生きている間は、`getsockname` の綴りで消す上のライブラリや DGRAM の返信が元のパスと同じに働く。そのため長いパスの bind は、アプリの置き場の外 (`/tmp/sockat-<uid>` 等) に D と E を残す (OS の一時ディレクトリの掃除か `sockat.ex.sweep()` で消える。生きているプロセスの D を手で消しても、綴りが辿れなくなるだけで、元のパスのソケットは働く。試験を何度も回す環境では `sockat.ex.sweep()` を 1 回呼べば死んだ D が消える。[状態がアプリの置き場の外に増える](./docs/MANUAL-ja.md#状態がアプリの置き場の外に増える))
 - `path` は `str` / `bytes` / `os.PathLike`
 - Python 3.11 以上。依存なし (純 Python)
 
