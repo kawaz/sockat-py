@@ -578,9 +578,17 @@ def _take_existing(kind: Kind, real_parent: bytes, pfd: int, name: bytes, uid: i
     nobody else can write to), or why it cannot be used."""
     try:
         fd = _open_own(name, pfd)
-    except NotADirectoryError:
-        return BaseError.NOT_A_DIRECTORY
     except OSError:
+        # Which check failed, the same on every system (an O_NOFOLLOW open of
+        # a symlink answers ELOOP, EMLINK, EFTYPE or ENOTDIR by the system): a
+        # symlink is not a real directory (refused), anything else that is not
+        # a directory is not one.
+        try:
+            st = os.stat(name, dir_fd=pfd, follow_symlinks=False)
+        except OSError:
+            return BaseError.REFUSED
+        if not stat.S_ISLNK(st.st_mode) and not stat.S_ISDIR(st.st_mode):
+            return BaseError.NOT_A_DIRECTORY
         return BaseError.REFUSED
     try:
         st = os.fstat(fd)
