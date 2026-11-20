@@ -579,7 +579,7 @@ def _bind_through(call: Call, through: Through, trail: Trail) -> BindDone:
     try:
         sock = call.plain(through.spelling)
     except BaseException:
-        through.link.cleanup()
+        through.link.discard()
         raise
     return BindDone(sock, through.route, through.linked, through.base, through.link)
 
@@ -602,13 +602,13 @@ def bind_link_file(call: Call, t: Target, env: Env, bases: Bases, trail: Trail) 
     try:
         sock = call.plain(through.spelling)
     except OSError:
-        through.link.cleanup()
+        through.link.discard()
         if env.config.link_file is LinkFile.FOLLOWS or _something_at(through_target(t)):
             raise
         trail.skip(LINK_FILE, NOT_FOLLOWED)
         return None
     except BaseException:
-        through.link.cleanup()
+        through.link.discard()
         raise
     return BindDone(sock, LINK_FILE, through.linked, through.base, through.link)
 

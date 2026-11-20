@@ -16,7 +16,8 @@ from ._sys import IS_LINUX
 
 
 class Link:
-    """One E of a resolve (in D), removed once by :meth:`cleanup`."""
+    """One E of a resolve (in D), removed once by :meth:`cleanup` (asked for
+    by the caller) or :meth:`discard` (inside a call)."""
 
     def __init__(self, d: Dir, name: bytes) -> None:
         self._d = d
@@ -25,6 +26,18 @@ class Link:
         self._lock = threading.Lock()
 
     def cleanup(self) -> None:
+        """Remove E, as the caller asked: a failure other than E being gone
+        is raised (SPEC "remove と cleanup"), and a later call tries again;
+        once it has succeeded, later calls do nothing."""
+        with self._lock:
+            if self._done:
+                return
+            self._d.unlink_or_raise(self._name)
+            self._done = True
+
+    def discard(self) -> None:
+        """Remove E inside a call (its bind failed): a failure is passed over
+        in silence (SPEC-routes "経路の失敗の扱い")."""
         with self._lock:
             if self._done:
                 return
@@ -58,21 +71,36 @@ class SocketFile:
         the listener. Once it has succeeded, later calls do nothing.
 
         Raises :class:`OSError` when the file cannot be looked up (other than
-        it being gone) or removing it fails."""
+        it being gone) or removing it fails (and a later call tries again);
+        then :meth:`cleanup` is still done, and its own failure, when the
+        file's went well, is raised instead."""
         with self._lock:
             if self._removed:
+                self.cleanup()
                 return
+            file_error: OSError | None = None
             try:
                 if self._file is not None:
                     _remove_if_same(*self._file)
                 self._removed = True
-            finally:
+            except OSError as e:
+                file_error = e
+            # cleanup() goes on whatever happened to the file; the file's error
+            # comes first, cleanup()'s when there is none (SPEC).
+            try:
                 self.cleanup()
+            except OSError as e:
+                if file_error is None:
+                    raise
+                file_error.add_note(f"cleaning up the symlink also failed: {e}")
+            if file_error is not None:
+                raise file_error
 
     def cleanup(self) -> None:
         """Remove the E the bind's spelling goes through (link-dir,
-        link-file), once. The spelling names nothing afterwards: do not use
-        it again."""
+        link-file). The spelling names nothing afterwards: do not use it
+        again. A failure other than E being gone is raised (a later call
+        tries again); once it has succeeded, later calls do nothing."""
         if self._link is not None:
             self._link.cleanup()
 

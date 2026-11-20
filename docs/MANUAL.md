@@ -130,7 +130,7 @@ match bound.spelling:
 
 ### remove and cleanup
 
-The two handles of `Bound.file` (`SocketFile`). Each works only when called (neither closing the listener nor garbage collection removes anything). `remove()` tries again on every call until it has succeeded, and does nothing after that. `cleanup()` works once (`remove()` goes on to `cleanup()` even when it fails).
+The two handles of `Bound.file` (`SocketFile`). Each works only when called (neither closing the listener nor garbage collection removes anything). Each tries again on every call until it has succeeded, and does nothing after that. `remove()` goes on to `cleanup()` even when it fails.
 
 | Handle | What it does |
 |---|---|
@@ -140,7 +140,8 @@ The two handles of `Bound.file` (`SocketFile`). Each works only when called (nei
 - `remove()` only removes the file and does not close the listener. Closing it is up to the user
 - Right after the bind succeeds (before the listener is returned), it records the realpath and `(st_dev, st_ino)` of the socket file, and removes the path only when its `(st_dev, st_ino)` is the same. If they cannot be recorded, it closes the listener, cleans up E and returns an error without removing the file
 - If the last component of the path is a symlink (on macOS and NetBSD the standard bind follows it too and makes the socket where it points), what it points to is recorded. If that is not a socket, it is handled as one that cannot be recorded. This keeps `remove()` from removing your symlink
-- A failure to clean up E changes neither the call's outcome nor its error (it is passed over in silence)
+- `cleanup()` called by you (`SocketFile`, `ForBind`, `ForConnect`) returns the `OSError` when E cannot be removed (other than when it is gone already). `remove()` returns the file side's error first (with `cleanup()`'s added as a note on that exception), and `cleanup()`'s when there is none
+- A failure to clean up E inside a call (the default connect's E, the E of a failed bind, the E of thread-cwd / at) changes neither the call's outcome nor its error (it is passed over in silence)
 - For a relative path, it compares the cwd's `(st_dev, st_ino)` at the start of the call and after recording, and if they differ it closes the listener with an `OSError` without errno (so as not to record an unrelated file in the original cwd because of a cwd change in between. A change and change back is not seen)
 - It also succeeds when the file is already gone and when it has been replaced by another file and is not removed. It fails when it cannot check (`lstat` fails with something other than `ENOENT` / `ENOTDIR`) and when the removal itself fails
 - Replacement is told apart only by `(st_dev, st_ino)`, and what is promised covers replacement while the listener is open. Something removed and made again after closing cannot be told apart on file systems that reuse numbers at once (ext4, the BSDs' UFS / FFS). **Call `remove()` before closing the listener**

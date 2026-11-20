@@ -325,6 +325,14 @@ class Dir:
         0, or its name no longer names it."""
         return _gone(self.fd, self.name, self.base.fd)
 
+    def unlink_or_raise(self, name: bytes) -> None:
+        """Remove E ``name`` for the caller's ``cleanup()``: gone already is
+        removed; any other failure is raised."""
+        if self.closed:
+            return
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(name, dir_fd=self.fd)
+
     def unlink(self, name: bytes) -> None:
         """Remove E ``name``. A failure is passed over in silence (SPEC-routes:
         cleaning up E changes neither the call's outcome nor its error)."""

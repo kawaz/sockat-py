@@ -5,6 +5,7 @@ errors with ``skipped`` and ``route``, and the resolve calls. B is given
 
 from __future__ import annotations
 
+import contextlib
 import errno
 import os
 import socket
@@ -505,3 +506,68 @@ def test_failing_to_clean_up_e_is_silent(tmp: TmpDirs, monkeypatch: pytest.Monke
     with raises_errno(errno.EADDRINUSE):
         _calls.bind(p, env=env)
     monkeypatch.undo()
+
+
+def _d_of(o: sockat.ex.Options) -> bytes:
+    assert o.base is not None
+    b = os.fsencode(o.base)
+    (d,) = ds(b)
+    return b + b"/" + d
+
+
+# cleanup() asked for by the caller reports a failure to remove E (here: D
+# not writable): raised, E left, and a later call (once it can) removes it;
+# after that, calls do nothing. For SocketFile, ForBind and ForConnect.
+@pytest.mark.skipif(ROOT, reason="root writes anywhere")
+@pytest.mark.parametrize("which", ["socket file", "for bind", "for connect"])
+def test_cleanup_reports_its_failure(tmp: TmpDirs, which: str) -> None:
+    o = options(tmp)
+    p = long_path(tmp.new())
+    with listener_at(p) if which == "for connect" else contextlib.nullcontext():
+        if which == "socket file":
+            bound = sockat.ex.bind(p, options=o)
+            cleanup = bound.file.cleanup
+        elif which == "for bind":
+            cleanup = sockat.ex.resolve_for_bind(p, options=o).cleanup
+        else:
+            cleanup = sockat.ex.resolve_for_connect(p, options=o).cleanup
+        d = _d_of(o)
+        os.chmod(d, 0o511)
+        try:
+            with pytest.raises(PermissionError):
+                cleanup()
+            assert e_in(o) != []
+        finally:
+            os.chmod(d, 0o711)
+        cleanup()
+        assert e_in(o) == []
+        cleanup()
+
+
+# remove(): when both the file's removal and cleanup() fail, the file's error
+# is raised (cleanup()'s noted on it); when only cleanup() fails, its error is
+# raised and the file is gone. cleanup() is done in either case.
+@pytest.mark.skipif(ROOT, reason="root writes anywhere")
+def test_remove_raises_the_files_error_first(tmp: TmpDirs) -> None:
+    o = options(tmp)
+    p = long_path(tmp.new())
+    bound = sockat.ex.bind(p, options=o)
+    d, sockdir = _d_of(o), os.path.dirname(p)
+    with bound.socket:
+        os.chmod(d, 0o511)
+        os.chmod(sockdir, 0o600)
+        try:
+            with pytest.raises(PermissionError) as e:
+                bound.file.remove()
+            assert any("cleaning up" in n for n in getattr(e.value, "__notes__", []))
+        finally:
+            os.chmod(sockdir, 0o700)
+        try:
+            with pytest.raises(PermissionError) as e2:
+                bound.file.remove()
+            assert not getattr(e2.value, "__notes__", [])
+            assert not os.path.lexists(p)
+        finally:
+            os.chmod(d, 0o711)
+        bound.file.remove()
+        assert e_in(o) == []

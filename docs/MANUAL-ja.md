@@ -130,7 +130,7 @@ match bound.spelling:
 
 ### remove と cleanup
 
-`Bound.file` (`SocketFile`) の 2 つの口。どちらも呼んだ時だけ働く (listener を閉じても、ガベージコレクションでも消さない)。`remove()` は成功するまでは呼ぶたびに消し直し、成功した後は何もしない。`cleanup()` は 1 回だけ働く (`remove()` が失敗した時も `cleanup()` まで行う)。
+`Bound.file` (`SocketFile`) の 2 つの口。どちらも呼んだ時だけ働く (listener を閉じても、ガベージコレクションでも消さない)。どちらも成功するまでは呼ぶたびにやり直し、成功した後は何もしない。`remove()` は失敗した時も `cleanup()` まで行う。
 
 | 口 | すること |
 |---|---|
@@ -140,7 +140,8 @@ match bound.spelling:
 - `remove()` はファイルを消すだけで、listener を閉じない。閉じるのは利用者
 - bind が通った直後 (listener を返す前) に、ソケットのファイルの realpath と `(st_dev, st_ino)` を覚え、そのパスの `(st_dev, st_ino)` が同じ時だけ消す。覚えられなければ listener を閉じ、E を片付け、ファイルは消さずにエラーを返す
 - 元のパスの最後の要素が symlink なら (macOS・NetBSD では標準の bind も辿り、その先にソケットを作る)、辿った先を覚える。そこがソケットでなければ覚えられない時と同じに扱う。`remove()` が利用者の symlink を消さないため
-- E の片付けに失敗しても、呼び出しの成否も元のエラーも変えない (黙る)
+- 利用者が呼ぶ `cleanup()` (`SocketFile`・`ForBind`・`ForConnect`) は、E を消すのに失敗したら (既に無い時を除く) その `OSError` を返す。`remove()` はファイルを消す側のエラーを先に返し (`cleanup()` のエラーはその例外の note に足す)、無ければ `cleanup()` のエラーを返す
+- 呼び出しの中の E の片付け (既定の connect の E、bind が失敗した時の E、thread-cwd・at の E) の失敗は、呼び出しの成否も元のエラーも変えない (黙る)
 - 相対パスの時は、呼び出しの初めと覚えた後で cwd の `(st_dev, st_ino)` を比べ、違えば errno の無い `OSError` で listener を閉じる (間の cwd の変更で、元の cwd の無関係なファイルを覚えないため。変えて戻した場合は見えない)
 - ファイルが既に無い時と、別のファイルに置き換わっていて消さない時も成功する。失敗するのは、確かめられない時 (`lstat` が `ENOENT` / `ENOTDIR` 以外で失敗) と、消そうとして失敗した時
 - 置き換えを見分けるのは `(st_dev, st_ino)` だけで、約束するのは listener を開いている間の置き換えまで。閉じた後に消して作り直された物は、番号をすぐ使い回すファイルシステム (ext4、BSD の UFS / FFS) で見分けられない。**`remove()` は listener を閉じる前に呼ぶ**
