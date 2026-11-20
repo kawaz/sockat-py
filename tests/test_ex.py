@@ -11,6 +11,7 @@ import socket
 
 import pytest
 from _support import (
+    ROOT,
     TmpDirs,
     accept_ping,
     ds,
@@ -44,7 +45,7 @@ def e_in(o: sockat.ex.Options) -> list[str]:
 def test_bound(tmp: TmpDirs) -> None:
     o = options(tmp)
     p = long_path(tmp.new())
-    bound = sockat.ex.bind(p, o)
+    bound = sockat.ex.bind(p, options=o)
     sock, file, spelling, route, base, skipped = bound
     with sock:
         assert route == "link-dir"
@@ -65,7 +66,7 @@ def test_bound(tmp: TmpDirs) -> None:
 def test_remove_removes_the_file_and_e_not_the_listener(tmp: TmpDirs) -> None:
     o = options(tmp)
     p = long_path(tmp.new())
-    bound = sockat.ex.bind(p, o)
+    bound = sockat.ex.bind(p, options=o)
     with bound.socket as listener:
         c = sockat.ex.connect(p)
         assert len(e_in(o)) == 1
@@ -82,7 +83,7 @@ def test_remove_removes_the_file_and_e_not_the_listener(tmp: TmpDirs) -> None:
 # while the listener was open.
 def test_remove_leaves_a_replacement_alone(tmp: TmpDirs) -> None:
     p = long_path(tmp.new())
-    bound = sockat.ex.bind(p, options(tmp))
+    bound = sockat.ex.bind(p, options=options(tmp))
     with bound.socket:
         os.unlink(p)
         with open(p, "wb") as f:
@@ -95,7 +96,7 @@ def test_remove_leaves_a_replacement_alone(tmp: TmpDirs) -> None:
 # remove() succeeds when the file is gone already.
 def test_remove_when_gone(tmp: TmpDirs) -> None:
     p = long_path(tmp.new())
-    bound = sockat.ex.bind(p, options(tmp))
+    bound = sockat.ex.bind(p, options=options(tmp))
     with bound.socket:
         os.unlink(p)
         bound.file.remove()
@@ -106,7 +107,7 @@ def test_remove_when_gone(tmp: TmpDirs) -> None:
 def test_cleanup_removes_e_only(tmp: TmpDirs) -> None:
     o = options(tmp)
     p = long_path(tmp.new())
-    bound = sockat.ex.bind(p, o)
+    bound = sockat.ex.bind(p, options=o)
     with bound.socket as listener:
         spelling = os.fsencode(kernel_sockname(listener))
         bound.file.cleanup()
@@ -170,7 +171,7 @@ def test_errors_carry_skipped_and_route(tmp: TmpDirs) -> None:
     with open(p, "wb"):
         pass
     with raises_errno(errno.EADDRINUSE) as e:
-        sockat.ex.bind(p, options(tmp))
+        sockat.ex.bind(p, options=options(tmp))
     assert e.value.route == "link-dir"  # type: ignore[attr-defined]
     assert [s.name for s in e.value.skipped] == ["standard"]  # type: ignore[attr-defined]
     os.unlink(p)
@@ -201,7 +202,7 @@ def test_connected(tmp: TmpDirs) -> None:
 def test_resolve_for_bind(tmp: TmpDirs) -> None:
     o = options(tmp)
     p = long_path(tmp.new())
-    r = sockat.ex.resolve_for_bind(os.fsdecode(p), o)
+    r = sockat.ex.resolve_for_bind(os.fsdecode(p), options=o)
     assert isinstance(r.path, str)
     assert len(os.fsencode(r.path)) <= DIRECT_MAX
     assert r.route == "link-dir"
@@ -224,12 +225,12 @@ def test_resolve_for_bind(tmp: TmpDirs) -> None:
 def test_resolve_for_bind_past_link_dir(tmp: TmpDirs) -> None:
     p = long_path(tmp.new(), name=b"n" * 95)
     if LinkFile.FOLLOWS is default_link_file():
-        r = sockat.ex.resolve_for_bind(p, options(tmp))
+        r = sockat.ex.resolve_for_bind(p, options=options(tmp))
         assert r.route == "link-file"
         r.cleanup()
         return
     with raises_errno(errno.ENAMETOOLONG) as e:
-        sockat.ex.resolve_for_bind(p, options(tmp))
+        sockat.ex.resolve_for_bind(p, options=options(tmp))
     assert [s.name for s in e.value.skipped] == ["standard", "link-dir"]  # type: ignore[attr-defined]
 
 
@@ -240,7 +241,7 @@ def test_resolve_for_connect(tmp: TmpDirs) -> None:
     o = options(tmp)
     p = long_path(tmp.new(), name=b"n" * 95)
     with listener_at(p) as listener:
-        r = sockat.ex.resolve_for_connect(p, o)
+        r = sockat.ex.resolve_for_connect(p, options=o)
         assert r.route == "link-file"
         assert isinstance(r.path, bytes)
         for _ in range(3):
@@ -256,10 +257,38 @@ def test_resolve_for_connect(tmp: TmpDirs) -> None:
     assert sockat.ex.resolve_for_connect(short).path == short
 
 
-# sweep() runs over the default places without error (the D of live
-# processes, this one included, stay).
-def test_sweep_runs() -> None:
-    sockat.ex.sweep()
+# sockat.ex.sweep() sweeps the places read from the environment: run in a
+# child whose places are the test's own (the real /tmp/sockat-<uid> holds
+# other processes' D, which a test must not remove), it removes the D of a
+# process gone and keeps the live one's.
+def test_sweep_sweeps_the_places_of_the_environment(tmp: TmpDirs) -> None:
+    place = tmp.new()
+    work = tmp.new()
+    ended = run_child(
+        """
+        from _support import env_at, bind_in, long_path
+        bind_in(env_at(os.fsencode(ARGS["place"])), long_path(os.fsencode(ARGS["work"]) + b"/ended"))
+        """,
+        args={"place": os.fsdecode(place), "work": os.fsdecode(work)},
+    )
+    assert ended["returncode"] == 0
+    out = run_child(
+        """
+        import sockat.ex
+        from sockat import _place
+        from _support import env_at, bind_in, long_path, ds
+        env = env_at(os.fsencode(ARGS["place"]))
+        _place.Config.from_env = classmethod(lambda cls: env.config)
+        bind_in(env, long_path(os.fsencode(ARGS["work"]) + b"/live"))
+        b = env.auto_base().real
+        before = len(ds(b))
+        sockat.ex.sweep()
+        report(before=before, after=ds(b) == [env.auto_base().dir(env.config.uid).name])
+        """,
+        args={"place": os.fsdecode(place), "work": os.fsdecode(work)},
+    )
+    assert out["before"] == 2
+    assert out["after"] is True
 
 
 # ForBind has no remove(): after binding the spelling oneself, socket_file()
@@ -269,7 +298,7 @@ def test_sweep_runs() -> None:
 def test_for_bind_socket_file(tmp: TmpDirs) -> None:
     o = options(tmp)
     p = long_path(tmp.new())
-    r = sockat.ex.resolve_for_bind(p, o)
+    r = sockat.ex.resolve_for_bind(p, options=o)
     assert not hasattr(r, "remove")
     with pytest.raises(FileNotFoundError):
         r.socket_file()
@@ -282,7 +311,7 @@ def test_for_bind_socket_file(tmp: TmpDirs) -> None:
         assert not os.path.lexists(p)
         assert e_in(o) == []
     # A file put in its place while the listener is open is not removed.
-    r = sockat.ex.resolve_for_bind(p, o)
+    r = sockat.ex.resolve_for_bind(p, options=o)
     with socket.socket(socket.AF_UNIX) as s:
         s.bind(r.path)
         f = r.socket_file()
@@ -323,6 +352,74 @@ def test_for_bind_socket_file_relative_cwd_changed(tmp: TmpDirs) -> None:
 def test_for_connect_has_no_base(tmp: TmpDirs) -> None:
     p = long_path(tmp.new())
     with listener_at(p):
-        r = sockat.ex.resolve_for_connect(p, options(tmp))
+        r = sockat.ex.resolve_for_connect(p, options=options(tmp))
         assert not hasattr(r, "base")
         r.cleanup()
+
+
+# remove() that fails (the socket's directory cannot be searched: lstat
+# answers EACCES) raises, still does cleanup(), and a later call, once the
+# directory can be searched again, removes the file.
+@pytest.mark.skipif(ROOT, reason="root searches anything")
+def test_remove_that_fails(tmp: TmpDirs) -> None:
+    o = options(tmp)
+    p = long_path(tmp.new())
+    bound = sockat.ex.bind(p, options=o)
+    d = os.path.dirname(p)
+    with bound.socket:
+        os.chmod(d, 0o600)
+        try:
+            with pytest.raises(PermissionError):
+                bound.file.remove()
+            assert e_in(o) == []
+        finally:
+            os.chmod(d, 0o700)
+        assert is_socket(p)
+        bound.file.remove()
+        assert not os.path.lexists(p)
+
+
+# On a system whose bind follows link-file's symlink, socket_file() follows
+# a link-file spelling to the socket file at the path.
+@pytest.mark.skipif(default_link_file() is not LinkFile.FOLLOWS, reason="resolve_for_bind has link-file here only")
+def test_for_bind_socket_file_through_link_file(tmp: TmpDirs) -> None:
+    o = options(tmp)
+    p = long_path(tmp.new(), name=b"n" * 100)
+    r = sockat.ex.resolve_for_bind(p, options=o)
+    assert r.route == "link-file"
+    with socket.socket(socket.AF_UNIX) as s:
+        s.bind(r.path)
+        f = r.socket_file()
+        assert is_socket(p)
+        f.remove()
+    assert not os.path.lexists(p)
+    assert e_in(o) == []
+
+
+# A long path given relative to the cwd is bound, reached and removed like an
+# absolute one: the socket at the path, remove() removing it.
+def test_a_long_relative_path(tmp: TmpDirs) -> None:
+    root = tmp.new()
+    p = long_path(root)
+    rel = os.path.relpath(p, root)
+    assert len(rel) > DIRECT_MAX
+    out = run_child(
+        """
+        import sockat, sockat.ex
+        o = sockat.ex.Options(base=os.fsencode(ARGS["given"]))
+        bound = sockat.ex.bind(ARGS["rel"], options=o)
+        c = sockat.ex.connect(ARGS["rel"], options=o)
+        conn, _ = bound.socket.accept()
+        c.socket.sendall(b"x")
+        got = conn.recv(1)
+        here = os.path.exists(ARGS["rel"])
+        bound.file.remove()
+        report(route=bound.route, got=got.decode(), here=here, gone=not os.path.lexists(ARGS["rel"]))
+        """,
+        cwd=root,
+        args={"rel": os.fsdecode(rel), "given": os.fsdecode(tmp.new() + b"/b")},
+    )
+    assert out["route"] == "link-dir"
+    assert out["got"] == "x"
+    assert out["here"] is True
+    assert out["gone"] is True

@@ -30,7 +30,7 @@ def options(tmp: TmpDirs) -> sockat.ex.Options:
 # the route's spelling. Reading the addresses never fails.
 def test_a_long_paths_sockets_report_the_path(tmp: TmpDirs) -> None:
     p = long_path(tmp.new())
-    bound = sockat.ex.bind(p, options(tmp))
+    bound = sockat.ex.bind(p, options=options(tmp))
     with bound.socket as listener, listener.dup() as listener_dup:
         assert type(listener) is PathSocket
         assert listener.getsockname() == listener_dup.getsockname() == os.fsdecode(p)
@@ -66,7 +66,7 @@ def test_a_short_paths_sockets_are_the_standards(tmp: TmpDirs) -> None:
 # report the path.
 def test_failures_are_the_standards(tmp: TmpDirs) -> None:
     p = long_path(tmp.new())
-    bound = sockat.ex.bind(p, options(tmp))
+    bound = sockat.ex.bind(p, options=options(tmp))
     listener = bound.socket
     with raises_errno(errno.ENOTCONN):
         listener.getpeername()
@@ -80,7 +80,7 @@ def test_failures_are_the_standards(tmp: TmpDirs) -> None:
 # blocking mode (nonblocking only from connect_nonblocking).
 def test_the_sockets_are_set_up_as_the_standards(tmp: TmpDirs) -> None:
     p = long_path(tmp.new())
-    bound = sockat.ex.bind(p, options(tmp))
+    bound = sockat.ex.bind(p, options=options(tmp))
     with bound.socket as listener, sockat.connect(p) as c, sockat.connect_nonblocking(p) as n:
         for s in (listener, c, n):
             assert fcntl.fcntl(s.fileno(), fcntl.F_GETFD) & fcntl.FD_CLOEXEC

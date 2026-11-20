@@ -9,14 +9,14 @@ import socket
 import tempfile
 
 import pytest
-from _support import THREAD_CWD, TmpDirs, env_at, kernel_sockname, long_path
+from _support import HAS_PROC, THREAD_CWD, TmpDirs, env_at, kernel_sockname, long_path, run_child
 
 import sockat
 import sockat.ex
 import sockat.ex.datagram
 from sockat import _calls
 from sockat._routes import Call
-from sockat._sys import Op
+from sockat._sys import IS_APPLE, Op
 
 
 def dgram_listener_at(path: bytes) -> socket.socket:
@@ -49,7 +49,7 @@ def test_bind_and_connect(tmp: TmpDirs) -> None:
 def test_ex(tmp: TmpDirs) -> None:
     p = long_path(tmp.new())
     o = sockat.ex.Options(base=tmp.new() + b"/b")
-    bound = sockat.ex.datagram.bind(p, o)
+    bound = sockat.ex.datagram.bind(p, options=o)
     with bound.socket as server, sockat.datagram.unbound() as client:
         assert isinstance(bound.spelling, sockat.ex.Linked)
         report = sockat.ex.datagram.connect(client, p)
@@ -100,3 +100,63 @@ def test_a_failure_leaves_the_callers_socket_open(tmp: TmpDirs) -> None:
         with pytest.raises(FileNotFoundError):
             sockat.datagram.connect(client, p)
         assert client.fileno() >= 0
+
+
+# The caller's datagram socket connected to a long path reports it as its
+# peer; connected again to a short path, it reports the kernel's again (not
+# the long path any more).
+def test_reconnecting_reports_the_new_peer(tmp: TmpDirs) -> None:
+    long_p = long_path(tmp.new())
+    short_p = tmp.new() + b"/s.sock"
+    with dgram_listener_at(long_p), dgram_listener_at(short_p), sockat.datagram.unbound() as client:
+        sockat.datagram.connect(client, long_p)
+        assert client.getpeername() == os.fsdecode(long_p)
+        sockat.datagram.connect(client, short_p)
+        # The kernel's: the name the receiver was bound under (it was renamed
+        # to the short path afterwards), not the long path.
+        assert client.getpeername() == socket.socket.getpeername(client)
+        assert client.getpeername() != os.fsdecode(long_p)
+        sockat.datagram.connect(client, long_p)
+        assert client.getpeername() == os.fsdecode(long_p)
+
+
+# The routes that need no write (proc-direct, widened) work on the caller's
+# datagram socket too.
+NO_WRITE_ROUTES = [*(["proc-direct"] if HAS_PROC else []), *(["widened"] if IS_APPLE else [])]
+
+
+@pytest.mark.skipif(not NO_WRITE_ROUTES, reason="neither /proc nor the widened sockaddr here")
+@pytest.mark.parametrize("route", NO_WRITE_ROUTES or ["none"])
+def test_no_write_routes_on_the_callers_socket(tmp: TmpDirs, route: str) -> None:
+    env = env_at(tmp.new())
+    p = long_path(tmp.new())
+    with dgram_listener_at(p) as receiver, sockat.datagram.unbound() as client:
+        sock, got = _calls.connect(p, call=Call(Op.CONNECT, socket.SOCK_DGRAM, sock=client), env=env, order=(route,))
+        assert (sock, got) == (client, route)
+        client.send(b"x")
+        assert receiver.recv(1) == b"x"
+
+
+# relative on the caller's datagram socket, from a cwd near the socket (in a
+# child, so the test's cwd stays).
+def test_relative_on_the_callers_socket(tmp: TmpDirs) -> None:
+    p = long_path(tmp.new())
+    with dgram_listener_at(p) as receiver:
+        out = run_child(
+            """
+            from _support import env_at
+            from sockat import _calls, datagram
+            from sockat._routes import Call
+            from sockat._sys import IS_APPLE, Op
+            client = datagram.unbound()
+            env = env_at(b"/nonexistent")
+            call = Call(Op.CONNECT, socket.SOCK_DGRAM, sock=client)
+            _, route = _calls.connect(os.fsencode(ARGS["p"]), call=call, env=env, order=("relative",))
+            client.send(b"x")
+            report(route=route)
+            """,
+            cwd=os.path.dirname(p),
+            args={"p": os.fsdecode(p)},
+        )
+        assert out["route"] == "relative"
+        assert receiver.recv(1) == b"x"

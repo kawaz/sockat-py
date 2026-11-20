@@ -176,7 +176,7 @@ def env_at(
     are ``places`` (each as ``tmp`` with B named ``sockat-<uid>``), with
     /proc, the thread's own cwd, link-file and the widened sockaddr as
     given (this system's unless given)."""
-    uid = os.getuid()
+    uid = os.geteuid()
     kinds = (Kind.TMP, Kind.RUNTIME, Kind.TMPDIR)
     ps = tuple(Place(kinds[min(i, 2)], p, b"sockat-%d" % uid) for i, p in enumerate(places))
     cfg = Config(places=ps, uid=uid, proc=proc, thread_cwd=thread_cwd, wide=wide)

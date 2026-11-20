@@ -10,8 +10,8 @@ from sockat._path import below, components, relative, split
 
 # `split` decides which directory a long path's socket is created in and under
 # which name, for every route that does not hand the whole path to the kernel
-# (the D routes' `R/<name>`, /proc, the relative spelling's check,
-# connectat). A wrong split creates the socket somewhere else
+# (link-dir's and thread-cwd's E, proc-direct, the relative spelling's check,
+# at-direct). A wrong split creates the socket somewhere else
 # than the path says, so each shape is pinned here.
 @pytest.mark.parametrize(
     ("path", "directory", "name"),

@@ -6,6 +6,7 @@ them at once, and ``sweep``."""
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import errno
 import fcntl
 import os
@@ -18,7 +19,9 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 from _support import (
+    HAS_PROC,
     HAS_THREAD_ROUTE,
+    NO_PLACE,
     NO_PROC,
     PRELUDE,
     ROOT,
@@ -41,11 +44,13 @@ from _support import (
 import sockat.ex
 from sockat import _calls, _place
 from sockat._place import Kind, State
+from sockat._routes import Call
 from sockat._spelling import Trail
+from sockat._sys import Op
 
 
 def uid_name() -> bytes:
-    return b"sockat-%d" % os.getuid()
+    return b"sockat-%d" % os.geteuid()
 
 
 def mode(p: bytes) -> int:
@@ -149,13 +154,14 @@ def test_an_existing_b_is_checked(tmp: TmpDirs, what: str) -> None:
 def test_options_base_is_b(tmp: TmpDirs) -> None:
     root = tmp.new()
     given = root + b"/b"
-    bound = sockat.ex.bind(long_path(tmp.new()), sockat.ex.Options(base=given))
+    bound = sockat.ex.bind(long_path(tmp.new()), options=sockat.ex.Options(base=given))
     with bound.socket:
         assert mode(given) == 0o711
         assert len(ds(given)) == 1
-        assert bound.route in ("link-dir", "link-file", "thread-cwd", "at")
-        if bound.route in ("link-dir", "link-file"):
-            assert bound.base == "given"
+        # A short B: link-dir (procB where /proc is, its real path elsewhere),
+        # either way base "given".
+        assert bound.route == "link-dir"
+        assert bound.base == "given"
         bound.file.remove()
 
 
@@ -215,16 +221,15 @@ def test_usable_cross_uid_takes_b_others_can_reach(tmp: TmpDirs) -> None:
     closed = tmp.new()  # 0700 (mkdtemp)
     open_ = tmp.new()
     os.chmod(open_, 0o755)
-    env = env_at(closed, open_)
+    env = env_at(closed, open_, proc=NO_PROC)
     done = bind_in(env, long_path(tmp.new()), opts=_calls.Opts(usable_cross_uid=True))
     with done.sock:
-        if done.route in ("link-dir", "link-file"):
-            assert isinstance(done.spelling, sockat.ex.Linked)
-            assert done.spelling.usable_cross_uid
-            assert done.base == "tmpdir" or done.base == "runtime"
-            assert listing(open_) == [uid_name()]
-        else:
-            assert done.spelling == sockat.ex.Dangling()
+        assert done.route == "link-dir"
+        assert done.base == "runtime"
+        assert isinstance(done.spelling, sockat.ex.Linked)
+        assert done.spelling.usable_cross_uid
+        assert listing(open_) == [uid_name()]
+        assert listing(closed) == []
 
 
 # Where no place lets others through, usable_cross_uid does not fall back to a
@@ -422,17 +427,17 @@ def test_a_forked_child_makes_its_own_d(tmp: TmpDirs) -> None:
         from sockat import _place, _calls
         from sockat._place import Env, Config, Place, Kind
         def env():
-            return Env(Config(places=(Place(Kind.TMP, {place!r}, b"sockat-%d" % os.getuid()),)), _place.state())
+            return Env(Config(places=(Place(Kind.TMP, {place!r}, b"sockat-%d" % os.geteuid()),)), _place.state())
         _calls.bind(long_path({work!r} + b"/parent"), env=env())
-        parent_d = _place.state().auto.dir(os.getuid()).name
+        parent_d = _place.state().auto.dir(os.geteuid()).name
         r, w = os.pipe()
         pid = os.fork()
         if pid == 0:
             _calls.bind(long_path({work!r} + b"/child"), env=env())
-            os.write(w, _place.state().auto.dir(os.getuid()).name)
+            os.write(w, _place.state().auto.dir(os.geteuid()).name)
             os._exit(0)
         os.waitpid(pid, 0)
-        still = _place.state().auto.dir(os.getuid()).name.decode()
+        still = _place.state().auto.dir(os.geteuid()).name.decode()
         report(parent=parent_d.decode(), child=os.read(r, 100).decode(), still=still)
         """
     )
@@ -495,9 +500,9 @@ def test_options_base_is_checked_before_any_route(tmp: TmpDirs, op: str) -> None
     p = long_path(tmp.new())
     with listener_at(p) if op == "connect" else contextlib.nullcontext(), raises_errno(errno.EPERM) as e:
         if op == "bind":
-            sockat.ex.bind(p, sockat.ex.Options(base=given))
+            sockat.ex.bind(p, options=sockat.ex.Options(base=given))
         else:
-            sockat.ex.connect(p, sockat.ex.Options(base=given))
+            sockat.ex.connect(p, options=sockat.ex.Options(base=given))
     assert e.value.route is None  # type: ignore[attr-defined]
     assert e.value.skipped == ()  # type: ignore[attr-defined]
     assert listing(root) == []
@@ -510,7 +515,7 @@ def test_options_base_must_be_an_absolute_path_ending_with_a_name(tmp: TmpDirs, 
     p = long_path(tmp.new())
     for call in (sockat.ex.bind, sockat.ex.connect, sockat.ex.resolve_for_bind, sockat.ex.resolve_for_connect):
         with pytest.raises(ValueError, match=r"base|file name"):
-            call(p, sockat.ex.Options(base=given))
+            call(p, options=sockat.ex.Options(base=given))
     with pytest.raises(ValueError, match=r"base|file name"):
         sockat.ex.sweep_base(given)
 
@@ -522,13 +527,13 @@ def test_connects_do_not_look_at_usable_cross_uid(tmp: TmpDirs) -> None:
     p = long_path(tmp.new())
     o = sockat.ex.Options(usable_cross_uid=True, base=root + b"/b")
     with listener_at(p) as listener:
-        c = sockat.ex.connect(p, o)
+        c = sockat.ex.connect(p, options=o)
         with c.socket:
             accept_ping(listener, c.socket)
-        r = sockat.ex.resolve_for_connect(p, o)
+        r = sockat.ex.resolve_for_connect(p, options=o)
         r.cleanup()
     with raises_errno(errno.EPERM):
-        sockat.ex.resolve_for_bind(p, o)
+        sockat.ex.resolve_for_bind(p, options=o)
 
 
 # B is not made where the spelling through it is known not to fit (judged
@@ -544,24 +549,27 @@ def test_b_is_not_made_for_a_spelling_that_cannot_fit(tmp: TmpDirs) -> None:
     assert listing(place) == []
 
 
-# A umask that takes the owner's r or x off leaves B (and D) unopenable: the
-# empty directory just made is removed and the place passed over, leaving
-# nothing behind.
-@pytest.mark.skipif(ROOT, reason="root opens anything")
-def test_a_umask_that_hides_b_from_its_owner_leaves_nothing(tmp: TmpDirs) -> None:
-    first, second = tmp.new(), tmp.new()
+# Whatever the umask (even one that takes the owner's r and x off), B and D
+# are made 0711: their mode is set by name right after the mkdirat, before
+# they are opened, and a bind through them goes through.
+@pytest.mark.parametrize("umask", [0o077, 0o700, 0o777])
+def test_b_and_d_are_0711_whatever_the_umask(tmp: TmpDirs, umask: int) -> None:
+    place = tmp.new()
     out = run_child(
         """
-        from _support import env_at
-        os.umask(0o700)
-        env = env_at(os.fsencode(ARGS["first"]), os.fsencode(ARGS["second"]))
-        report(b=env.auto_base() is not None)
+        from _support import env_at, bind_in
+        os.umask(ARGS["umask"])
+        env = env_at(os.fsencode(ARGS["place"]), proc=b"/nonexistent")
+        done = bind_in(env, os.fsencode(ARGS["path"]))
+        report(route=done.route)
         """,
-        args={"first": os.fsdecode(first), "second": os.fsdecode(second)},
+        args={"place": os.fsdecode(place), "path": os.fsdecode(long_path(tmp.new())), "umask": umask},
     )
-    assert out["b"] is False
-    assert listing(first) == []
-    assert listing(second) == []
+    assert out["route"] == "link-dir"
+    b = place + b"/" + uid_name()
+    (d,) = ds(b)
+    assert mode(b) == 0o711
+    assert mode(b + b"/" + d) == 0o711
 
 
 # A B already there that is ours but 0700 is used as it is (its mode is not
@@ -644,15 +652,191 @@ def test_sweep_base(tmp: TmpDirs) -> None:
         """
         import sockat.ex
         from _support import long_path
-        b = sockat.ex.bind(long_path(os.fsencode(ARGS["work"])), sockat.ex.Options(base=os.fsencode(ARGS["given"])))
+        o = sockat.ex.Options(base=os.fsencode(ARGS["given"]))
+        b = sockat.ex.bind(long_path(os.fsencode(ARGS["work"])), options=o)
         report(route=b.route)
         """,
         args={"given": os.fsdecode(given), "work": os.fsdecode(work)},
     )
     assert out["route"] == "link-dir"
-    mine = sockat.ex.bind(long_path(work + b"/mine"), sockat.ex.Options(base=given))
+    mine = sockat.ex.bind(long_path(work + b"/mine"), options=sockat.ex.Options(base=given))
     with mine.socket:
         assert len(ds(given)) == 2
         sockat.ex.sweep_base(given)
         assert len(ds(given)) == 1
         mine.file.remove()
+
+
+# What the process makes is owned by its effective uid, and B is named after
+# it: a process whose effective uid differs from its real one (seteuid) makes
+# sockat-<euid>, owned by it, and uses it. Run as root only (seteuid).
+@pytest.mark.skipif(not ROOT, reason="needs root to seteuid")
+def test_b_is_made_for_the_effective_uid(tmp: TmpDirs) -> None:
+    place = tmp.new()
+    os.chmod(place, 0o1777)
+    work = tmp.new()
+    os.chmod(work, 0o1777)
+    out = run_child(
+        """
+        from _support import env_at, bind_in, long_path
+        os.seteuid(65534)
+        env = env_at(os.fsencode(ARGS["place"]), proc=b"/nonexistent")
+        done = bind_in(env, long_path(os.fsencode(ARGS["work"])))
+        report(route=done.route, base=done.base)
+        """,
+        args={"place": os.fsdecode(place), "work": os.fsdecode(work)},
+    )
+    assert out["route"] == "link-dir"
+    assert listing(place) == [b"sockat-65534"]
+    assert os.stat(place + b"/sockat-65534").st_uid == 65534
+
+
+# A fresh B that fails its check (owned by another uid than the one it is
+# made for) is removed rather than left in the place.
+@pytest.mark.skipif(not ROOT, reason="needs root to make a directory another uid owns")
+def test_a_fresh_b_failing_its_check_is_removed(tmp: TmpDirs) -> None:
+    place = tmp.new()
+    env = env_at(place, proc=NO_PROC)
+    env = _place.Env(dataclasses.replace(env.config, uid=65534), State())
+    assert env.auto_base() is None
+    assert listing(place) == []
+
+
+# The process's B and the B for usable_cross_uid are one and the same where
+# they are at the same place: one B, one D.
+def test_cross_uid_and_plain_share_b_and_d_at_one_place(tmp: TmpDirs) -> None:
+    place = tmp.new()
+    os.chmod(place, 0o755)
+    env = env_at(place, proc=NO_PROC)
+    for cross in (False, True, False):
+        done = bind_in(env, long_path(tmp.new()), opts=_calls.Opts(usable_cross_uid=cross))
+        done.sock.close()
+        assert done.route == "link-dir"
+    assert listing(place) == [uid_name()]
+    assert len(ds(place + b"/" + uid_name())) == 1
+
+
+# D that cannot be made in a call leaves that call without the routes using
+# D (no other B is looked for), and a later call makes it.
+@pytest.mark.skipif(ROOT, reason="root writes anywhere")
+def test_d_not_made_is_tried_again_by_a_later_call(tmp: TmpDirs) -> None:
+    first, second = tmp.new(), tmp.new()
+    env = env_at(first, second, proc=NO_PROC, thread_cwd=False, link_file=_place.LinkFile.NOT_TRIED)
+    b = base_of(env)
+    os.chmod(b, 0o511)
+    try:
+        trail = Trail()
+        with raises_errno(errno.ENAMETOOLONG):
+            bind_in(env, long_path(tmp.new()), trail=trail)
+        assert ("link-dir", "D not made") in [(s.name, s.reason) for s in trail.skipped]
+        assert listing(second) == []
+    finally:
+        os.chmod(b, 0o711)
+    done = bind_in(env, long_path(tmp.new()))
+    done.sock.close()
+    assert done.route == "link-dir"
+    assert len(ds(b)) == 1
+
+
+def _fake_proc(root: bytes) -> bytes:
+    """A /proc whose fd entries all name ``/``: it lists an fd, but not as
+    what the fd is (another PID namespace's /proc, say)."""
+    for who in (b"self", b"%d" % os.getpid()):
+        fds = root + b"/" + who + b"/fd"
+        os.makedirs(fds)
+        for n in range(256):
+            os.symlink(b"/", fds + b"/%d" % n)
+    return root
+
+
+# procB is used only where /proc names B: when /proc/<pid>/fd/<B's fd> is
+# another directory than B (its (st_dev, st_ino) differ), link-dir goes
+# through B's real path instead.
+def test_procb_is_not_used_where_proc_names_another_directory(tmp: TmpDirs) -> None:
+    proc = _fake_proc(tmp.new() + b"/proc")
+    env = env_at(tmp.new(), proc=proc)
+    trail = Trail()
+    done = bind_in(env, long_path(tmp.new()), trail=trail)
+    done.sock.close()
+    assert done.route == "link-dir"
+    assert done.base == "tmp"
+    assert isinstance(done.spelling, sockat.ex.Linked)
+    assert done.spelling.until is sockat.ex.Until.CLEANUP
+
+
+# Where no place can hold B, B is made in the socket's directory and used by
+# procB only: the bind goes through it (base "sockdir").
+@pytest.mark.skipif(not HAS_PROC, reason="procB needs /proc")
+def test_a_bind_through_b_in_the_socket_directory(tmp: TmpDirs) -> None:
+    env = env_at(NO_PLACE)
+    p = long_path(tmp.new())
+    done = bind_in(env, p)
+    with done.sock:
+        assert done.route == "link-dir"
+        assert done.base == "sockdir"
+        assert isinstance(done.spelling, sockat.ex.Linked)
+        assert done.spelling.until is sockat.ex.Until.PROCESS
+        (b,) = [n for n in listing(os.path.dirname(p)) if n.startswith(b".sockat.")]
+        assert len(ds(os.path.dirname(p) + b"/" + b)) == 1
+
+
+# usable_cross_uid with no B others can reach goes on to thread-cwd / at, with
+# D made in the process's usual B (not one more B).
+@pytest.mark.skipif(not HAS_THREAD_ROUTE, reason="no thread cwd / bindat here")
+def test_cross_uid_falling_to_thread_cwd_uses_the_usual_b(tmp: TmpDirs) -> None:
+    closed = tmp.new()  # 0700
+    env = env_at(closed, proc=NO_PROC)
+    done = bind_in(env, long_path(tmp.new()), opts=_calls.Opts(usable_cross_uid=True))
+    done.sock.close()
+    assert done.spelling == sockat.ex.Dangling()
+    assert listing(closed) == [uid_name()]
+    assert len(ds(closed + b"/" + uid_name())) == 1
+
+
+# An Options.base already there, ours but 0700, is refused for
+# usable_cross_uid (others cannot search it): EPERM, before any route.
+def test_an_existing_0700_base_with_usable_cross_uid_is_eperm(tmp: TmpDirs) -> None:
+    root = tmp.new()
+    os.chmod(root, 0o755)
+    given = root + b"/b"
+    os.mkdir(given)
+    os.chmod(given, 0o700)
+    trail = Trail()
+    with raises_errno(errno.EPERM):
+        _calls.bind(
+            long_path(tmp.new()),
+            env=env_at(tmp.new()),
+            opts=_calls.Opts(usable_cross_uid=True, base=given),
+            trail=trail,
+        )
+    assert trail.skipped == []
+    assert listing(given) == []
+
+
+# Options.base checked but not makeable (its parent read-only): the mkdirat's
+# error, with no route and nothing but the routes skipped before.
+@pytest.mark.skipif(ROOT, reason="root writes anywhere")
+@pytest.mark.parametrize("op", ["bind", "connect"])
+def test_options_base_that_cannot_be_made(tmp: TmpDirs, op: str) -> None:
+    root = tmp.new()
+    os.chmod(root, 0o555)
+    given = root + b"/b"
+    p = long_path(tmp.new())
+    trail = Trail()
+    env = env_at(tmp.new(), proc=NO_PROC, thread_cwd=False, wide=False)
+    try:
+        if op == "bind":
+            with pytest.raises(PermissionError):
+                _calls.bind(p, env=env, opts=_calls.Opts(base=given), trail=trail)
+        else:
+            with listener_at(p), pytest.raises(PermissionError):
+                connect_in_opts(env, p, given, trail)
+    finally:
+        os.chmod(root, 0o755)
+    assert trail.trying is None
+    assert "link-dir" not in [s.name for s in trail.skipped]
+    assert "link-file" not in [s.name for s in trail.skipped]
+
+
+def connect_in_opts(env: _place.Env, p: bytes, given: bytes, trail: Trail) -> None:
+    _calls.connect(p, call=Call(Op.CONNECT), env=env, opts=_calls.Opts(base=given), trail=trail, order=("link-file",))

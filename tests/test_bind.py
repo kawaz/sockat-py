@@ -370,3 +370,18 @@ def test_options_base_carries_the_spelling(tmp: TmpDirs) -> None:
         assert done.route == "link-dir"
         assert done.base == "given"
         assert os.fsencode(kernel_sockname(listener)).startswith(os.path.realpath(given) + b"/")
+
+
+# Where a bind follows link-file's symlink, a bind that fails through it
+# (EADDRINUSE: a file at the path) raises from link-file and leaves no E.
+@pytest.mark.skipif(not (IS_APPLE or os.uname().sysname == "NetBSD"), reason="a bind follows the symlink here only")
+def test_link_file_failure_leaves_no_e(tmp: TmpDirs) -> None:
+    env = env_at(tmp.new())
+    p = long_path(tmp.new(), name=b"n" * 100)
+    with open(p, "wb"):
+        pass
+    trail = Trail()
+    with raises_errno(errno.EADDRINUSE):
+        bind_in(env, p, trail=trail)
+    assert trail.trying == "link-file"
+    assert entries(env) == []

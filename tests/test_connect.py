@@ -95,7 +95,7 @@ def test_each_route_reaches_the_socket(tmp: TmpDirs, route: str, nonblocking: bo
         if route == "link-file":
             # The connect made B (kept, as B is), and nothing else: no D, the
             # E right in B removed.
-            assert tree(place) == [os.fsdecode(b"sockat-%d" % os.getuid()) + "/"]
+            assert tree(place) == [os.fsdecode(b"sockat-%d" % os.geteuid()) + "/"]
         else:
             assert tree(place) == before[0] == []
 
@@ -298,3 +298,26 @@ def test_options_base_for_a_connect(tmp: TmpDirs) -> None:
 # absolute one; a relative long path reaches by the others).
 def test_relative_needs_an_absolute_path() -> None:
     assert Relative.new(b"a/" + b"x" * 200 + b"/s.sock", b"a/" + b"x" * 200) is None
+
+
+# Only the routes that need the socket's directory's fd open it
+# (SPEC-routes): relative, widened and link-file do not.
+def test_only_routes_needing_the_directory_open_it(tmp: TmpDirs, monkeypatch: pytest.MonkeyPatch) -> None:
+    from sockat import _place, _routes
+
+    opened: list[bytes] = []
+    real_open = _place.open_dir
+
+    def counting(directory: bytes, *, nofollow: bool = False, dir_fd: int | None = None) -> int:
+        opened.append(directory)
+        return real_open(directory, nofollow=nofollow, dir_fd=dir_fd)
+
+    monkeypatch.setattr(_routes, "open_dir", counting)
+    env = env_at(tmp.new())
+    p = long_path(tmp.new())
+    with listener_at(p) as listener:
+        sock, route = connect_in(env, p, order=("link-file",))
+        with sock:
+            accept_ping(listener, sock)
+    assert route == "link-file"
+    assert os.path.dirname(p) not in opened
