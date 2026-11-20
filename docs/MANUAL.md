@@ -138,7 +138,9 @@ The two handles of `Bound.file` (`SocketFile`). Each works only when called (nei
 | `file.cleanup()` | Removes the E the spelling goes through (link-dir, link-file). The socket file remains. Do not use that spelling afterwards |
 
 - `remove()` only removes the file and does not close the listener. Closing it is up to the user
-- Right after the bind succeeds (before the listener is returned), it records the realpath and `(st_dev, st_ino)` of the socket file, and removes the path only when its `(st_dev, st_ino)` is the same. If they cannot be recorded, it closes the listener and returns an error without removing the file
+- Right after the bind succeeds (before the listener is returned), it records the realpath and `(st_dev, st_ino)` of the socket file, and removes the path only when its `(st_dev, st_ino)` is the same. If they cannot be recorded, it closes the listener, cleans up E and returns an error without removing the file
+- If the last component of the path is a symlink (on macOS and NetBSD the standard bind follows it too and makes the socket where it points), what it points to is recorded. If that is not a socket, it is handled as one that cannot be recorded. This keeps `remove()` from removing your symlink
+- A failure to clean up E changes neither the call's outcome nor its error (it is passed over in silence)
 - For a relative path, it compares the cwd's `(st_dev, st_ino)` at the start of the call and after recording, and if they differ it closes the listener with an `OSError` without errno (so as not to record an unrelated file in the original cwd because of a cwd change in between. A change and change back is not seen)
 - It also succeeds when the file is already gone and when it has been replaced by another file and is not removed. It fails when it cannot check (`lstat` fails with something other than `ENOENT` / `ENOTDIR`) and when the removal itself fails
 - Replacement is told apart only by `(st_dev, st_ino)`, and what is promised covers replacement while the listener is open. Something removed and made again after closing cannot be told apart on file systems that reuse numbers at once (ext4, the BSDs' UFS / FFS). **Call `remove()` before closing the listener**
@@ -205,7 +207,7 @@ listener.close()
 `sockat.ex.sweep()` removes, from the B with the default names in automatic places 1 to 3 (`/tmp/sockat-<uid>`, `$XDG_RUNTIME_DIR/sockat`, `$TMPDIR/sockat-<uid>`), the D whose owning process has ended (a D whose lock is released). `sockat.ex.sweep_base(path)` does the same for a B passed to `Options.base` (called by the app that manages that B. `path` is checked the same as `Options.base`, and nothing is made).
 
 - It does not remove the D of other live processes. It works only when called (sockat never calls it on its own)
-- It does not make B. It does not touch an E directly under B (the default connect's), and leaves a D that contains something other than a symlink
+- It does not make B. It does not touch an E directly under B (the default connect's), and leaves a D that contains something other than a symlink. It looks only at directories named as D is (10 letters and digits). B (`Options.base`'s B too) is sockat's alone: put nothing else in it
 - A B with a random name fallen back to after a failed check (`sockat-<uid>.XXXXXXXXXX`) and a B in the socket's directory (`.sockat.XXXXXXXXXX`) are not covered. These two may not be removed by the OS's clean up either (a B in the socket's directory remains in the user's directory)
 
 ## How long paths are reached
