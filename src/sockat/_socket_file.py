@@ -23,13 +23,16 @@ class Link:
         self._d = d
         self._name = name
         self._done = False
-        self._lock = threading.Lock()
+        self.lock = threading.RLock()
+        """Held while E (and, by every :class:`SocketFile` sharing this E, the
+        socket file) is removed: one removal at a time across threads, among
+        a ``ForBind`` and every ``SocketFile`` its ``socket_file()`` gave."""
 
     def cleanup(self) -> None:
         """Remove E, as the caller asked: a failure other than E being gone
         is raised (SPEC "remove と cleanup"), and a later call tries again;
         once it has succeeded, later calls do nothing."""
-        with self._lock:
+        with self.lock:
             if self._done:
                 return
             self._d.unlink_or_raise(self._name)
@@ -38,11 +41,11 @@ class Link:
     def discard(self) -> None:
         """Remove E inside a call (its bind failed): a failure is passed over
         in silence (SPEC-routes "経路の失敗の扱い")."""
-        with self._lock:
+        with self.lock:
             if self._done:
                 return
             self._done = True
-        self._d.unlink(self._name)
+            self._d.unlink(self._name)
 
 
 class SocketFile:
@@ -54,7 +57,10 @@ class SocketFile:
         self._file = file
         self._link = link
         self._removed = False
-        self._lock = threading.Lock()
+        # One removal at a time, also among the SocketFile sharing an E (the
+        # ones a ForBind's socket_file() gives): the E's lock (reentrant, as
+        # remove() goes on to cleanup()).
+        self._lock = link.lock if link is not None else threading.RLock()
 
     def remove(self) -> None:
         """Remove the socket file the bind made, and :meth:`cleanup`. It does

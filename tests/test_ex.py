@@ -9,6 +9,7 @@ import contextlib
 import errno
 import os
 import socket
+from collections.abc import Callable
 
 import pytest
 from _support import (
@@ -571,3 +572,70 @@ def test_remove_raises_the_files_error_first(tmp: TmpDirs) -> None:
             os.chmod(d, 0o711)
         bound.file.remove()
         assert e_in(o) == []
+
+
+# remove() / cleanup() called from many threads at once remove one thing at a
+# time (SPEC "remove と cleanup"): among one Bound.file, and among a ForBind
+# and the SocketFile its socket_file() gave (they share E). Each unlink is
+# held open a moment to let them overlap if they could; the most at once must
+# be 1, and the file and E end up removed once.
+@pytest.mark.parametrize("which", ["bound", "for bind"])
+def test_concurrent_removals_are_one_at_a_time(tmp: TmpDirs, monkeypatch: pytest.MonkeyPatch, which: str) -> None:
+    import threading
+    import time
+
+    o = options(tmp)
+    p = long_path(tmp.new())
+    keep: list[socket.socket] = []
+    calls: list[Callable[[], None]] = []
+    if which == "bound":
+        bound = sockat.ex.bind(p, options=o)
+        keep.append(bound.socket)
+        calls = [bound.file.remove, bound.file.cleanup] * 4
+    else:
+        r = sockat.ex.resolve_for_bind(p, options=o)
+        s = socket.socket(socket.AF_UNIX)
+        s.bind(r.path)
+        keep.append(s)
+        files = [r.socket_file() for _ in range(3)]
+        calls = [r.cleanup, *(f.remove for f in files), *(f.cleanup for f in files)] * 2
+    real_unlink = os.unlink
+    lock = threading.Lock()
+    now = [0]
+    most = [0]
+
+    def unlink(path: bytes, *, dir_fd: int | None = None) -> None:
+        with lock:
+            now[0] += 1
+            most[0] = max(most[0], now[0])
+        try:
+            time.sleep(0.02)
+            real_unlink(path, dir_fd=dir_fd)
+        finally:
+            with lock:
+                now[0] -= 1
+
+    monkeypatch.setattr(os, "unlink", unlink)
+    start = threading.Barrier(len(calls))
+    errors: list[BaseException] = []
+
+    def run(call: Callable[[], None]) -> None:
+        start.wait()
+        try:
+            call()
+        except BaseException as e:
+            errors.append(e)
+
+    threads = [threading.Thread(target=run, args=(c,)) for c in calls]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    monkeypatch.undo()
+    for k in keep:
+        k.close()
+    assert errors == []
+    assert most[0] == 1
+    assert e_in(o) == []
+    if which == "bound":
+        assert not os.path.lexists(p)
