@@ -1,5 +1,4 @@
-"""The code the manual shows for avoiding what a route loses ("失うもの" /
-"What is lost") and for writing instead of the patterns not to use
+"""The code the manual shows for writing instead of the patterns not to use
 ("使ってはいけない書き方" / "Patterns not to use"), read out of
 ``docs/MANUAL-ja.md`` (the original) and ``docs/MANUAL.md`` and run as it is
 written (hub SPEC: the recommended code is run as a test). The code lives in
@@ -8,7 +7,7 @@ the documents only, so what is run is what a reader copies.
 Each block runs in a child process of its own (it may change the cwd), with
 ``path`` set to the socket's path: a path the block makes absolute itself
 (``os.path.abspath(path)``) is given relative to the child's cwd; any other
-is absolute, long enough to take a route where a long path can be bound. A
+is absolute and long (past every ``sun_path``). A
 file of the socket's name unrelated to it sits in the child's cwd. Every
 block must run through, leave no socket file at the path, and leave that
 unrelated file alone."""
@@ -22,13 +21,13 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
-from _support import SRC_DIR, TESTS_DIR, TmpDirs, bind_route_here, nest
+from _support import SRC_DIR, TESTS_DIR, TmpDirs, nest
 
 DOCS = TESTS_DIR.parent / "docs"
 
 SECTIONS = {
-    "MANUAL-ja.md": ("失うもの", "使ってはいけない書き方"),
-    "MANUAL.md": ("What is lost", "Patterns not to use"),
+    "MANUAL-ja.md": ("使ってはいけない書き方",),
+    "MANUAL.md": ("Patterns not to use",),
 }
 """The sections whose code is run, per document (the same sections, the
 Japanese one the original)."""
@@ -102,8 +101,7 @@ def test_the_code_runs(tmp: TmpDirs, block: Block) -> None:
         given: bytes = NAME.encode()
         target = cwd + b"/" + given
     else:
-        total = 300 if bind_route_here() is not None else 60
-        target = nest(tmp.new(), total, NAME.encode())
+        target = nest(tmp.new(), 300, NAME.encode())
         given = target
         with open(cwd + b"/" + NAME.encode(), "wb") as f:
             f.write(UNRELATED)

@@ -1,0 +1,372 @@
+"""The routes of a bind to a long path (hub SPEC "bind の順", SPEC-routes
+"経路"): link-dir by procB and by B's real path, link-file, thread-cwd / at,
+each forced by the environment it is given; what the spelling the kernel
+keeps is good for (``Spelling``) and that it never names an unrelated file;
+failures that are the outcome and not tried again."""
+
+from __future__ import annotations
+
+import errno
+import os
+import socket
+import threading
+
+import pytest
+from _support import (
+    HAS_PROC,
+    HAS_THREAD_ROUTE,
+    NAME_MAX_THREAD_CWD,
+    NO_PROC,
+    TmpDirs,
+    accept_ping,
+    base_of,
+    bind_in,
+    connect_in,
+    deep_dir,
+    ds,
+    env_at,
+    is_socket,
+    kernel_sockname,
+    listing,
+    long_path,
+    raises_errno,
+    run_child,
+)
+
+import sockat.ex
+from sockat import _calls
+from sockat._place import Env, LinkFile
+from sockat._spelling import Trail, Until
+from sockat._sys import DIRECT_MAX, IS_APPLE, IS_FREEBSD, IS_LINUX
+
+THREAD_ROUTE = "at" if IS_FREEBSD else "thread-cwd"
+FOLLOWS = LinkFile.FOLLOWS
+
+
+def entries(env: Env) -> list[bytes]:
+    """What is in the process's D in ``env`` (its E)."""
+    b = env.auto_base()
+    assert b is not None
+    d = b.dir(env.config.uid)
+    assert d is not None
+    return sorted(os.listdir(b.real + b"/" + d.name))
+
+
+def check_served(listener: socket.socket, path: bytes, env: Env) -> None:
+    """The socket is at ``path`` (not elsewhere) and a connect there reaches
+    it."""
+    assert is_socket(path)
+    client, _ = connect_in(env, path)
+    with client:
+        accept_ping(listener, client)
+
+
+# Where /proc can be used, a bind goes by link-dir through procB:
+# /proc/<pid>/fd/<B's fd>/D/E/<name>, E a symlink in D to the socket's
+# directory. The spelling names the path until the process ends, and only to
+# this uid; it does not go through /tmp.
+@pytest.mark.skipif(not HAS_PROC, reason="/proc is Linux's")
+def test_link_dir_through_procb(tmp: TmpDirs) -> None:
+    env = env_at(tmp.new())
+    p = long_path(tmp.new())
+    trail = Trail()
+    done = bind_in(env, p, trail=trail)
+    with done.sock as listener:
+        assert done.route == "link-dir"
+        assert done.base == "proc"
+        assert done.spelling == sockat.ex.Linked(
+            removable=True, until=Until.PROCESS, usable_cross_uid=False, usable_with_private_tmp=True
+        )
+        assert [s.name for s in trail.skipped] == ["standard"]
+        spelling = os.fsencode(kernel_sockname(listener))
+        b = env.auto_base()
+        assert b is not None
+        assert spelling.startswith(b"/proc/%d/fd/%d/" % (os.getpid(), b.fd))
+        assert spelling.endswith(b"/s.sock")
+        assert os.path.samefile(spelling, p)
+        check_served(listener, p, env)
+        assert len(entries(env)) == 1
+
+
+# Without /proc, link-dir goes through B's real path: <B>/D/E/<name>. It
+# names the path until cleanup; another uid can follow it when every
+# directory on the way lets others search it.
+def test_link_dir_through_bs_real_path(tmp: TmpDirs) -> None:
+    place = tmp.new()
+    os.chmod(place, 0o755)
+    env = env_at(place, proc=NO_PROC)
+    p = long_path(tmp.new())
+    done = bind_in(env, p)
+    with done.sock as listener:
+        assert done.route == "link-dir"
+        assert done.base == "tmp"
+        assert isinstance(done.spelling, sockat.ex.Linked)
+        assert done.spelling.removable
+        assert done.spelling.until is Until.CLEANUP
+        assert done.spelling.usable_cross_uid
+        spelling = os.fsencode(kernel_sockname(listener))
+        assert spelling.startswith(base_of(env) + b"/")
+        check_served(listener, p, env)
+        # removable: unlinking by the spelling removes the socket file.
+        os.unlink(spelling)
+        assert not os.path.lexists(p)
+
+
+# B under a directory others cannot search (0700): the spelling cannot be
+# followed by another uid, and says so.
+def test_a_spelling_others_cannot_follow_says_so(tmp: TmpDirs) -> None:
+    env = env_at(tmp.new(), proc=NO_PROC)
+    done = bind_in(env, long_path(tmp.new()))
+    done.sock.close()
+    assert isinstance(done.spelling, sockat.ex.Linked)
+    assert not done.spelling.usable_cross_uid
+
+
+# Where a bind was measured to follow a symlink in the last component
+# (macOS, NetBSD), link-file reaches a file name too long for link-dir:
+# <B>/D/E, E a symlink to the socket file. Unlinking by the spelling removes
+# E, not the file (removable false).
+@pytest.mark.skipif(not (IS_APPLE or os.uname().sysname == "NetBSD"), reason="a bind follows the symlink here only")
+def test_link_file_where_a_bind_follows_the_symlink(tmp: TmpDirs) -> None:
+    env = env_at(tmp.new())
+    p = long_path(tmp.new(), name=b"n" * 100)
+    trail = Trail()
+    done = bind_in(env, p, trail=trail)
+    with done.sock as listener:
+        assert done.route == "link-file"
+        assert [s.name for s in trail.skipped] == ["standard", "link-dir"]
+        assert done.spelling == sockat.ex.Linked(
+            removable=False, until=Until.CLEANUP, usable_cross_uid=False, usable_with_private_tmp=True
+        )
+        check_served(listener, p, env)
+        spelling = os.fsencode(kernel_sockname(listener))
+        os.unlink(spelling)
+        assert is_socket(p)
+
+
+# On a system not measured, a bind tells at run time whether the kernel
+# followed link-file's symlink: when the bind fails and nothing is at the
+# path, it was not followed: link-file is skipped, its E removed, and the
+# next route tried. Forced on Linux (which does not follow it).
+@pytest.mark.skipif(not IS_LINUX, reason="a system whose bind does not follow the symlink")
+def test_link_file_told_at_run_time_not_followed(tmp: TmpDirs) -> None:
+    env = env_at(tmp.new(), proc=NO_PROC, link_file=LinkFile.TOLD_AT_RUN_TIME, thread_cwd=False)
+    p = long_path(tmp.new(), name=b"n" * 100)
+    trail = Trail()
+    with raises_errno(errno.ENAMETOOLONG):
+        bind_in(env, p, trail=trail)
+    assert [(s.name, s.reason) for s in trail.skipped][2] == ("link-file", "symlink not followed by the bind")
+    assert entries(env) == []
+    assert not os.path.lexists(p)
+
+
+# ... and when something is at the path, the failure is the outcome
+# (EADDRINUSE), raised from link-file, with no route tried after it.
+@pytest.mark.skipif(not IS_LINUX, reason="a system whose bind does not follow the symlink")
+def test_link_file_told_at_run_time_with_a_file_there(tmp: TmpDirs) -> None:
+    env = env_at(tmp.new(), proc=NO_PROC, link_file=LinkFile.TOLD_AT_RUN_TIME)
+    p = long_path(tmp.new(), name=b"n" * 100)
+    with open(p, "wb"):
+        pass
+    trail = Trail()
+    with raises_errno(errno.EADDRINUSE):
+        bind_in(env, p, trail=trail)
+    assert trail.trying == "link-file"
+    assert [s.name for s in trail.skipped] == ["standard", "link-dir"]
+    assert entries(env) == []
+
+
+# Where the spellings through B do not fit, thread-cwd (at on FreeBSD) binds
+# E/<name>, E a random symlink in D to the socket's directory, from a
+# throwaway thread whose cwd is D, and removes E at once. Neither the
+# process's cwd nor the calling thread's changes; nothing is left in D; the
+# socket is at the path. The spelling names nothing afterwards.
+@pytest.mark.skipif(not HAS_THREAD_ROUTE, reason="no thread cwd / bindat here")
+def test_thread_cwd_or_at(tmp: TmpDirs) -> None:
+    place = deep_dir(tmp.new(), 90)
+    env = env_at(place, proc=NO_PROC, link_file=LinkFile.NOT_TRIED)
+    p = long_path(tmp.new())
+    cwd = os.getcwd()
+    trail = Trail()
+    done = bind_in(env, p, trail=trail)
+    with done.sock as listener:
+        assert os.getcwd() == cwd
+        assert done.route == THREAD_ROUTE
+        assert done.base is None
+        assert done.spelling == sockat.ex.Dangling()
+        assert [s.name for s in trail.skipped] == ["standard", "link-dir"]
+        assert entries(env) == []
+        spelling = os.fsencode(kernel_sockname(listener))
+        assert spelling.endswith(b"/s.sock")
+        assert not spelling.startswith(b"/")
+        check_served(listener, p, env)
+    # The calling thread's own cwd, on a thread that is not the main one.
+    seen: list[str] = []
+
+    def other() -> None:
+        before = os.getcwd()
+        q = long_path(tmp.new())
+        bind_in(env, q).sock.close()
+        seen.extend([before, os.getcwd()])
+
+    t = threading.Thread(target=other)
+    t.start()
+    t.join()
+    assert seen[0] == seen[1] == cwd
+
+
+# The longest file name thread-cwd / at bind is sockaddr less "E/" (E 10
+# bytes); one more is ENAMETOOLONG, with nothing made in D.
+@pytest.mark.skipif(not HAS_THREAD_ROUTE, reason="no thread cwd / bindat here")
+@pytest.mark.parametrize("extra", [0, 1])
+def test_thread_cwd_reaches_its_longest_name(tmp: TmpDirs, extra: int) -> None:
+    place = deep_dir(tmp.new(), 90)
+    env = env_at(place, proc=NO_PROC, link_file=LinkFile.NOT_TRIED)
+    name = b"n" * (NAME_MAX_THREAD_CWD + extra)
+    p = long_path(tmp.new(), name=name, total=len(name) + 60)
+    if extra:
+        trail = Trail()
+        with raises_errno(errno.ENAMETOOLONG):
+            bind_in(env, p, trail=trail)
+        assert [s.name for s in trail.skipped] == ["standard", "link-dir", THREAD_ROUTE]
+        assert trail.trying is None
+        assert ds(base_of(env)) == []
+    else:
+        done = bind_in(env, p)
+        with done.sock as listener:
+            assert done.route == THREAD_ROUTE
+            check_served(listener, p, env)
+
+
+# A bind's real failure is the outcome, raised with the route that failed,
+# and no route after it is tried (EADDRINUSE: a file already at the path). E
+# made for it is removed.
+def test_a_bind_failure_is_not_tried_again(tmp: TmpDirs) -> None:
+    env = env_at(tmp.new(), proc=NO_PROC)
+    p = long_path(tmp.new())
+    with open(p, "wb"):
+        pass
+    with raises_errno(errno.EADDRINUSE) as e:
+        _calls.bind(p, env=env, trail=(trail := Trail()))
+    assert e.value.errno == errno.EADDRINUSE
+    assert trail.trying == "link-dir"
+    assert [s.name for s in trail.skipped] == ["standard"]
+    assert entries(env) == []
+
+
+# The default bind leaves the E of its spelling in D (no remove / cleanup to
+# call): the spelling keeps naming the path after the listener is closed,
+# until the process ends and the system cleans up.
+def test_the_default_bind_leaves_its_e(tmp: TmpDirs) -> None:
+    env = env_at(tmp.new(), proc=NO_PROC)
+    done = bind_in(env, long_path(tmp.new()))
+    done.sock.close()
+    assert len(entries(env)) == 1
+
+
+# A spelling by thread-cwd / at holds E, already removed, and a file name: in
+# a process whose cwd holds an unrelated file of that name (and anything at
+# all), looking it up or unlinking by it reaches nothing.
+@pytest.mark.skipif(not HAS_THREAD_ROUTE, reason="no thread cwd / bindat here")
+def test_a_dangling_spelling_names_no_unrelated_file(tmp: TmpDirs) -> None:
+    cwd = tmp.new()
+    with open(cwd + b"/s.sock", "wb") as f:
+        f.write(b"unrelated")
+    out = run_child(
+        """
+        from _support import env_at, bind_in, long_path, deep_dir
+        from sockat._place import Env, LinkFile
+        env = env_at(deep_dir(os.fsencode(ARGS["place"]), 90), proc=b"/nonexistent", link_file=LinkFile.NOT_TRIED)
+        done = bind_in(env, long_path(os.fsencode(ARGS["work"])))
+        spelling = socket.socket.getsockname(done.sock)
+        try:
+            os.unlink(spelling)
+            hit = True
+        except OSError:
+            hit = False
+        report(route=done.route, spelling=spelling, hit=hit)
+        """,
+        cwd=cwd,
+        args={"place": os.fsdecode(tmp.new()), "work": os.fsdecode(tmp.new())},
+    )
+    assert out["route"] == THREAD_ROUTE
+    assert out["hit"] is False
+    with open(cwd + b"/s.sock", "rb") as f:
+        assert f.read() == b"unrelated"
+
+
+# A procB spelling holds D, named at random: once B's fd is closed and its
+# number reused for another directory holding a file of the socket's name,
+# the spelling still reaches nothing there.
+@pytest.mark.skipif(not HAS_PROC, reason="/proc is Linux's")
+def test_a_procb_spelling_names_no_file_after_its_fd_is_reused(tmp: TmpDirs) -> None:
+    other = tmp.new()
+    with open(other + b"/s.sock", "wb") as f:
+        f.write(b"unrelated")
+    out = run_child(
+        """
+        from _support import env_at, bind_in, long_path
+        env = env_at(os.fsencode(ARGS["place"]))
+        done = bind_in(env, long_path(os.fsencode(ARGS["work"])))
+        spelling = socket.socket.getsockname(done.sock)
+        b = env.auto_base()
+        n = b.fd
+        env.state.abandon()
+        fd = os.open(ARGS["other"], os.O_RDONLY)
+        if fd != n:
+            os.dup2(fd, n)
+        try:
+            os.unlink(spelling)
+            hit = True
+        except OSError:
+            hit = False
+        report(route=done.route, base=done.base, hit=hit)
+        """,
+        args={"place": os.fsdecode(tmp.new()), "work": os.fsdecode(tmp.new()), "other": os.fsdecode(other)},
+    )
+    assert out["route"] == "link-dir"
+    assert out["base"] == "proc"
+    assert out["hit"] is False
+    with open(other + b"/s.sock", "rb") as f:
+        assert f.read() == b"unrelated"
+
+
+# A spelling through B's real path, once cleaned up, reaches nothing: the
+# file at the path stays.
+def test_a_cleaned_up_spelling_names_nothing(tmp: TmpDirs) -> None:
+    env = env_at(tmp.new(), proc=NO_PROC)
+    p = long_path(tmp.new())
+    done, file = _calls.bind(p, env=env, remember=True)
+    assert file is not None
+    with done.sock as listener:
+        spelling = os.fsencode(kernel_sockname(listener))
+        file.cleanup()
+        with pytest.raises(FileNotFoundError):
+            os.unlink(spelling)
+        assert is_socket(p)
+
+
+# No route reaches a file name too long for every spelling (100 bytes,
+# without /proc or a bind that follows link-file, past thread-cwd's 96):
+# ENAMETOOLONG, with every route skipped and no D made.
+def test_a_name_no_route_reaches_is_enametoolong(tmp: TmpDirs) -> None:
+    env = env_at(tmp.new(), proc=NO_PROC, link_file=LinkFile.NOT_TRIED)
+    p = long_path(tmp.new(), name=b"n" * (DIRECT_MAX - 7))
+    trail = Trail()
+    with raises_errno(errno.ENAMETOOLONG):
+        bind_in(env, p, trail=trail)
+    assert [s.name for s in trail.skipped] == ["standard", "link-dir", THREAD_ROUTE]
+    assert ds(base_of(env)) == []
+    assert listing(os.path.dirname(p)) == []
+
+
+# Options.base is B: the spelling goes through it (procB, or its real path:
+# base "base").
+def test_options_base_carries_the_spelling(tmp: TmpDirs) -> None:
+    given = tmp.new() + b"/b"
+    env = env_at(tmp.new(), proc=NO_PROC)
+    done = bind_in(env, long_path(tmp.new()), opts=_calls.Opts(base=given))
+    with done.sock as listener:
+        assert done.route == "link-dir"
+        assert done.base == "base"
+        assert os.fsencode(kernel_sockname(listener)).startswith(os.path.realpath(given) + b"/")
