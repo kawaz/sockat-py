@@ -632,18 +632,23 @@ def _not_under_tmp(tmp: TmpDirs) -> bytes:
 
 
 # sweep leaves a D holding anything but symlinks (not one sockat made as it
-# is), and never touches the E right in B.
+# is), never touches the E right in B, and looks only at directories named
+# as D is (10 letters and digits): B is sockat's alone, but anything else in
+# it is left.
 def test_sweep_leaves_a_d_with_more_than_symlinks(tmp: TmpDirs) -> None:
     place = tmp.new()
     b = place + b"/" + uid_name()
     os.mkdir(b, 0o711)
-    os.mkdir(b + b"/dead1", 0o711)
-    os.symlink(b"/nowhere", b + b"/dead1/1")
-    os.mkdir(b + b"/kept", 0o711)
-    with open(b + b"/kept/file", "wb"):
+    os.mkdir(b + b"/Dead567890", 0o711)
+    os.symlink(b"/nowhere", b + b"/Dead567890/1")
+    os.mkdir(b + b"/Kept567890", 0o711)
+    with open(b + b"/Kept567890/file", "wb"):
         pass
+    for other in (b"short", b"Long5678901", b"dash-67890"):
+        os.mkdir(b + b"/" + other, 0o711)
+    os.symlink(b"/nowhere", b + b"/Elink67890")
     _place.sweep(env_at(place))
-    assert listing(b) == [b"kept"]
+    assert listing(b) == sorted([b"Kept567890", b"short", b"Long5678901", b"dash-67890", b"Elink67890"])
 
 
 # sweep_base does for Options.base's B what sweep does for the automatic

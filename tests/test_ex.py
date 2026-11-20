@@ -11,10 +11,12 @@ import socket
 
 import pytest
 from _support import (
+    NO_PROC,
     ROOT,
     TmpDirs,
     accept_ping,
     ds,
+    env_at,
     is_socket,
     kernel_sockname,
     listener_at,
@@ -439,3 +441,67 @@ def test_for_bind_socket_file_refuses_a_file_that_is_not_a_socket(tmp: TmpDirs) 
     with open(p, "rb") as f:
         assert f.read() == b"unrelated"
     r.cleanup()
+
+
+# Where a bind follows a symlink in the last component (macOS, NetBSD), the
+# socket is made where it points; bind_ex remembers that file, so remove()
+# removes the socket and leaves the caller's symlink. For a short path (the
+# standard's own bind) and a long one.
+@pytest.mark.skipif(default_link_file() is not LinkFile.FOLLOWS, reason="a bind follows the symlink here only")
+@pytest.mark.parametrize("long", [False, True])
+def test_remove_follows_a_symlink_in_the_last_component(tmp: TmpDirs, long: bool) -> None:
+    there = tmp.new() + b"/real.sock"
+    d = os.path.dirname(long_path(tmp.new())) if long else tmp.new()
+    link = d + b"/s.sock"
+    os.symlink(there, link)
+    bound = sockat.ex.bind(link, options=options(tmp))
+    with bound.socket:
+        assert is_socket(there)
+        bound.file.remove()
+    assert not os.path.lexists(there)
+    assert os.path.islink(link)
+
+
+# What the bind leaves at the path must be a socket to be remembered: a
+# symlink in the last component to something else (made between the bind and
+# the remembering) is refused, so remove() could never remove it.
+def test_a_symlink_to_no_socket_is_not_remembered(tmp: TmpDirs) -> None:
+    from sockat._socket_file import Recorder
+
+    target = tmp.new() + b"/file"
+    with open(target, "wb"):
+        pass
+    link = tmp.new() + b"/s.sock"
+    os.symlink(target, link)
+    with raises_errno(errno.ENOTSOCK):
+        Recorder(link).bound()
+
+
+# Cleaning up E that fails (here: unlink refused) changes neither the call's
+# outcome nor its error: a connect through link-file goes through, a bind
+# whose bind fails raises its own error.
+def test_failing_to_clean_up_e_is_silent(tmp: TmpDirs, monkeypatch: pytest.MonkeyPatch) -> None:
+    from sockat import _calls
+    from sockat._routes import Call
+    from sockat._sys import Op
+
+    real_unlink = os.unlink
+
+    def unlink(path: bytes, *, dir_fd: int | None = None) -> None:
+        if dir_fd is not None:
+            raise PermissionError(13, "refused for the test")
+        real_unlink(path)
+
+    env = env_at(tmp.new(), proc=NO_PROC)
+    p = long_path(tmp.new())
+    with listener_at(p) as listener:
+        monkeypatch.setattr(os, "unlink", unlink)
+        sock, route = _calls.connect(p, call=Call(Op.CONNECT), env=env, order=("link-file",))
+        monkeypatch.undo()
+        with sock:
+            accept_ping(listener, sock)
+        assert route == "link-file"
+    monkeypatch.setattr(os, "unlink", unlink)
+    with raises_errno(errno.EADDRINUSE):
+        _calls.bind(p, env=env)
+    monkeypatch.undo()

@@ -133,8 +133,14 @@ class Recorder:
             return
         failure: OSError | None = None
         try:
+            # realpath follows a symlink in the last component too: where the
+            # bind followed one (macOS, NetBSD), the socket is where it
+            # points, and that is what is remembered (remove() must not
+            # remove the caller's symlink). What is there must be a socket.
             real = os.fsencode(os.path.realpath(self.path, strict=True))
             st = os.lstat(real)
+            if not stat.S_ISSOCK(st.st_mode):
+                raise OSError(errno.ENOTSOCK, os.strerror(errno.ENOTSOCK), os.fsdecode(real))
         except OSError as e:
             failure = e
         # A relative path: the cwd is compared now, after the bind and the

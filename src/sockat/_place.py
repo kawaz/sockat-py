@@ -18,6 +18,7 @@ import errno
 import fcntl
 import itertools
 import os
+import re
 import secrets
 import stat
 import sys
@@ -325,10 +326,11 @@ class Dir:
         return _gone(self.fd, self.name, self.base.fd)
 
     def unlink(self, name: bytes) -> None:
-        """Remove E ``name`` (gone already counts as removed)."""
+        """Remove E ``name``. A failure is passed over in silence (SPEC-routes:
+        cleaning up E changes neither the call's outcome nor its error)."""
         if self.closed:
             return
-        with contextlib.suppress(FileNotFoundError):
+        with contextlib.suppress(OSError):
             os.unlink(name, dir_fd=self.fd)
 
     def close(self) -> None:
@@ -428,7 +430,9 @@ class Base:
         return None
 
     def unlink(self, name: bytes) -> None:
-        with contextlib.suppress(FileNotFoundError):
+        """Remove E ``name`` right in B, a failure passed over in silence (as
+        :meth:`Dir.unlink`)."""
+        with contextlib.suppress(OSError):
             os.unlink(name, dir_fd=self.fd)
 
     def close(self) -> None:
@@ -991,12 +995,17 @@ def _sweep_at(kind: Kind, place: bytes, name: bytes, uid: int) -> None:
         got.close()
 
 
+_D_NAME = re.compile(f"[{_ALPHABET}]{{{RANDOM_LEN}}}")
+"""The form of D's name: :data:`RANDOM_LEN` letters and digits. Only
+directories of this name in B are swept (B is sockat's alone)."""
+
+
 def _sweep_base(bfd: int, uid: int) -> None:
     """Remove each D in B (``bfd``) whose lock can be made exclusive, with
     the E in it. A D holding anything but symlinks is left; the E right in B
     (the default connect's) are not touched."""
     with os.scandir(bfd) as entries:
-        names = [os.fsencode(e.name) for e in entries if e.is_dir(follow_symlinks=False)]
+        names = [os.fsencode(e.name) for e in entries if _D_NAME.fullmatch(e.name) and e.is_dir(follow_symlinks=False)]
     for name in names:
         try:
             dfd = _open_own(name, bfd)
