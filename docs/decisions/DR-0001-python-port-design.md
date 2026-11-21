@@ -33,9 +33,9 @@
 
 | 点 | 決定 |
 |---|---|
-| B の置き場 | `/tmp` → `$XDG_RUNTIME_DIR` → `$TMPDIR` → ソケットのディレクトリ。環境変数は空・相対パスなら使わない。1 つのプロセスが使う B は置き場 1〜3 で 1 つ (既定の connect が初めて作った B も以後使う。`usable_cross_uid` の B と同じ置き場なら同じ B)、ソケットのディレクトリの B はディレクトリごと。実パスが同じ置き場は 1 回だけ試す。作れなかった置き場は覚えず、次の呼び出しで試し直す |
+| B の置き場 | `/tmp` → `$XDG_RUNTIME_DIR` → `$TMPDIR` → ソケットのディレクトリ。環境変数は空・相対パスなら使わない。realpath の `(st_dev, st_ino)` が同じ置き場 (`$TMPDIR=/tmp` 等) は 1 回だけ試す。1 つのプロセスが使う B は置き場 1〜3 で 1 つ (既定の connect が初めて作った B も以後使う。`usable_cross_uid` の B と同じ置き場なら同じ B)、ソケットのディレクトリの B はディレクトリごと。作れなかった置き場は覚えず、次の呼び出しで試し直す |
 | 持ち主の uid | 実効 uid (`os.geteuid()`)。作った物の持ち主で、`sockat-<uid>` の uid |
-| 消された B・D | 持っている fd の `st_nlink` が 0 か、名前で引いた `(st_dev, st_ino)` が fd と違えば、次の呼び出しで外して作り直す (APFS では消したディレクトリの `st_nlink` が 2 のままなので名前の確かめを省かない) |
+| 消された B・D | 持っている fd の `st_nlink` が 0 か、名前で引いた `(st_dev, st_ino)` が fd と違えば、次の呼び出しで外して作り直す (APFS では消したディレクトリの `st_nlink` が 2 のままなので名前の確かめを省かない)。外した B・D の fd は閉じずにプロセスの間持ち続ける (閉じると番号が使い回され、procB の綴りの生きているソケットが別のディレクトリに当たる。閉じるのは fork の子だけ) |
 | skipped の列 | その OS の行に並ぶ経路だけ。手段の無い経路 (NetBSD・OpenBSD・illumos の thread-cwd、Linux / Apple 以外の thread-cwd-direct) は入れない |
 | 置き場のパス | realpath にしてから、ルートからの途中 (どれも持ち主が root か自分で、かつ他人が書けないか sticky) を確かめ、`O_DIRECTORY \| O_NOFOLLOW` で開いて `mkdirat` する。実パスの綴りもこの realpath から作る |
 | B を作る時 | B を使う経路に来た時だけ。作らずに分かる外れ (置き場が無い、途中の確かめに外れる、`usable_cross_uid` の時に other の x が無い) を飛ばした最初の置き場の実パスで綴りの長さを見積もり、収まらなければ作らず、次の置き場にも移らない (B を使う経路を飛ばす)。見積もりに通った後に作れなければ次の置き場へ進み、その置き場でも見積もり直す (収まらなければ作らずそこで止まる)。普段の B と `usable_cross_uid` の B は別の枠に持ち (普段の bind が `usable_cross_uid` の B に乗り換えない)、同じ置き場なら同じ B と D |
@@ -43,11 +43,12 @@
 | 既にある B | `O_NOFOLLOW` で開いて実ディレクトリ・持ち主が自分・他人 (group を含む) が書けないことを確かめ、0711 でなくても mode を変えずに使う。外れたら (占拠)、自動の置き場はその置き場を使えないとして次の置き場へ進み、B を使う経路の `reason` に占拠された B のパスを書く。`Options.base` は symlink なら `EPERM`、ディレクトリでも symlink でもなければ `ENOTDIR` (OS ごとに違う `O_NOFOLLOW` の errno でなく `lstat` で見分ける) |
 | 既定の bind の link-dir の E | (D, ソケットのディレクトリの realpath) ごとに 1 つを D の中の表に持って使い回す。使う前に D の fd から `readlinkat` し、消えたか指す先が違えば外して作り直す。表の更新 (作る・外して作り直す) だけを D の lock で守り、bind の区間は守らない。bind に失敗しても、その呼び出しで作った E も消さない (並行する他の既定の bind が使い回しうる。残っても次の bind が使う)。`_ex`・resolve・link-file は呼び出しごとに作り、失敗で消す |
 | `Options.base` の確かめ | 絶対パスで名前で終わらなければ `ValueError`。長いパスでは、ソケットのディレクトリを引いた後・経路を試す前に、bind でも connect でも何も作らずに確かめる (途中と、あれば B 自身)。安全の確かめは呼び出しのたびに行い、other の x の判定 (`usable_cross_uid`) は B を初めて持った時点の物を覚えて見直さない |
-| `/proc` を使えるか | `/proc/self/fd/<fd>` と `/proc/<pid>/fd/<fd>` を stat した `(st_dev, st_ino)` が fd の `fstat` と同じ時だけ。procB は B の fd で、proc-direct はソケットのディレクトリの fd で確かめる |
+| `/proc` を使えるか | 使う所ごとに、stat した `(st_dev, st_ino)` が fd の `fstat` と同じ時だけ。connect の行は `/` を開いた fd で `/proc/self/fd/<fd>`、proc-direct はそのソケットのディレクトリの fd で `/proc/self/fd/<fd>`、procB は B の fd で `/proc/<pid>/fd/<fd>` (B を開く前の見積もりは `/` を開いた fd で同じく) |
 | `usable_cross_uid` | bind 系だけが見る。途中と B 自身が other に x を持つ B だけを使う |
 | `usable_with_private_tmp` | procB はいつも真。B の実パスは、置き場の realpath する前のパスと B の実パスのどちらかが `/tmp`・`/var/tmp` (とその realpath) を通れば偽 |
 | 診断の `base` | 一時の置き場の B は綴りの形 (`proc`・`tmp`・`runtime`・`tmpdir`)、ソケットのディレクトリと `Options.base` の B は `sockdir`・`given` |
 | D | 乱数 10 文字の名前で上の手順で作り、`fcntl.flock(LOCK_SH)` を掛けた fd を持ち続ける。作れない時はその呼び出しの間 B ごとに覚えて D を使う経路を使わず (別の B は探さない)、次の呼び出しで作り直す |
+| sweep | B と D の中は fd を基準に列挙し (`os.scandir(fd)`)、`flock(LOCK_EX \| LOCK_NB)` を取った後に名前の `(st_dev, st_ino)` がロックした fd と同じかを確かめてから消す。名前が D の形の物だけを見て、symlink でない物がある D は残す。`sweep()` は確かめに外れた置き場と読めない B を黙って飛ばす |
 | D と `sweep` の競合 | flock を掛けた後に名前を引き直し、`(st_dev, st_ino)` が開いた物と違えば (他のプロセスの `sweep` が、ロックの掛かる前の D を消した) 別の名前で作り直す |
 | E の名前 | resolve の E は D ごとのカウンタ (36 進、0 から)。thread-cwd・at と B の直下の E は乱数 10 文字。綴りは E が受け取る名前の長さで、E を作る前に見積もる |
 | プロセスの状態 | B (と fd、D) はモジュールの `State` に持つ。`os.register_at_fork(after_in_child=...)` で、fork の子では親の B・D の fd を閉じて状態を作り直す (子は親の D を使わず自分の D を作る) |
