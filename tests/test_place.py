@@ -1170,3 +1170,87 @@ def test_the_next_place_is_judged_again(tmp: TmpDirs) -> None:
     if not IS_FREEBSD:
         assert listing(deep) == []
         assert listing(short) == []
+
+
+# A B (and its D) removed while held is let go but its fds stay open for the
+# life of the process (SPEC-routes): closed, their numbers would be used
+# again and a live socket's procB spelling through them would lead into
+# another directory. The next call makes B and D again.
+def test_a_b_let_go_keeps_its_fds(tmp: TmpDirs) -> None:
+    env = env_at(tmp.new(), proc=NO_PROC)
+    bind_in(env, long_path(tmp.new())).sock.close()
+    b = env.auto_base()
+    assert b is not None
+    d = b.dir(env.config.uid)
+    assert d is not None
+    old_b, old_d = b.fd, d.fd
+    shutil.rmtree(b.real)
+    bind_in(env, long_path(tmp.new())).sock.close()
+    again = env.auto_base()
+    assert again is not None
+    assert again is not b
+    os.fstat(old_b)
+    os.fstat(old_d)
+    assert again.fd not in (old_b, old_d)
+    # A D removed alone is let go the same way.
+    nd = again.dir(env.config.uid)
+    assert nd is not None
+    kept = nd.fd
+    shutil.rmtree(again.real + b"/" + nd.name)
+    bind_in(env, long_path(tmp.new())).sock.close()
+    os.fstat(kept)
+    fresh = again.dir(env.config.uid)
+    assert fresh is not None
+    assert fresh is not nd
+
+
+# "/proc を使える" is judged per use (SPEC): the connect's row by
+# /proc/self/fd, procB by /proc/<pid>/fd. A /proc whose self entries name the
+# fds but whose <pid> entries do not (another PID namespace's) gives the
+# proc-direct row and no procB.
+def test_proc_is_judged_per_use(tmp: TmpDirs) -> None:
+    from sockat import _routes
+
+    proc = tmp.new() + b"/proc"
+    os.makedirs(proc + b"/self/fd")
+    for n in range(256):
+        # Each entry names "/", the directory the check opens.
+        os.symlink(b"/", proc + b"/self/fd/%d" % n)
+    os.makedirs(proc + b"/%d/fd" % os.getpid())
+    env = env_at(tmp.new(), proc=proc)
+    assert _routes.proc_usable(env, pid=False)
+    assert not _routes.proc_usable(env, pid=True)
+    trail = Trail()
+    done = bind_in(env, long_path(tmp.new()), trail=trail)
+    done.sock.close()
+    assert done.route == "link-dir"
+    assert done.base != "proc"
+
+
+# sweep() passes over in silence a B it cannot read (no permission), leaving
+# what is in it.
+@pytest.mark.skipif(ROOT, reason="root reads anything")
+def test_sweep_passes_over_a_b_it_cannot_read(tmp: TmpDirs) -> None:
+    place = tmp.new()
+    b = place + b"/" + uid_name()
+    os.mkdir(b, 0o711)
+    os.mkdir(b + b"/Dead567890", 0o711)
+    os.chmod(b, 0o311)
+    try:
+        _place.sweep(env_at(place))
+    finally:
+        os.chmod(b, 0o711)
+    assert listing(b) == [b"Dead567890"]
+
+
+# The places are told apart by their realpath's (st_dev, st_ino): $TMPDIR as
+# /tmp itself, or as a symlink to it, is the same place as /tmp and is tried
+# once.
+def test_the_same_place_is_tried_once(tmp: TmpDirs) -> None:
+    link = tmp.new() + b"/tmp-link"
+    os.symlink(b"/tmp", link)
+    for tmpdir in (b"/tmp", b"/tmp/", link):
+        places = _place.default_places(os.geteuid(), None, tmpdir)
+        assert [p.kind for p in places] == [Kind.TMP]
+    other = tmp.new()
+    assert [p.kind for p in _place.default_places(os.geteuid(), None, other)] == [Kind.TMP, Kind.TMPDIR]
