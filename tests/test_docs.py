@@ -6,7 +6,7 @@ the documents only, so what is run is what a reader copies.
 
 Each block runs in a child process of its own (it may change the cwd), with
 ``path`` set to the socket's path: a path the block makes absolute itself
-(``os.path.abspath(path)``) is given relative to the child's cwd; any other
+(``os.path.join(os.getcwd(), path)``) is given relative to the child's cwd; any other
 is absolute and long (past every ``sun_path``). A
 file of the socket's name unrelated to it sits in the child's cwd. Every
 block must run through, leave no socket file at the path, and leave that
@@ -97,7 +97,7 @@ message."""
 @pytest.mark.parametrize("block", ALL, ids=IDS)
 def test_the_code_runs(tmp: TmpDirs, block: Block) -> None:
     cwd = tmp.new()
-    if "os.path.abspath(path)" in block.code:
+    if "os.getcwd()" in block.code:
         given: bytes = NAME.encode()
         target = cwd + b"/" + given
     else:
