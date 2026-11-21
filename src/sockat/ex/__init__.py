@@ -219,7 +219,9 @@ def bind(path: StrOrBytesPath, *, options: Options | None = None) -> Bound:
 
     ``file.remove()`` removes the socket file the bind made, and nothing
     else: its realpath and ``(st_dev, st_ino)`` are remembered right after
-    the bind, before the listener is returned (when that fails, the listener
+    the bind (for link-dir, thread-cwd and at, in the real directory the
+    route made it in, the path not looked up again), before the listener
+    is returned (when that fails, the listener
     is closed and the error raised; for a relative path, so is a cwd changed
     between the start of the call and then, an :class:`OSError` without
     ``errno``). Call it before closing the listener (see

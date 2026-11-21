@@ -162,13 +162,18 @@ class Recorder:
         a relative path."""
         self.file: tuple[bytes, tuple[int, int]] | None = None
 
-    def bound(self) -> None:
+    def bound(self, made: bytes | None = None) -> None:
         """Remember the socket file just bound (before the listen and before
         the socket is returned), so that a file put at the path afterwards
         cannot be remembered in its place. A failure is raised (the caller
         closes the socket: a ``remove`` that could not remove the file must
         not look like one that can). For a relative path, a cwd changed
-        since the call began is such a failure (:class:`CwdChanged`)."""
+        since the call began is such a failure (:class:`CwdChanged`).
+
+        ``made``: where the route made the socket (link-dir, thread-cwd, at:
+        the real directory E points to and the file name), remembered as it
+        is; the path is not looked up again (SPEC "remove"). ``None`` (the
+        standard, link-file): the realpath of the path, looked up now."""
         if self.abstract:
             return
         failure: OSError | None = None
@@ -177,7 +182,12 @@ class Recorder:
             # bind followed one (macOS, NetBSD), the socket is where it
             # points, and that is what is remembered (remove() must not
             # remove the caller's symlink). What is there must be a socket.
-            real = os.fsencode(os.path.realpath(self.path, strict=True))
+            if made is None:
+                real = os.fsencode(os.path.realpath(self.path, strict=True))
+            else:
+                real = made
+                if stat.S_ISLNK(os.lstat(made).st_mode):
+                    real = os.fsencode(os.path.realpath(made, strict=True))
             st = os.lstat(real)
             if not stat.S_ISSOCK(st.st_mode):
                 raise OSError(errno.ENOTSOCK, os.strerror(errno.ENOTSOCK), os.fsdecode(real))

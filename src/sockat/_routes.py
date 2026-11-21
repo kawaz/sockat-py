@@ -107,15 +107,19 @@ class Call:
             sock.setblocking(False)
         return sock
 
-    def finish(self, sock: socket.socket, do: Callable[[socket.socket], None]) -> socket.socket:
+    def finish(
+        self, sock: socket.socket, do: Callable[[socket.socket], None], *, made: bytes | None = None
+    ) -> socket.socket:
         """Run ``do`` on ``sock``, then after a bind remember the file and
         listen (stream); on any failure close ``sock`` when it is not the
-        caller's."""
+        caller's. ``made``: where the route made the socket (the real
+        directory and the file name), for the routes that know it
+        (:meth:`Recorder.bound`)."""
         try:
             do(sock)
             if self.op is Op.BIND:
                 if self.recorder is not None:
-                    self.recorder.bound()
+                    self.recorder.bound(made)
                 if self.listens:
                     sock.listen()
         except BaseException:
@@ -124,11 +128,11 @@ class Call:
             raise
         return sock
 
-    def plain(self, spelling: str | bytes, *, standard: bool = False) -> socket.socket:
+    def plain(self, spelling: str | bytes, *, standard: bool = False, made: bytes | None = None) -> socket.socket:
         """Bind / connect with ``spelling`` through the ``socket`` module."""
         sock = self.new_socket(standard=standard)
         if self.op is Op.BIND:
-            return self.finish(sock, lambda s: s.bind(spelling))
+            return self.finish(sock, lambda s: s.bind(spelling), made=made)
         return self.finish(sock, lambda s: s.connect(spelling))
 
     def wide(self, spelling: bytes) -> socket.socket:
@@ -136,11 +140,11 @@ class Call:
         addr = sockaddr(spelling, wide=True)
         return self.finish(self.new_socket(), lambda s: op(self.op, s, addr))
 
-    def at(self, dirfd: int, spelling: bytes) -> socket.socket:
+    def at(self, dirfd: int, spelling: bytes, *, made: bytes | None = None) -> socket.socket:
         """``bindat(2)`` / ``connectat(2)`` of ``spelling`` on ``dirfd``
         (FreeBSD)."""
         addr = sockaddr(spelling)
-        return self.finish(self.new_socket(), lambda s: op_at(self.op, s, dirfd, addr))
+        return self.finish(self.new_socket(), lambda s: op_at(self.op, s, dirfd, addr), made=made)
 
 
 @dataclass(frozen=True)
@@ -585,11 +589,11 @@ def in_thread_cwd(dirfd: int, do: Callable[[int], None], owned: tuple[socket.soc
         raise result
 
 
-def thread_cwd_op(call: Call, dirfd: int, spelling: bytes) -> socket.socket:
+def thread_cwd_op(call: Call, dirfd: int, spelling: bytes, *, made: bytes | None = None) -> socket.socket:
     """Bind / connect ``spelling`` from a throwaway thread whose cwd is
     ``dirfd`` (:func:`in_thread_cwd`), through a dup of the socket the
-    thread owns; then, in the caller, what follows a bind (remember,
-    listen)."""
+    thread owns; then, in the caller, what follows a bind (remember
+    ``made``, listen)."""
     sock = call.new_socket()
     try:
         mine = sock.dup()
@@ -601,7 +605,7 @@ def thread_cwd_op(call: Call, dirfd: int, spelling: bytes) -> socket.socket:
         if sock is not call.sock:
             sock.close()
         raise
-    return call.finish(sock, lambda s: None)
+    return call.finish(sock, lambda s: None, made=made)
 
 
 def thread_cwd_means(env: Env) -> str | None:
@@ -650,7 +654,7 @@ def bind_long(call: Call, t: Target, env: Env, bases: Bases, trail: Trail) -> Bi
             # no route and the routes skipped before this one (SPEC-routes).
             trail.forget(LINK_DIR)
             raise
-        return _bind_through(call, through, trail)
+        return _bind_through(call, through, trail, made_in(t))
     if env.config.link_file is not LinkFile.NOT_TRIED:
         done = bind_link_file(call, t, env, bases, trail)
         if done is not None:
@@ -661,10 +665,20 @@ def bind_long(call: Call, t: Target, env: Env, bases: Bases, trail: Trail) -> Bi
     raise enametoolong()
 
 
-def _bind_through(call: Call, through: Through, trail: Trail) -> BindDone:
+def made_in(t: Target) -> bytes:
+    """Where link-dir, thread-cwd and at make the socket: the realpath of
+    the socket's directory E points to (looked up once, before the route was
+    built), and the file name. What they remember (SPEC "remove"): the path
+    is not looked up again, so a symlink on the way changed between building
+    the route and remembering does not move what is remembered away from
+    the socket the bind made."""
+    return _join(t.real_dir, t.name)
+
+
+def _bind_through(call: Call, through: Through, trail: Trail, made: bytes) -> BindDone:
     trail.attempt(through.route)
     try:
-        sock = call.plain(through.spelling)
+        sock = call.plain(through.spelling, made=made)
     except BaseException:
         through.link.discard()
         raise
@@ -753,10 +767,10 @@ def bind_thread_cwd_or_at(call: Call, t: Target, env: Env, bases: Bases, trail: 
     trail.attempt(route)
     try:
         if IS_FREEBSD:
-            sock = call.at(d.fd, spelling)
+            sock = call.at(d.fd, spelling, made=made_in(t))
         else:
             try:
-                sock = thread_cwd_op(call, d.fd, spelling)
+                sock = thread_cwd_op(call, d.fd, spelling, made=made_in(t))
             except ThreadRefused:
                 trail.skip(route, THREAD_CWD_REFUSED)
                 return None
