@@ -119,12 +119,15 @@ def test_an_ancestor_others_can_write_to_is_refused(tmp: TmpDirs) -> None:
     assert listing(second) == [uid_name()]
 
 
-# A B already there is used when it passes the same checks; one that does
-# not (others can write to it, or a symlink in its place) is left alone and a
-# B of a random name sockat-<uid>.XXXXXXXXXX is made beside it.
+# A B already there is used when it passes the same checks. One that does
+# not (others can write to it, a symlink or a file in its place) is taken over
+# by someone else (occupied): the place is passed over, nothing is made
+# there, and the next place is used; with no next place, the routes using B
+# say the B is occupied (SPEC "B の確認").
 @pytest.mark.parametrize("what", ["ours", "writable", "symlink", "file"])
 def test_an_existing_b_is_checked(tmp: TmpDirs, what: str) -> None:
     place = tmp.new()
+    second = tmp.new()
     elsewhere = tmp.new()
     b = place + b"/" + uid_name()
     if what == "ours":
@@ -137,18 +140,23 @@ def test_an_existing_b_is_checked(tmp: TmpDirs, what: str) -> None:
     else:
         with open(b, "wb"):
             pass
-    env = env_at(place)
-    real = base_of(env)
+    before = listing(place)
     if what == "ours":
-        assert real == os.path.realpath(b)
-    else:
-        assert os.path.dirname(real) == os.path.realpath(place)
-        assert os.path.basename(real).startswith(uid_name() + b".")
-        assert len(os.path.basename(real)) == len(uid_name()) + 11
-        assert os.path.lexists(b)
-        assert listing(elsewhere) == []
-        if what == "writable":
-            assert mode(b) == 0o777
+        assert base_of(env_at(place, second)) == os.path.realpath(b)
+        return
+    assert base_of(env_at(place, second)) == os.path.realpath(second) + b"/" + uid_name()
+    assert listing(place) == before
+    assert listing(elsewhere) == []
+    if what == "writable":
+        assert mode(b) == 0o777
+    env = env_at(place, proc=NO_PROC, thread_cwd=False, link_file=_place.LinkFile.NOT_TRIED)
+    trail = Trail()
+    with raises_errno(errno.ENAMETOOLONG):
+        bind_in(env, long_path(tmp.new()), trail=trail)
+    (why,) = [s.reason for s in trail.skipped if s.name == "link-dir"]
+    assert "occupied" in why
+    assert os.fsdecode(os.path.realpath(place)) in why
+    assert listing(place) == before
 
 
 # Options.base is B itself: made there when missing (its parent must exist),

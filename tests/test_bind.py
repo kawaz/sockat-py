@@ -392,3 +392,76 @@ def test_link_file_failure_leaves_no_e(tmp: TmpDirs) -> None:
         bind_in(env, p, trail=trail)
     assert trail.trying == "link-file"
     assert entries(env) == []
+
+
+# The default bind uses link-dir's E again for the same socket directory: many
+# binds there leave one E. The _ex bind makes one per call (its cleanup()
+# removes its own).
+def test_the_default_bind_uses_its_e_again(tmp: TmpDirs) -> None:
+    env = env_at(tmp.new(), proc=NO_PROC)
+    d = os.path.dirname(long_path(tmp.new()))
+    socks = [bind_in(env, d + b"/s%d.sock" % i).sock for i in range(3)]
+    try:
+        assert len(entries(env)) == 1
+        other = bind_in(env, long_path(tmp.new(), name=b"o.sock")).sock
+        socks.append(other)
+        assert len(entries(env)) == 2
+        done, file = _calls.bind(d + b"/ex.sock", env=env, remember=True)
+        socks.append(done.sock)
+        assert len(entries(env)) == 3
+        assert file is not None
+        file.cleanup()
+        assert len(entries(env)) == 2
+    finally:
+        for s in socks:
+            s.close()
+
+
+# A shared E removed (or pointing elsewhere) is let go and made again by the
+# next default bind, which goes through; a bind that fails leaves the shared
+# E an earlier call made.
+def test_the_default_bind_remakes_a_removed_e(tmp: TmpDirs) -> None:
+    env = env_at(tmp.new(), proc=NO_PROC)
+    d = os.path.dirname(long_path(tmp.new()))
+    first = bind_in(env, d + b"/a.sock")
+    first.sock.close()
+    b = env.auto_base()
+    assert b is not None
+    dd = b.dir(env.config.uid)
+    assert dd is not None
+    (e,) = entries(env)
+    os.unlink(b.real + b"/" + dd.name + b"/" + e)
+    second = bind_in(env, d + b"/b.sock")
+    second.sock.close()
+    (e2,) = entries(env)
+    os.unlink(b.real + b"/" + dd.name + b"/" + e2)
+    os.symlink(b"/", b.real + b"/" + dd.name + b"/" + e2)
+    third = bind_in(env, d + b"/c.sock")
+    third.sock.close()
+    assert is_socket(d + b"/c.sock")
+    kept = entries(env)
+    with open(d + b"/taken.sock", "wb"):
+        pass
+    with raises_errno(standard_errno("bind-exists")):
+        bind_in(env, d + b"/taken.sock")
+    assert entries(env) == kept
+
+
+# Many threads making default binds in one socket directory at once share
+# one E, and every bind goes through.
+def test_threads_share_the_default_binds_e(tmp: TmpDirs) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+
+    env = env_at(tmp.new(), proc=NO_PROC)
+    d = os.path.dirname(long_path(tmp.new()))
+
+    def one(i: int) -> str:
+        done = bind_in(env, d + b"/t%d.sock" % i)
+        done.sock.close()
+        return done.route
+
+    with ThreadPoolExecutor(8) as pool:
+        routes = list(pool.map(one, range(24)))
+    assert set(routes) == {"link-dir"}
+    assert len(entries(env)) == 1
+    assert all(is_socket(d + b"/t%d.sock" % i) for i in range(24))
