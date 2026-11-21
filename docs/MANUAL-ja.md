@@ -182,6 +182,7 @@ listener.close()
 - **asyncio の後始末**: Python 3.13 以降の `asyncio.start_unix_server(sock=)` は、server を閉じる時に listener の `getsockname()` のファイルを消す (`cleanup_socket`)。sockat の listener は元のパスを返すので、短いパスと同じに元のパスのソケットファイルが消える ([asyncio](#asyncio))
 - **`sockat.ex` は別のモジュール**: `_ex` の関数は `sockat.ex` に置き、`import sockat` では読み込まない。`from sockat.ex import connect` と取り込むと、既定の `sockat.connect` や標準の `socket.socket.connect_ex` と紛れる
 - **listener を閉じてもファイルは消えない**: Python の標準は listener を閉じてもソケットのファイルを消さない。sockat も消さない (`sockat.ex.bind` の listener は短いパスでも、消すのは `file.remove()` だけ)
+- **標準の `socket` はパスを NUL で黙って切り詰める**: `socket.bind("/tmp/a\0b")` は `/tmp/a` に bind する (`str` でも `bytes` でも。macOS と Linux の CPython 3.11 で確かめた)。sockat は先頭以外の NUL をどの長さでも `ValueError` にする (Linux の先頭の NUL、abstract namespace は標準にそのまま渡す)
 - **`os.path.abspath`・`normpath`・`relpath` は `..` を字句で畳む**: `a/sym/../s.sock` (sym は symlink) を、カーネルは symlink の先の親と見るが、これらの関数は `a/s.sock` にする。相対パスを絶対パスにする時は `os.path.join(os.getcwd(), path)` にする。sockat 自身はディレクトリを `os.stat` と `os.path.realpath` (symlink を解いてから `..` を処理する) で引くので、カーネルと同じ所を指す
 
 ## 使ってはいけない書き方

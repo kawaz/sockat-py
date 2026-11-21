@@ -26,7 +26,7 @@
 | thread-cwd-direct | thread-cwd と同じスレッドの cwd をソケットのディレクトリに移し、ファイル名で connect する | Linux / Android、Apple の OS |
 
 - 経路の順番、使える条件、失敗をやり直さない扱いは SPEC のとおり。fork の経路は作らない (SPEC も作らない)
-- thread-cwd は CPython の 1 スレッド = 1 OS スレッドに頼る。使い捨てのスレッドが終わるまで呼び出し元は待ち、`join` が割り込まれても (`KeyboardInterrupt`) スレッドが終わってから片付けて割り込みを投げ直す
+- thread-cwd は CPython の 1 スレッド = 1 OS スレッドに頼る。使い捨てのスレッドは自分の fd (ディレクトリの fd とソケットの `dup`) で動き、終わる時に自分で閉じる。呼び出し元はスレッドが終わるまで待ち、`start` の中や `join` が割り込まれても (`KeyboardInterrupt`) スレッドが終わってから割り込みを投げ直す。呼び出し元が自分の fd を閉じても、スレッドが番号の使い回された別のディレクトリに移ることは無い
 - ctypes を使う呼び出しは `src/sockat/_sys.py` にだけ置き、最初に要った時に import する
 
 ### 2. 置き場 B・D・E の Python での作り方
@@ -43,13 +43,13 @@
 | 既にある B | `O_NOFOLLOW` で開いて実ディレクトリ・持ち主が自分・他人 (group を含む) が書けないことを確かめ、0711 でなくても mode を変えずに使う。外れたら (占拠)、自動の置き場はその置き場を使えないとして次の置き場へ進み、B を使う経路の `reason` に占拠された B のパスを書く。`Options.base` は symlink なら `EPERM`、ディレクトリでも symlink でもなければ `ENOTDIR` (OS ごとに違う `O_NOFOLLOW` の errno でなく `lstat` で見分ける) |
 | 既定の bind の link-dir の E | (D, ソケットのディレクトリの realpath) ごとに 1 つを D の中の表に持って使い回す。使う前に D の fd から `readlinkat` し、消えたか指す先が違えば外して作り直す。表の更新 (作る・外して作り直す) だけを D の lock で守り、bind の区間は守らない。bind に失敗しても、その呼び出しで作った E も消さない (並行する他の既定の bind が使い回しうる。残っても次の bind が使う)。`_ex`・resolve・link-file は呼び出しごとに作り、失敗で消す |
 | `Options.base` の確かめ | 絶対パスで名前で終わらなければ `ValueError`。長いパスでは、ソケットのディレクトリを引いた後・経路を試す前に、bind でも connect でも何も作らずに確かめる (途中と、あれば B 自身)。安全の確かめは呼び出しのたびに行い、other の x の判定 (`usable_cross_uid`) は B を初めて持った時点の物を覚えて見直さない |
-| `/proc` を使えるか | `/proc/self/fd/<fd>` と `/proc/<pid>/fd/<fd>` を stat した `(st_dev, st_ino)` が fd の `fstat` と同じ時だけ (procB は B の fd で) |
+| `/proc` を使えるか | `/proc/self/fd/<fd>` と `/proc/<pid>/fd/<fd>` を stat した `(st_dev, st_ino)` が fd の `fstat` と同じ時だけ。procB は B の fd で、proc-direct はソケットのディレクトリの fd で確かめる |
 | `usable_cross_uid` | bind 系だけが見る。途中と B 自身が other に x を持つ B だけを使う |
 | `usable_with_private_tmp` | procB はいつも真。B の実パスは、置き場の realpath する前のパスと B の実パスのどちらかが `/tmp`・`/var/tmp` (とその realpath) を通れば偽 |
 | 診断の `base` | 一時の置き場の B は綴りの形 (`proc`・`tmp`・`runtime`・`tmpdir`)、ソケットのディレクトリと `Options.base` の B は `sockdir`・`given` |
 | D | 乱数 10 文字の名前で上の手順で作り、`fcntl.flock(LOCK_SH)` を掛けた fd を持ち続ける。作れない時はその呼び出しの間 B ごとに覚えて D を使う経路を使わず (別の B は探さない)、次の呼び出しで作り直す |
 | D と `sweep` の競合 | flock を掛けた後に名前を引き直し、`(st_dev, st_ino)` が開いた物と違えば (他のプロセスの `sweep` が、ロックの掛かる前の D を消した) 別の名前で作り直す |
-| E の名前 | resolve の E は D ごとのカウンタ (36 進)。thread-cwd・at と B の直下の E は乱数 10 文字 |
+| E の名前 | resolve の E は D ごとのカウンタ (36 進、0 から)。thread-cwd・at と B の直下の E は乱数 10 文字。綴りは E が受け取る名前の長さで、E を作る前に見積もる |
 | プロセスの状態 | B (と fd、D) はモジュールの `State` に持つ。`os.register_at_fork(after_in_child=...)` で、fork の子では親の B・D の fd を閉じて状態を作り直す (子は親の D を使わず自分の D を作る) |
 | 環境を読む部分 | 置き場の候補、uid、`/proc` の場所、thread-cwd を試すか、widened を試すか、link-file を試すか・どう見分けるかを `_place.Config` にし、試験から差し替える |
 
