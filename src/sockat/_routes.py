@@ -187,34 +187,30 @@ def absolute(path: bytes) -> bytes | None:
 # ---------- /proc ----------
 
 
-def proc_usable(env: Env, fd: int | None = None) -> bool:
-    """Whether /proc lists this process's fds, both as ``/proc/self/fd/<fd>``
-    and ``/proc/<pid>/fd/<fd>``, each naming what the fd is (the same
-    ``(st_dev, st_ino)``: a /proc of another PID namespace or mount does
-    not). Looked up for ``fd``, or for an fd of ``/`` opened for the
-    purpose."""
+def proc_usable(env: Env, *, pid: bool) -> bool:
+    """Whether /proc lists this process's fds as what they are, looked up
+    for an fd of ``/`` opened for the purpose (SPEC "用語": "/proc を使える"):
+    ``/proc/self/fd/<fd>`` (``pid`` false: choosing the connect's row) or
+    ``/proc/<pid>/fd/<fd>`` (``pid``: procB's estimate before B is opened)
+    gives the ``(st_dev, st_ino)`` of the fd (a /proc of another PID
+    namespace or mount does not)."""
     proc = env.config.proc
     if proc is None:
         return False
-    probe = fd
-    if probe is None:
+    try:
+        probe = open_dir(b"/")
+    except OSError:
+        return False
+    try:
+        who = b"%d" % os.getpid() if pid else b"self"
         try:
-            probe = open_dir(b"/")
+            via = os.stat(b"%s/%s/fd/%d" % (proc, who, probe))
+            held = os.fstat(probe)
         except OSError:
             return False
-    try:
-        held = os.fstat(probe)
-        for who in (b"self", b"%d" % os.getpid()):
-            try:
-                via = os.stat(b"%s/%s/fd/%d" % (proc, who, probe))
-            except OSError:
-                return False
-            if (via.st_dev, via.st_ino) != (held.st_dev, held.st_ino):
-                return False
-        return True
+        return (via.st_dev, via.st_ino) == (held.st_dev, held.st_ino)
     finally:
-        if fd is None:
-            os.close(probe)
+        os.close(probe)
 
 
 # ---------- B for a call ----------
@@ -380,7 +376,7 @@ def _through_procb(env: Env, t: Target, bases: Bases, route: str, target: bytes,
     before B is made (E's name at least one character)."""
     if bases.cross_uid:
         raise _Unusable("procB not followed by other uids")
-    if not proc_usable(env):
+    if not proc_usable(env, pid=True):
         raise _Unusable(PROC_UNUSABLE)
     tail = 1 + RANDOM_LEN + 1 + 1 + (1 + len(name) if name is not None else 0)
     made = bases.made_plain()
@@ -847,7 +843,7 @@ def connect_long(
     tests give to force a route), the first route that can be used; its
     connect's failure is the outcome. Past the last: ``ENAMETOOLONG``."""
     trail.skip(STANDARD, "path too long")
-    proc_ok = IS_LINUX and proc_usable(env)
+    proc_ok = IS_LINUX and proc_usable(env, pid=False)
     cc = ConnectCall(call, t, env, bases, trail, proc_ok, IS_APPLE and env.config.wide)
     try:
         for route in order if order is not None else connect_order(env, proc_ok):

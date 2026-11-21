@@ -76,12 +76,17 @@ def default_places(uid: int, xdg_runtime_dir: bytes | None, tmpdir: bytes | None
         places.append(Place(Kind.RUNTIME, xdg_runtime_dir, b"sockat"))
     if tmpdir and tmpdir.startswith(b"/"):
         places.append(Place(Kind.TMPDIR, tmpdir, own))
-    # A place whose real path is that of an earlier one ($TMPDIR=/tmp) is the
-    # same place: tried once.
+    # A place that is an earlier one (its realpath's (st_dev, st_ino) the
+    # same: $TMPDIR=/tmp, macOS's TMPDIR=/private/tmp) with the same name of
+    # B is the same place: tried once (SPEC-routes "実体の置き場").
     out: list[Place] = []
-    seen: set[tuple[bytes, bytes]] = set()
+    seen: set[tuple[object, bytes]] = set()
     for place in places:
-        key = (os.fsencode(os.path.realpath(place.path)), place.name)
+        try:
+            st = os.stat(os.path.realpath(place.path))
+            key: tuple[object, bytes] = ((st.st_dev, st.st_ino), place.name)
+        except OSError:
+            key = (os.fsencode(os.path.realpath(place.path)), place.name)
         if key not in seen:
             seen.add(key)
             out.append(place)
@@ -434,6 +439,8 @@ class Base:
         ``/var/tmp``."""
         self.closed = False
         self._d: Dir | None = None
+        self._retired: list[Dir] = []
+        """D let go (removed by someone else), kept open (see _alive)."""
         self._lock = threading.Lock()
 
     @property
@@ -474,7 +481,9 @@ class Base:
         made again."""
         with self._lock:
             if self._d is not None and self._d.gone():
-                self._d.close()
+                # Let go, not closed: kept for the life of the process (as a
+                # B let go, see _alive).
+                self._retired.append(self._d)
                 self._d = None
             if self._d is None and not self.closed:
                 self._d = make_dir(self, uid)
@@ -501,8 +510,11 @@ class Base:
             os.unlink(name, dir_fd=self.fd)
 
     def close(self) -> None:
-        if self._d is not None:
-            self._d.close()
+        """Close B's fd and every D's (a forked child's, or a test's state
+        at its end; the process's own are never closed)."""
+        for d in (self._d, *self._retired):
+            if d is not None:
+                d.close()
         if not self.closed:
             self.closed = True
             os.close(self.fd)
@@ -776,6 +788,8 @@ class State:
         self.auto: Base | None = None
         self.cross: Base | None = None
         self.places: dict[tuple[bytes, bytes], Base] = {}
+        self.retired: list[Base] = []
+        """B let go (removed by someone else), kept open (see _alive)."""
         """B held per place (its real path and B's name there)."""
         self.others: dict[tuple[Kind, bytes], Base] = {}
         self.checked: set[bytes] = set()
@@ -789,9 +803,10 @@ class State:
 
     def abandon(self) -> None:
         """Close every fd held (a child after a fork: its B and D are the
-        parent's)."""
-        for b in self.bases():
+        parent's), those let go included."""
+        for b in (*self.bases(), *self.retired):
             b.close()
+        self.retired = []
         self.auto = None
         self.cross = None
         self.places = {}
@@ -833,7 +848,7 @@ class Env:
         st = self.state
         key = _place_key(place)
         if key is not None:
-            held = _alive(st.places.get(key))
+            held = _alive(st.places.get(key), st.retired)
             if held is not None:
                 return held if (held.cross_uid or not cross_uid) else None
         b = make_base(
@@ -857,7 +872,7 @@ class Env:
         ``None``. See :meth:`_choose` for how a place is chosen."""
         st = self.state
         with st.lock:
-            st.auto = _alive(st.auto)
+            st.auto = _alive(st.auto, st.retired)
             if st.auto is None:
                 st.auto = self._choose(cross_uid=False, occupied=occupied, fits=fits, too_long=too_long)
             return st.auto
@@ -870,7 +885,7 @@ class Env:
         made); the process's B itself when that one does."""
         st = self.state
         with st.lock:
-            st.cross = _alive(st.cross)
+            st.cross = _alive(st.cross, st.retired)
             if st.cross is None:
                 st.cross = self._choose(cross_uid=True, occupied=occupied, fits=fits, too_long=too_long)
             return st.cross
@@ -897,7 +912,7 @@ class Env:
             key = _place_key(place)
             if key is None:
                 continue
-            held = _alive(st.places.get(key))
+            held = _alive(st.places.get(key), st.retired)
             if held is not None:
                 if held.cross_uid or not cross_uid:
                     return held
@@ -922,7 +937,7 @@ class Env:
         st = self.state
         key = (Kind.SOCKDIR, real_dir)
         with st.lock:
-            b = _alive(st.others.get(key))
+            b = _alive(st.others.get(key), st.retired)
             if b is None:
                 b = make_base(Kind.SOCKDIR, real_dir, None, self.config.uid, checked=st.checked)
                 if b is None:
@@ -940,7 +955,7 @@ class Env:
         except OSError:
             return None
         with self.state.lock:
-            b = _alive(self.state.others.get(key))
+            b = _alive(self.state.others.get(key), self.state.retired)
             if b is None:
                 self.state.others.pop(key, None)
             return b
@@ -954,7 +969,7 @@ class Env:
         real_parent = os.fsencode(os.path.realpath(parent, strict=True))
         key = (Kind.BASE, _path_join(real_parent, name))
         with st.lock:
-            b = _alive(st.others.get(key))
+            b = _alive(st.others.get(key), st.retired)
             if b is None:
                 made = make_base(Kind.BASE, parent, name, self.config.uid, checked=st.checked, strict=True)
                 assert made is not None
@@ -974,13 +989,17 @@ class Env:
             return None
 
 
-def _alive(b: Base | None) -> Base | None:
+def _alive(b: Base | None, retired: list[Base]) -> Base | None:
     """``b`` while it is held and still there; a B removed since it was made
-    is let go (its fds closed), to be made again (SPEC-routes)."""
+    is let go, to be made again (SPEC-routes). Its fds (B's and D's) are not
+    closed but kept in ``retired`` for the life of the process: closed, their
+    numbers would be used again, and a live socket's procB spelling through
+    one would then lead into another directory."""
     if b is None or b.closed:
         return None
     if b.gone():
-        b.close()
+        if b not in retired:
+            retired.append(b)
         return None
     return b
 
@@ -1048,10 +1067,11 @@ def sweep(env: Env) -> None:
     for place in env.config.places:
         key = _place_key(place)
         # A place that fails the check on the way is passed over in silence,
-        # as a B that fails its own (in _sweep_at).
+        # as a B that fails its own or cannot be read (in _sweep_at).
         if key is None or not safe_ancestors(key[0], env.config.uid):
             continue
-        _sweep_at(place.kind, place.path, place.name, env.config.uid)
+        with contextlib.suppress(OSError):
+            _sweep_at(place.kind, place.path, place.name, env.config.uid)
 
 
 def sweep_given(env: Env, path: bytes) -> None:
