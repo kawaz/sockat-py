@@ -1143,3 +1143,30 @@ def test_b_without_x_for_others_is_looked_at_again(tmp: TmpDirs) -> None:
     assert isinstance(done.spelling, sockat.ex.Linked)
     assert done.spelling.usable_cross_uid
     assert listing(place) == [uid_name()]
+
+
+# Moving on to the next place because B could not be made at one (here: the
+# first is occupied), the spelling's length is judged again at that place:
+# where it does not fit, no B is made there and no later place is tried,
+# even a shorter one; the reason says too long, and the occupied B.
+def test_the_next_place_is_judged_again(tmp: TmpDirs) -> None:
+    first = tmp.new()
+    with open(first + b"/" + uid_name(), "wb"):
+        pass
+    deep = deep_dir(tmp.new(), 90)
+    short = tmp.new()
+    env = env_at(first, deep, short, proc=NO_PROC, thread_cwd=False, link_file=_place.LinkFile.NOT_TRIED)
+    trail = Trail()
+    if IS_FREEBSD:
+        # at needs no thread: it makes B (for its D) where B can be had,
+        # whatever the length.
+        bind_in(env, long_path(tmp.new()), trail=trail).sock.close()
+    else:
+        with raises_errno(errno.ENAMETOOLONG):
+            bind_in(env, long_path(tmp.new()), trail=trail)
+    (why,) = [s.reason for s in trail.skipped if s.name == "link-dir"]
+    assert "spelling too long" in why
+    assert "occupied" in why
+    if not IS_FREEBSD:
+        assert listing(deep) == []
+        assert listing(short) == []

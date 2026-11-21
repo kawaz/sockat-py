@@ -207,6 +207,10 @@ def _prefixes(real: bytes) -> list[bytes]:
     return out
 
 
+Fits = Callable[[int], bool]
+"""Whether a spelling fits through a B whose real path is that long."""
+
+
 def safe_ancestors(real_parent: bytes, uid: int) -> bool:
     """Whether every directory from the root to ``real_parent`` (a real
     path) is owned by root or ``uid``, and either writable by nobody else
@@ -700,8 +704,9 @@ def _make_in(
             return got
         if strict:
             raise _base_error(got, _path_join(real_parent, name))
-        if occupied is not None:
-            occupied.append(_path_join(real_parent, name))
+        taken = _path_join(real_parent, name)
+        if occupied is not None and taken not in occupied:
+            occupied.append(taken)
         return None
     for _ in range(ATTEMPTS):
         made = _mkdir_new(kind, place, real_parent, pfd, random_name(b".sockat."), uid, strict=strict)
@@ -844,22 +849,22 @@ class Env:
             st.places[key] = b
         return b
 
-    def auto_base(self, occupied: list[bytes] | None = None) -> Base | None:
-        """The process's B: the first place where it can be had, kept for the
-        life of the process once had (a place where it could not be made is
-        tried again by a later call), or ``None``."""
+    def auto_base(
+        self, occupied: list[bytes] | None = None, fits: Fits | None = None, too_long: list[bool] | None = None
+    ) -> Base | None:
+        """The process's B: kept for the life of the process once had (a
+        place where it could not be made is tried again by a later call), or
+        ``None``. See :meth:`_choose` for how a place is chosen."""
         st = self.state
         with st.lock:
             st.auto = _alive(st.auto)
             if st.auto is None:
-                for place in self.config.places:
-                    b = self._at_place(place, cross_uid=False, occupied=occupied)
-                    if b is not None:
-                        st.auto = b
-                        break
+                st.auto = self._choose(cross_uid=False, occupied=occupied, fits=fits, too_long=too_long)
             return st.auto
 
-    def cross_base(self, occupied: list[bytes] | None = None) -> Base | None:
+    def cross_base(
+        self, occupied: list[bytes] | None = None, fits: Fits | None = None, too_long: list[bool] | None = None
+    ) -> Base | None:
         """B another uid can follow a spelling through: the first place that
         lets others search their way to it and to B (judged when B was
         made); the process's B itself when that one does."""
@@ -867,12 +872,49 @@ class Env:
         with st.lock:
             st.cross = _alive(st.cross)
             if st.cross is None:
-                for place in self.config.places:
-                    b = self._at_place(place, cross_uid=True, occupied=occupied)
-                    if b is not None:
-                        st.cross = b
-                        break
+                st.cross = self._choose(cross_uid=True, occupied=occupied, fits=fits, too_long=too_long)
             return st.cross
+
+    def _choose(
+        self,
+        *,
+        cross_uid: bool,
+        occupied: list[bytes] | None,
+        fits: Fits | None,
+        too_long: list[bool] | None,
+    ) -> Base | None:
+        """The place for B (SPEC-routes "B の作り方"): the places known to be
+        out without making anything (missing, unsafe on the way, for
+        ``cross_uid`` not searchable by others) are passed over; at the first
+        other one the spelling's length is judged against its real path
+        (``fits``, when a spelling depends on it): when it does not fit, no B
+        is made and no later place tried (``too_long`` noted). Where B cannot
+        be made there (``mkdirat`` fails, occupied), the next place, judged
+        the same way. A place where this process holds B already is that
+        B."""
+        st = self.state
+        for place in self.config.places:
+            key = _place_key(place)
+            if key is None:
+                continue
+            held = _alive(st.places.get(key))
+            if held is not None:
+                if held.cross_uid or not cross_uid:
+                    return held
+                continue
+            real_parent = key[0]
+            if not safe_ancestors(real_parent, self.config.uid):
+                continue
+            if cross_uid and not searchable_by_others(real_parent):
+                continue
+            if fits is not None and not fits(len(_path_join(real_parent, place.name))):
+                if too_long is not None:
+                    too_long.append(True)
+                return None
+            b = self._at_place(place, cross_uid=cross_uid, occupied=occupied)
+            if b is not None:
+                return b
+        return None
 
     def sockdir_base(self, real_dir: bytes) -> Base | None:
         """B in the socket's directory (the last place), one per directory
@@ -922,38 +964,14 @@ class Env:
                 raise _base_error(BaseError.REFUSED, path)
             return b
 
-    def real_len_guess(self, *, cross_uid: bool, given: bytes | None) -> int | None:
-        """The length of the real path of the B a spelling would go through
-        (SPEC-routes: B is not made, and no other place tried, for a spelling
-        known not to fit): the B held already, ``Options.base``'s, or else
-        that of the first place it would be made in (its real path there,
-        its ancestors safe; for ``cross_uid`` searchable by others).
-        ``None`` when no place could hold B."""
-        if given is not None:
-            parent, name = _path.split(given)
-            try:
-                return len(_path_join(os.fsencode(os.path.realpath(parent, strict=True)), name))
-            except OSError:
-                return None
-        held = self.state.cross if cross_uid else self.state.auto
-        if held is not None and not held.closed:
-            return len(held.real)
-        for place in self.config.places:
-            key = _place_key(place)
-            if key is None:
-                continue
-            made = self.state.places.get(key)
-            if made is not None and not made.closed:
-                if made.cross_uid or not cross_uid:
-                    return len(made.real)
-                continue
-            real_parent = key[0]
-            if not safe_ancestors(real_parent, self.config.uid):
-                continue
-            if cross_uid and not searchable_by_others(real_parent):
-                continue
-            return len(_path_join(real_parent, place.name))
-        return None
+    def given_len(self, given: bytes) -> int | None:
+        """The length of the real path of ``Options.base``'s B (``None`` when
+        its parent does not resolve)."""
+        parent, name = _path.split(given)
+        try:
+            return len(_path_join(os.fsencode(os.path.realpath(parent, strict=True)), name))
+        except OSError:
+            return None
 
 
 def _alive(b: Base | None) -> Base | None:

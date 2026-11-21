@@ -18,7 +18,7 @@ from typing import TypeAlias
 
 from . import _path
 from ._errors import CwdChanged
-from ._place import RANDOM_LEN, Base, Dir, Env, Kind, LinkFile, open_dir
+from ._place import RANDOM_LEN, Base, Dir, Env, Fits, Kind, LinkFile, open_dir
 from ._socket_file import Link, Recorder
 from ._sockets import PathSocket
 from ._spelling import CwdRelative, Dangling, Linked, Original, Spelling, Trail, Until
@@ -239,6 +239,7 @@ class Bases:
     """The B at a place found taken over by someone else in this call (the
     place passed over)."""
     _no_d: list[Base] = field(default_factory=list, init=False)
+    _too_long: list[bool] = field(default_factory=list, init=False)
     """The B whose D could not be made in this call (SPEC-routes: not tried
     again on the same B within the call; a later call tries again)."""
 
@@ -266,15 +267,20 @@ class Bases:
             self._no_d.append(b)
         return d
 
-    def plain(self) -> Base | None:
+    def plain(self, fits: Fits | None = None) -> Base | None:
         """The process's B (``Options.base`` when given, raising what fails),
-        not the one in the socket's directory."""
-        if not self._plain_tried:
-            self._plain_tried = True
-            if self.given is not None:
+        not the one in the socket's directory. ``fits``: a spelling through
+        its real path must fit (no B is made, nor a later place tried, for
+        one that would not: :meth:`too_long_seen`)."""
+        if self._plain is not None:
+            return self._plain
+        if self.given is not None:
+            if not self._plain_tried:
+                self._plain_tried = True
                 self._plain = self.env.given_base(self.given, cross_uid=self.cross_uid)
-            else:
-                self._plain = self.env.auto_base(self.occupied)
+            return self._plain
+        self._plain_tried = True
+        self._plain = self.env.auto_base(self.occupied, fits, self._too_long)
         return self._plain
 
     def made_plain(self) -> Base | None:
@@ -287,20 +293,30 @@ class Bases:
         auto = self.env.state.auto
         return auto if auto is not None and not auto.closed else None
 
-    def cross(self) -> Base | None:
+    def cross(self, fits: Fits | None = None) -> Base | None:
         """B another uid can follow a spelling through (``Options.base`` when
         given: checked so)."""
-        if not self._cross_tried:
-            self._cross_tried = True
-            if self.given is not None:
+        if self._cross is not None:
+            return self._cross
+        if self.given is not None:
+            if not self._cross_tried:
+                self._cross_tried = True
                 self._cross = self.env.given_base(self.given, cross_uid=True)
-            else:
-                self._cross = self.env.cross_base(self.occupied)
+            return self._cross
+        self._cross_tried = True
+        self._cross = self.env.cross_base(self.occupied, fits, self._too_long)
         return self._cross
 
-    def for_real_path(self) -> Base | None:
+    def for_real_path(self, fits: Fits | None = None) -> Base | None:
         """B for a spelling by B's real path."""
-        return self.cross() if self.cross_uid else self.plain()
+        return self.cross(fits) if self.cross_uid else self.plain(fits)
+
+    def too_long_seen(self) -> bool:
+        """Whether the last lookup stopped at a place the spelling would not
+        fit through."""
+        seen = bool(self._too_long)
+        self._too_long.clear()
+        return seen
 
     def with_sockdir(self) -> Base | None:
         """The process's B, or else one in the socket's directory (where only
@@ -395,13 +411,16 @@ def _through_real(env: Env, t: Target, bases: Bases, route: str, target: bytes, 
     """B's real path: ``<B>/D/E[/<name>]``. B is not made when the spelling
     cannot fit through any place (judged from the places' real paths)."""
     tail = 1 + RANDOM_LEN + 1 + 1 + (1 + len(name) if name is not None else 0)
-    guess = env.real_len_guess(cross_uid=bases.cross_uid, given=bases.given)
-    if guess is None:
-        raise _Unusable(bases.no_b())
-    if guess + tail > DIRECT_MAX:
-        raise _Unusable(TOO_LONG)
-    b = bases.for_real_path()
+    if bases.given is not None:
+        given_len = env.given_len(bases.given)
+        if given_len is None:
+            raise _Unusable(bases.no_b())
+        if given_len + tail > DIRECT_MAX:
+            raise _Unusable(TOO_LONG)
+    b = bases.for_real_path(lambda n: n + tail <= DIRECT_MAX)
     if b is None:
+        if bases.too_long_seen():
+            raise _Unusable(bases.too_long())
         raise _Unusable(bases.no_b(NO_CROSS_UID_B if bases.cross_uid else NO_PLACE_FOR_B))
     if len(b.real) + tail > DIRECT_MAX:
         raise _Unusable(bases.too_long())
@@ -938,13 +957,16 @@ def connect_link_file(cc: ConnectCall) -> socket.socket | str:
     ``<B's real path>/E`` and removed right after, whatever the outcome (no
     D, nothing left in the process). B is not made when the spelling cannot
     fit through any place."""
-    guess = cc.env.real_len_guess(cross_uid=False, given=cc.bases.given)
-    if guess is None:
-        return NO_PLACE_FOR_B
-    if guess + 1 + RANDOM_LEN > DIRECT_MAX:
-        return TOO_LONG
-    b = cc.bases.plain()
+    if cc.bases.given is not None:
+        given_len = cc.env.given_len(cc.bases.given)
+        if given_len is None:
+            return cc.bases.no_b()
+        if given_len + 1 + RANDOM_LEN > DIRECT_MAX:
+            return TOO_LONG
+    b = cc.bases.plain(lambda n: n + 1 + RANDOM_LEN <= DIRECT_MAX)
     if b is None:
+        if cc.bases.too_long_seen():
+            return cc.bases.too_long()
         return cc.bases.no_b()
     if len(b.real) + 1 + RANDOM_LEN > DIRECT_MAX:
         return TOO_LONG
