@@ -6,6 +6,7 @@ tests can force it."""
 
 from __future__ import annotations
 
+import contextlib
 import errno
 import os
 import socket
@@ -248,6 +249,13 @@ class Bases:
             return "B occupied by another owner: " + ", ".join(os.fsdecode(p) for p in self.occupied)
         return why or NO_PLACE_FOR_B
 
+    def too_long(self) -> str:
+        """The spelling does not fit; a B found taken over on the way in this
+        call is said too (SPEC: the reason tells an occupied B)."""
+        if self.occupied:
+            return TOO_LONG + "; " + self.no_b()
+        return TOO_LONG
+
     def dir(self, b: Base) -> Dir | None:
         """D of ``b`` for this call, or ``None`` when it cannot be made (then
         remembered for the rest of the call)."""
@@ -372,7 +380,7 @@ def _through_procb(env: Env, t: Target, bases: Bases, route: str, target: bytes,
         raise _Unusable(PROC_UNUSABLE)
     head = b.proc(proc, pid)
     if len(head) + tail > DIRECT_MAX:
-        raise _Unusable(TOO_LONG)
+        raise _Unusable(bases.too_long())
     spelling, link = _link_in_d(bases, b, head, target, name, share=bases.share_e and route == LINK_DIR)
     return Through(
         spelling,
@@ -396,7 +404,7 @@ def _through_real(env: Env, t: Target, bases: Bases, route: str, target: bytes, 
     if b is None:
         raise _Unusable(bases.no_b(NO_CROSS_UID_B if bases.cross_uid else NO_PLACE_FOR_B))
     if len(b.real) + tail > DIRECT_MAX:
-        raise _Unusable(TOO_LONG)
+        raise _Unusable(bases.too_long())
     spelling, link = _link_in_d(bases, b, b.real, target, name, share=bases.share_e and route == LINK_DIR)
     return Through(
         spelling,
@@ -452,6 +460,13 @@ def _link_in_d(
     d = bases.dir(b)
     if d is None:
         raise _Unusable(NO_D)
+    # The spelling with the E it would get is judged before E is made, so
+    # that no E that would not fit is made (a shared one would stay).
+    planned = _join(_join(head, d.name), b"e" * d.next_link_len(target if share else None))
+    if name is not None:
+        planned = _join(planned, name)
+    if len(planned) > DIRECT_MAX:
+        raise _Unusable(bases.too_long())
     if share:
         got = d.shared_link(target)
         if got is None:
@@ -480,7 +495,7 @@ class ThreadRefused(Exception):
     """The system will not give a thread a cwd of its own."""
 
 
-def in_thread_cwd(dirfd: int, do: Callable[[], None]) -> None:
+def in_thread_cwd(dirfd: int, do: Callable[[int], None], owned: tuple[socket.socket, ...] = ()) -> None:
     """Run ``do`` in a throwaway :class:`threading.Thread` whose own cwd is
     the directory ``dirfd`` (SPEC-routes "使い捨てのスレッド"): Linux
     ``unshare(CLONE_FS)`` then ``fchdir``, Apple ``pthread_fchdir_np``. The
@@ -489,33 +504,62 @@ def in_thread_cwd(dirfd: int, do: Callable[[], None]) -> None:
     the system refuses it a cwd of its own; any other failure of ``do`` (or
     of the ``fchdir`` after ``unshare``) is raised.
 
-    Whatever interrupts the wait (``KeyboardInterrupt`` out of ``join``), the
-    thread is waited for to the end before this returns or raises, so that
-    the caller never closes ``dirfd`` (or a socket) while the thread may
-    still use it."""
+    The thread works on fds of its own: a ``dup`` of ``dirfd`` (handed to
+    ``do`` too) and the sockets in ``owned`` (dups the caller made for it),
+    all closed by the thread when it ends. So whatever interrupts the caller
+    (``KeyboardInterrupt`` in ``start``, between ``start`` and ``join``, or
+    out of ``join``), the caller closing its own fds never lets the thread
+    move to, or bind / connect at, a directory whose fd got the same number.
+    The caller still waits for the thread to the end before it returns or
+    raises."""
     outcome: list[BaseException | None] = []
     refused = ThreadRefused()
+    try:
+        own = os.dup(dirfd)
+    except BaseException:
+        for s in owned:
+            s.close()
+        raise
+
+    def release() -> None:
+        with contextlib.suppress(OSError):
+            os.close(own)
+        for s in owned:
+            s.close()
 
     def run() -> None:
         try:
-            if not enter_dir_in_this_thread(dirfd):
+            if not enter_dir_in_this_thread(own):
                 outcome.append(refused)
                 return
-            do()
+            do(own)
             outcome.append(None)
         except BaseException as e:
             outcome.append(e)
+        finally:
+            release()
 
     thread = threading.Thread(target=run, name="sockat-thread-cwd")
+    interrupted: BaseException | None = None
     try:
         thread.start()
     except RuntimeError:
+        # The thread could not be started: its fds are the caller's to close.
+        release()
         raise ThreadRefused() from None
-    interrupted: BaseException | None = None
+    except BaseException as e:
+        interrupted = e
     while True:
         try:
             thread.join()
             break
+        except RuntimeError:
+            # Interrupted before it started (join of a thread not started):
+            # no thread will close its fds.
+            if not thread.is_alive() and thread.ident is None:
+                release()
+                break
+            raise
         except BaseException as e:
             if interrupted is None:
                 interrupted = e
@@ -528,14 +572,16 @@ def in_thread_cwd(dirfd: int, do: Callable[[], None]) -> None:
 
 def thread_cwd_op(call: Call, dirfd: int, spelling: bytes) -> socket.socket:
     """Bind / connect ``spelling`` from a throwaway thread whose cwd is
-    ``dirfd`` (:func:`in_thread_cwd`); then, in the caller, what follows a
-    bind (remember, listen)."""
+    ``dirfd`` (:func:`in_thread_cwd`), through a dup of the socket the
+    thread owns; then, in the caller, what follows a bind (remember,
+    listen)."""
     sock = call.new_socket()
     try:
+        mine = sock.dup()
         if call.op is Op.BIND:
-            in_thread_cwd(dirfd, lambda: sock.bind(spelling))
+            in_thread_cwd(dirfd, lambda _: mine.bind(spelling), (mine,))
         else:
-            in_thread_cwd(dirfd, lambda: sock.connect(spelling))
+            in_thread_cwd(dirfd, lambda _: mine.connect(spelling), (mine,))
     except BaseException:
         if sock is not call.sock:
             sock.close()
@@ -625,14 +671,24 @@ def bind_link_file(call: Call, t: Target, env: Env, bases: Bases, trail: Trail) 
         trail.forget(LINK_FILE)
         raise
     trail.attempt(LINK_FILE)
+    sock = call.new_socket()
     try:
-        sock = call.plain(through.spelling)
+        sock.bind(through.spelling)
     except OSError:
+        sock.close()
         through.link.discard()
+        # Only the bind's own failure tells whether the kernel followed the
+        # symlink; a failure after it (remembering the file) is the outcome.
         if env.config.link_file is LinkFile.FOLLOWS or _something_at(through_target(t)):
             raise
         trail.skip(LINK_FILE, NOT_FOLLOWED)
         return None
+    except BaseException:
+        sock.close()
+        through.link.discard()
+        raise
+    try:
+        call.finish(sock, lambda s: None)
     except BaseException:
         through.link.discard()
         raise
@@ -794,7 +850,17 @@ def connect_proc_direct(cc: ConnectCall) -> socket.socket | str:
         return SOCKET_DIR_NOT_OPENED
     proc = cc.env.config.proc
     assert proc is not None
-    via = b"%s/self/fd/%d/%s" % (proc, cc.dirfd, cc.target.name)
+    fd_dir = b"%s/self/fd/%d" % (proc, cc.dirfd)
+    # /proc must name the socket's directory itself: the same (st_dev,
+    # st_ino) as its fd (a /proc of another PID namespace or mount would send
+    # the connect to another directory's file of that name).
+    try:
+        via_st, held = os.stat(fd_dir), os.fstat(cc.dirfd)
+    except OSError:
+        return PROC_UNUSABLE
+    if (via_st.st_dev, via_st.st_ino) != (held.st_dev, held.st_ino):
+        return PROC_UNUSABLE
+    via = fd_dir + b"/" + cc.target.name
     if len(via) > DIRECT_MAX:
         return TOO_LONG
     cc.attempt()

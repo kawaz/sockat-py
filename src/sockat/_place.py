@@ -16,7 +16,6 @@ from __future__ import annotations
 import contextlib
 import errno
 import fcntl
-import itertools
 import os
 import re
 import secrets
@@ -282,7 +281,8 @@ class Dir:
         self.fd = fd
         self.closed = False
         self._lock = threading.Lock()
-        self._counter = itertools.count(1)
+        self._next = 0
+        """The counter E's names are drawn from (base 36, from 0)."""
         self._shared: dict[bytes, bytes] = {}
         """The default bind's link-dir E, one per socket directory's realpath
         (SPEC-routes "link-dir"): the target and E's name."""
@@ -294,11 +294,21 @@ class Dir:
         made."""
         for _ in range(ATTEMPTS):
             with self._lock:
-                name = _base36(next(self._counter))
+                name = _base36(self._next)
+                self._next += 1
             made = self._symlink(target, name)
             if made is not False:
                 return name if made else None
         return None
+
+    def next_link_len(self, shared: bytes | None = None) -> int:
+        """The length of the name the next E would get: the shared E kept for
+        ``shared`` when there is one, else the counter's next."""
+        with self._shared_lock:
+            if shared is not None and shared in self._shared:
+                return len(self._shared[shared])
+        with self._lock:
+            return len(_base36(self._next))
 
     def shared_link(self, target: bytes) -> tuple[bytes, bool] | None:
         """The default bind's E to ``target`` (a socket directory's realpath),
