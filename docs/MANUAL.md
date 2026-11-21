@@ -126,7 +126,7 @@ match bound.spelling:
 
 - A failure is returned as an `OSError` (the subclass for its errno). When both fail in `remove()`, the error on the file side is returned, and the error of `cleanup()` is added to that exception as a note (`add_note`)
 - For `sockat.ex.bind` with a relative path, if the cwd differs between the start of the call and after recording, an `OSError` without errno
-- A long-lived process that binds to long paths many times accumulates the E of the default bind, so clean them up with `remove()` / `cleanup()` of `sockat.ex.bind` (the specification's "[What stays in the base](https://github.com/kawaz/sockat/blob/main/docs/SPEC.md#what-stays-in-the-base)")
+- The default `sockat.bind` returns no `file`. What stays, and how a long-lived process cleans up, is in the specification's "[What stays in the base](https://github.com/kawaz/sockat/blob/main/docs/SPEC.md#what-stays-in-the-base)"
 
 ### Diagnostics and errors
 

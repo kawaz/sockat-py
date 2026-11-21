@@ -40,7 +40,8 @@
 | 置き場のパス | realpath にしてから、ルートからの途中 (どれも持ち主が root か自分で、かつ他人が書けないか sticky) を確かめ、`O_DIRECTORY \| O_NOFOLLOW` で開いて `mkdirat` する。実パスの綴りもこの realpath から作る |
 | B を作る時 | B を使う経路に来た時だけ。作らずに分かる外れ (置き場が無い、途中の確かめに外れる、`usable_cross_uid` の時に other の x が無い) を飛ばした最初の置き場の実パスで綴りの長さを見積もり、収まらなければ作らず、次の置き場にも移らない (B を使う経路を飛ばす)。見積もりに通った後に作れなければ次の置き場へ。普段の B と `usable_cross_uid` の B は別の枠に持ち (普段の bind が `usable_cross_uid` の B に乗り換えない)、同じ置き場なら同じ B と D |
 | B と D の作り方 | `mkdirat` 0700 の直後に名前で `os.chmod(..., 0o711, dir_fd=親)` (umask で削られた分を戻す)、それから `O_DIRECTORY \| O_NOFOLLOW` で開いて `fstat` で実ディレクトリ・持ち主を確かめる。外れた・開けない時は作った空のディレクトリを消す。名前で chmod するのは Linux の `fchmodat` が `AT_SYMLINK_NOFOLLOW` を受け付けないためで、`mkdirat` が通った後の名前は他人に消せず差し替えられないので、開いた後の `fstat` で足りる |
-| 既にある B | `O_NOFOLLOW` で開いて実ディレクトリ・持ち主が自分・他人 (group を含む) が書けないことを確かめ、0711 でなくても mode を変えずに使う。外れたら自動の置き場は `sockat-<uid>.XXXXXXXXXX` の B を横に作る。`Options.base` は symlink なら `EPERM`、ディレクトリでも symlink でもなければ `ENOTDIR` (OS ごとに違う `O_NOFOLLOW` の errno でなく `lstat` で見分ける) |
+| 既にある B | `O_NOFOLLOW` で開いて実ディレクトリ・持ち主が自分・他人 (group を含む) が書けないことを確かめ、0711 でなくても mode を変えずに使う。外れたら (占拠)、自動の置き場はその置き場を使えないとして次の置き場へ進み、B を使う経路の `reason` に占拠された B のパスを書く。`Options.base` は symlink なら `EPERM`、ディレクトリでも symlink でもなければ `ENOTDIR` (OS ごとに違う `O_NOFOLLOW` の errno でなく `lstat` で見分ける) |
+| 既定の bind の link-dir の E | (D, ソケットのディレクトリの realpath) ごとに 1 つを D の中の表に持って使い回す。使う前に D の fd から `readlinkat` し、消えたか指す先が違えば外して作り直す。作るか取って bind するまでをプロセスの lock の下で行い、その呼び出しで作った E は bind の失敗で消し、前の呼び出しの E は消さない。`_ex`・resolve・link-file は呼び出しごと |
 | `Options.base` の確かめ | 絶対パスで名前で終わらなければ `ValueError`。長いパスでは、ソケットのディレクトリを引いた後・経路を試す前に、bind でも connect でも何も作らずに確かめる (途中と、あれば B 自身)。安全の確かめは呼び出しのたびに行い、other の x の判定 (`usable_cross_uid`) は B を初めて持った時点の物を覚えて見直さない |
 | `/proc` を使えるか | `/proc/self/fd/<fd>` と `/proc/<pid>/fd/<fd>` を stat した `(st_dev, st_ino)` が fd の `fstat` と同じ時だけ (procB は B の fd で) |
 | `usable_cross_uid` | bind 系だけが見る。途中と B 自身が other に x を持つ B だけを使う |
@@ -127,7 +128,7 @@
 
 - 長いパスの bind は、どの OS でも B の実パスの link-dir で届く所まで届く (`/tmp` の B ならファイル名およそ 77 バイトまで)。それを超えるファイル名は link-file (macOS・NetBSD) と thread-cwd・at (Linux・Apple・FreeBSD) で届き、届かない所は `ENAMETOOLONG`
 - 長いパスの既定の bind はプロセスの D に E を残す。試験は共有の `/tmp/sockat-<uid>` を使わない: 経路の試験は試験のディレクトリを置き場にし、公開の呼び出しの試験 (子プロセスを含む) は環境を読む部分を差し替えてセッション専用の置き場を使う
-- ソケットのディレクトリの B と、確かめに外れて落とした B は `sweep` の対象にならず、残りうる (README・MANUAL に書く)
+- ソケットのディレクトリの B は `sweep` の対象にならず、残りうる (仕様の「置き場に残る物」)
 - SPEC が変わったら、この実装と README / MANUAL を追従させる
 
 ## 未決

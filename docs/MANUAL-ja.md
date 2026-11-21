@@ -126,7 +126,7 @@ match bound.spelling:
 
 - 失敗は `OSError` (その errno のサブクラス) で返す。`remove()` で両方が失敗した時は、ファイル側のエラーを返し、`cleanup()` のエラーはその例外の note (`add_note`) に足す
 - 相対パスの `sockat.ex.bind` で、呼び出しの初めと覚えた後で cwd が違えば、errno の無い `OSError`
-- 長いパスに何度も bind する長命のプロセスは、既定の bind の E が溜まるので `sockat.ex.bind` の `remove()`・`cleanup()` で片付ける (仕様の「[置き場に残る物](https://github.com/kawaz/sockat/blob/main/docs/SPEC-ja.md#置き場に残る物)」)
+- 既定の `sockat.bind` は `file` を返さない。何が残り、長命のプロセスがどう片付けるかは仕様の「[置き場に残る物](https://github.com/kawaz/sockat/blob/main/docs/SPEC-ja.md#置き場に残る物)」
 
 ### 診断とエラー
 
