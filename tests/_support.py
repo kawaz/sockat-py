@@ -179,7 +179,20 @@ def env_at(
     cfg = Config(places=ps, uid=uid, proc=proc, thread_cwd=thread_cwd, wide=wide)
     if link_file is not None:
         cfg = dataclasses.replace(cfg, link_file=link_file)
-    return Env(cfg, State())
+    return Env(cfg, new_state())
+
+
+STATES: list[State] = []
+"""Every :class:`State` a test made (:func:`new_state`): the fds of its B and
+D are closed when the test ends (``conftest``), as the process's own state
+lives on but a test's does not."""
+
+
+def new_state() -> State:
+    """A fresh :class:`State` of the test's own, closed when the test ends."""
+    st = State()
+    STATES.append(st)
+    return st
 
 
 def base_of(env: Env) -> bytes:

@@ -39,13 +39,14 @@ from _support import (
     listener_at,
     listing,
     long_path,
+    new_state,
     raises_errno,
     run_child,
 )
 
 import sockat.ex
 from sockat import _calls, _place
-from sockat._place import Kind, State
+from sockat._place import Kind
 from sockat._routes import Call
 from sockat._spelling import Trail
 from sockat._sys import DIRECT_MAX, IS_FREEBSD, Op
@@ -151,8 +152,15 @@ def test_an_existing_b_is_checked(tmp: TmpDirs, what: str) -> None:
         assert mode(b) == 0o777
     env = env_at(place, proc=NO_PROC, thread_cwd=False, link_file=_place.LinkFile.NOT_TRIED)
     trail = Trail()
-    with raises_errno(errno.ENAMETOOLONG):
-        bind_in(env, long_path(tmp.new()), trail=trail)
+    if IS_FREEBSD:
+        # FreeBSD's row has at, which needs no thread: with no place for B it
+        # goes through D in a B in the socket's directory.
+        done = bind_in(env, long_path(tmp.new()), trail=trail)
+        done.sock.close()
+        assert done.route == "at"
+    else:
+        with raises_errno(errno.ENAMETOOLONG):
+            bind_in(env, long_path(tmp.new()), trail=trail)
     (why,) = [s.reason for s in trail.skipped if s.name == "link-dir"]
     assert "occupied" in why
     assert os.fsdecode(os.path.realpath(place)) in why
@@ -460,7 +468,7 @@ def test_a_forked_child_makes_its_own_d(tmp: TmpDirs) -> None:
 # The last place is the socket's directory: B there is named
 # .sockat.XXXXXXXXXX, and the process keeps one per directory.
 def test_b_in_the_socket_directory_is_the_last_place(tmp: TmpDirs) -> None:
-    env = _place.Env(_place.Config(places=()), State())
+    env = _place.Env(_place.Config(places=()), new_state())
     sockdir = os.path.dirname(long_path(tmp.new()))
     real = os.path.realpath(sockdir)
     b = env.sockdir_base(real)
@@ -716,7 +724,7 @@ def test_b_is_made_for_the_effective_uid(tmp: TmpDirs) -> None:
 def test_a_fresh_b_failing_its_check_is_removed(tmp: TmpDirs) -> None:
     place = tmp.new()
     env = env_at(place, proc=NO_PROC)
-    env = _place.Env(dataclasses.replace(env.config, uid=65534), State())
+    env = _place.Env(dataclasses.replace(env.config, uid=65534), new_state())
     assert env.auto_base() is None
     assert listing(place) == []
 
@@ -1120,8 +1128,15 @@ def test_b_without_x_for_others_is_looked_at_again(tmp: TmpDirs) -> None:
     os.chmod(b, 0o700)
     env = env_at(place, proc=NO_PROC, thread_cwd=False, link_file=_place.LinkFile.NOT_TRIED)
     opts = _calls.Opts(usable_cross_uid=True)
-    with raises_errno(errno.ENAMETOOLONG):
-        bind_in(env, long_path(tmp.new()), opts=opts)
+    if IS_FREEBSD:
+        # FreeBSD's row has at (no thread needed): the bind goes through it,
+        # its spelling Dangling, rather than through a B others cannot reach.
+        first = bind_in(env, long_path(tmp.new()), opts=opts)
+        first.sock.close()
+        assert first.spelling == sockat.ex.Dangling()
+    else:
+        with raises_errno(errno.ENAMETOOLONG):
+            bind_in(env, long_path(tmp.new()), opts=opts)
     os.chmod(b, 0o711)
     done = bind_in(env, long_path(tmp.new()), opts=opts)
     done.sock.close()

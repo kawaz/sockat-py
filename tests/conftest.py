@@ -6,7 +6,7 @@ import tempfile
 from collections.abc import Iterator
 
 import pytest
-from _support import PRIVATE_PLACE_ENV, TmpDirs, private_config
+from _support import PRIVATE_PLACE_ENV, STATES, TmpDirs, private_config
 
 from sockat import _place
 
@@ -20,6 +20,17 @@ def tmp() -> Iterator[TmpDirs]:
         yield dirs
     finally:
         dirs.cleanup()
+
+
+@pytest.fixture(autouse=True)
+def _close_test_states() -> Iterator[None]:
+    """Close the B and D fds of the states a test made (``env_at``): they
+    are held for the life of a state, and a test's state ends with the test.
+    Left open, they pile up over the session past a small fd limit (OpenBSD's
+    default)."""
+    yield
+    while STATES:
+        STATES.pop().abandon()
 
 
 @pytest.fixture(autouse=True, scope="session")
