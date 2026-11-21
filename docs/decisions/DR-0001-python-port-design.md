@@ -68,6 +68,7 @@
 - `Bound(socket, file, spelling, route, base, skipped)`・`Connected(socket, route, skipped)`・`Report(route, skipped)` は NamedTuple (分解して受け取れる)。`ForBind(path, spelling, route, base, skipped)` / `ForConnect(path, route, skipped)` は frozen dataclass と `cleanup()`。どちらも `remove()` を持たず、`ForBind` は bind の後に呼ぶ `socket_file()` で `SocketFile` を返す (綴りを辿って realpath と `(st_dev, st_ino)` を覚える。辿った先がソケットでなければ `ENOTSOCK`。相対の綴りは resolve の時と cwd を比べる)
 - `Spelling` は基底のクラスと、値ごとの frozen dataclass。`match bound.spelling: case sockat.ex.Linked(removable=True): ...` で分岐できる。`Until` は `StrEnum` (`"Process"` / `"Cleanup"`)
 - `SocketFile` は `remove()` と `cleanup()` を持つ (SPEC の Python の形「戻り値に引数なしの関数を含める」を、引数なしのメソッドで満たす)
+- `sockat.ex.bind` が bind の直後に覚える場所: link-dir・thread-cwd・at は、経路を組む前に `os.path.realpath` で引いたソケットのディレクトリ (E が指す先) とファイル名をそのまま使い、元のパスを引き直さない。standard と link-file は bind の後に元のパスを `os.path.realpath` する。どちらも最後の要素が symlink なら辿った先を覚え、`lstat` してソケットでなければ `ENOTSOCK`
 - resolve の `path` は、渡したパスが `str` なら `str`、`bytes` なら `bytes`
 - 長いパスでは、戻り値は `socket.socket` の subclass で、アドレスを元のパスで返す ([DR-0003](DR-0003-report-the-given-path.md))。`sockat.datagram.unbound()` も同じ subclass で、長いパスに connect すると `getpeername()` が元のパスを返す
 - `path` は `str` / `bytes` / `os.PathLike`。入口で 1 度だけ `os.fspath` し、その値を覚える・bind する・返すのすべてに使う
