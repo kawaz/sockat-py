@@ -6,7 +6,6 @@ tests can force it."""
 
 from __future__ import annotations
 
-import contextlib
 import errno
 import os
 import socket
@@ -457,8 +456,8 @@ def _link_in_d(
         got = d.shared_link(target)
         if got is None:
             raise _Unusable(NO_E)
-        e, made = got
-        link = Link(d, e, shared=target, made=made)
+        e, _ = got
+        link = Link(d, e, kept=True)
     else:
         made_e = d.link(target)
         if made_e is None:
@@ -579,23 +578,18 @@ def bind_long(call: Call, t: Target, env: Env, bases: Bases, trail: Trail) -> Bi
     real path), link-file (where a bind may follow the symlink),
     thread-cwd / at, then ``ENAMETOOLONG``."""
     trail.skip(STANDARD, "path too long")
-    # The default bind's link-dir E is shared: a bind made through one this
-    # call makes is done before another uses it, so that one removed on the
-    # bind's failure is never another bind's spelling.
-    with _SHARED_E_LOCK if bases.share_e else contextlib.nullcontext():
-        for make in (link_dir_proc, link_dir_real):
-            try:
-                through = make(env, t, bases)
-            except _Unusable as u:
-                trail.skip(LINK_DIR, u.why)
-                continue
-            except OSError:
-                # Options.base's B, checked, could not be made: its error,
-                # with no route and the routes skipped before this one
-                # (SPEC-routes).
-                trail.forget(LINK_DIR)
-                raise
-            return _bind_through(call, through, trail)
+    for make in (link_dir_proc, link_dir_real):
+        try:
+            through = make(env, t, bases)
+        except _Unusable as u:
+            trail.skip(LINK_DIR, u.why)
+            continue
+        except OSError:
+            # Options.base's B, checked, could not be made: its error, with
+            # no route and the routes skipped before this one (SPEC-routes).
+            trail.forget(LINK_DIR)
+            raise
+        return _bind_through(call, through, trail)
     if env.config.link_file is not LinkFile.NOT_TRIED:
         done = bind_link_file(call, t, env, bases, trail)
         if done is not None:
@@ -604,11 +598,6 @@ def bind_long(call: Call, t: Target, env: Env, bases: Bases, trail: Trail) -> Bi
     if done is not None:
         return done
     raise enametoolong()
-
-
-_SHARED_E_LOCK = threading.Lock()
-"""Held by a default bind while it makes or takes the shared link-dir E and
-binds through it."""
 
 
 def _bind_through(call: Call, through: Through, trail: Trail) -> BindDone:

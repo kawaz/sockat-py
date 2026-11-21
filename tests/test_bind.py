@@ -241,18 +241,22 @@ def test_thread_cwd_reaches_its_longest_name(tmp: TmpDirs, extra: int) -> None:
 
 
 # A bind's real failure is the outcome, raised with the route that failed,
-# and no route after it is tried (a file already at the path: the standard's errno for it). E
-# made for it is removed.
+# and no route after it is tried (a file already at the path: the standard's
+# errno for it). The E an _ex bind made for it is removed; the default
+# bind's link-dir E stays (it is used again).
 def test_a_bind_failure_is_not_tried_again(tmp: TmpDirs) -> None:
     env = env_at(tmp.new(), proc=NO_PROC)
     p = long_path(tmp.new())
     with open(p, "wb"):
         pass
     with raises_errno(standard_errno("bind-exists")):
-        _calls.bind(p, env=env, trail=(trail := Trail()))
+        _calls.bind(p, env=env, remember=True, trail=(trail := Trail()))
     assert trail.trying == "link-dir"
     assert [s.name for s in trail.skipped] == ["standard"]
     assert entries(env) == []
+    with raises_errno(standard_errno("bind-exists")):
+        _calls.bind(p, env=env, trail=Trail())
+    assert len(entries(env)) == 1
 
 
 # The default bind leaves the E of its spelling in D (no remove / cleanup to
@@ -419,7 +423,8 @@ def test_the_default_bind_uses_its_e_again(tmp: TmpDirs) -> None:
 
 # A shared E removed (or pointing elsewhere) is let go and made again by the
 # next default bind, which goes through; a bind that fails leaves the shared
-# E an earlier call made.
+# E, the one an earlier call made and the one it made itself (another default
+# bind may be using it; the next bind does).
 def test_the_default_bind_remakes_a_removed_e(tmp: TmpDirs) -> None:
     env = env_at(tmp.new(), proc=NO_PROC)
     d = os.path.dirname(long_path(tmp.new()))
@@ -445,6 +450,18 @@ def test_the_default_bind_remakes_a_removed_e(tmp: TmpDirs) -> None:
     with raises_errno(standard_errno("bind-exists")):
         bind_in(env, d + b"/taken.sock")
     assert entries(env) == kept
+    # A failed default bind into a directory with no E yet: the E it made
+    # stays, and the next bind there uses it.
+    other = os.path.dirname(long_path(tmp.new()))
+    with open(other + b"/taken.sock", "wb"):
+        pass
+    with raises_errno(standard_errno("bind-exists")):
+        bind_in(env, other + b"/taken.sock")
+    made = [e for e in entries(env) if e not in kept]
+    assert len(made) == 1
+    ok = bind_in(env, other + b"/ok.sock")
+    ok.sock.close()
+    assert [e for e in entries(env) if e not in kept] == made
 
 
 # Many threads making default binds in one socket directory at once share

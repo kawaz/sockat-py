@@ -322,13 +322,6 @@ class Dir:
             self._shared[target] = made
             return made, True
 
-    def forget_shared(self, target: bytes, name: bytes) -> None:
-        """Let go of the default bind's E ``name`` to ``target`` (removed by
-        the call that made it, whose bind failed)."""
-        with self._shared_lock:
-            if self._shared.get(target) == name:
-                del self._shared[target]
-
     def random_link(self, target: bytes) -> bytes | None:
         """A symlink E to ``target`` named at random (thread-cwd / at), or
         ``None`` when it cannot be made."""
