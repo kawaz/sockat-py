@@ -17,6 +17,7 @@ from _support import (
     HAS_THREAD_ROUTE,
     NAME_MAX_THREAD_CWD,
     NO_PROC,
+    THREAD_CWD,
     THREAD_ROUTE_IN_BIND_ROW,
     TmpDirs,
     accept_ping,
@@ -482,3 +483,106 @@ def test_threads_share_the_default_binds_e(tmp: TmpDirs) -> None:
     assert set(routes) == {"link-dir"}
     assert len(entries(env)) == 1
     assert all(is_socket(d + b"/t%d.sock" % i) for i in range(24))
+
+
+# The thread of thread-cwd / thread-cwd-direct works on fds of its own (a dup
+# of the directory's fd, handed to it, closed by it): the caller's fd is
+# never the one the thread moves to. An interruption in start() is waited
+# out: the thread runs to its end before the interruption is raised.
+@pytest.mark.skipif(not THREAD_CWD, reason="no thread cwd here")
+def test_the_throwaway_thread_owns_its_fds(tmp: TmpDirs, monkeypatch: pytest.MonkeyPatch) -> None:
+    from sockat import _routes
+
+    d = os.path.realpath(tmp.new())
+    dirfd = os.open(d, os.O_RDONLY)
+    seen: list[tuple[int, str]] = []
+    try:
+        _routes.in_thread_cwd(dirfd, lambda own: seen.append((own, os.getcwd())))
+        ((own, cwd),) = seen
+        assert own != dirfd
+        assert os.fsencode(cwd) == d
+        # The thread closed its own fd (the number is free again or reused,
+        # never the caller's).
+        assert own != dirfd
+        real_start = threading.Thread.start
+
+        def interrupted_start(self: threading.Thread) -> None:
+            real_start(self)
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(threading.Thread, "start", interrupted_start)
+        ran: list[str] = []
+        with pytest.raises(KeyboardInterrupt):
+            _routes.in_thread_cwd(dirfd, lambda own: ran.append(os.getcwd()))
+        assert [os.fsencode(c) for c in ran] == [d]
+    finally:
+        os.close(dirfd)
+
+
+# E's names are drawn from a counter from 0, and the spelling is judged with
+# the name E would get before E is made: where a 2-character name no longer
+# fits, no E is made (none left in D, shared or not).
+def test_e_is_not_made_where_its_name_would_not_fit(tmp: TmpDirs) -> None:
+    env = env_at(tmp.new(), proc=NO_PROC, thread_cwd=False, link_file=LinkFile.NOT_TRIED)
+    bind_in(env, long_path(tmp.new())).sock.close()
+    assert entries(env) == [b"0"]
+    b = env.auto_base()
+    assert b is not None
+    d = b.dir(env.config.uid)
+    assert d is not None
+    d._next = 36  # the next name is "10"
+    name_len = DIRECT_MAX - (len(b.real) + 1 + 10 + 1 + 2 + 1)
+    p = long_path(tmp.new(), name=b"n" * (name_len + 1), total=name_len + 60)
+    trail = Trail()
+    # thread-cwd is off; FreeBSD's at (no thread) may still carry it.
+    assert _bind_outcome(env, p, trail) in (None, errno.ENAMETOOLONG)
+    assert ("link-dir", "spelling too long") in [(s.name, s.reason) for s in trail.skipped]
+    assert entries(env) == [b"0"]
+
+
+# A B found taken over on the way, then a spelling too long through the next
+# place's B: the reason says both (SPEC: the reason tells an occupied B).
+def test_the_reason_keeps_an_occupied_b_when_the_next_is_too_long(tmp: TmpDirs) -> None:
+    first = tmp.new()
+    os.mkdir(first + b"/sockat-%d" % os.geteuid())
+    os.chmod(first + b"/sockat-%d" % os.geteuid(), 0o777)
+    deep = deep_dir(tmp.new(), 70)
+    env = env_at(first, deep, proc=NO_PROC, thread_cwd=False, link_file=LinkFile.NOT_TRIED)
+    trail = Trail()
+    assert _bind_outcome(env, long_path(tmp.new(), name=b"n" * 20), trail) in (None, errno.ENAMETOOLONG)
+    (why,) = [s.reason for s in trail.skipped if s.name == "link-dir"]
+    assert "spelling too long" in why
+    assert "occupied" in why
+
+
+# On a system not measured, a failure after link-file's bind went through
+# (remembering the file) is the outcome, raised from link-file, not taken for
+# a kernel that did not follow the symlink. Forced where a bind follows it.
+@pytest.mark.skipif(not (IS_APPLE or os.uname().sysname == "NetBSD"), reason="a bind follows the symlink here only")
+def test_link_file_told_at_run_time_keeps_failures_after_the_bind(
+    tmp: TmpDirs, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from sockat._socket_file import Recorder
+
+    env = env_at(tmp.new(), link_file=LinkFile.TOLD_AT_RUN_TIME)
+    p = long_path(tmp.new(), name=b"n" * 100)
+
+    def refuse(self: Recorder) -> None:
+        raise OSError(errno.ENOTSOCK, "refused for the test")
+
+    monkeypatch.setattr(Recorder, "bound", refuse)
+    trail = Trail()
+    with raises_errno(errno.ENOTSOCK):
+        _calls.bind(p, env=env, remember=True, trail=trail)
+    assert trail.trying == "link-file"
+    assert entries(env) == []
+
+
+def _bind_outcome(env: Env, p: bytes, trail: Trail) -> int | None:
+    """Bind ``p`` (closing the listener) and give the errno it failed with,
+    or ``None``."""
+    try:
+        bind_in(env, p, trail=trail).sock.close()
+    except OSError as e:
+        return e.errno
+    return None

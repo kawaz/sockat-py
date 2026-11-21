@@ -348,3 +348,23 @@ def test_only_routes_needing_the_directory_open_it(tmp: TmpDirs, monkeypatch: py
             accept_ping(listener, sock)
     assert route == "link-file"
     assert os.path.dirname(p) not in opened
+
+
+# proc-direct is used only where /proc names the socket's directory itself:
+# a /proc whose fd entries name another directory (another PID namespace's)
+# is not used, rather than connecting to that directory's file of the name.
+@pytest.mark.skipif(not IS_LINUX, reason="proc-direct is Linux's")
+def test_proc_direct_checks_the_directory_it_names(tmp: TmpDirs) -> None:
+    proc = tmp.new() + b"/proc"
+    for who in (b"self", b"%d" % os.getpid()):
+        fds = proc + b"/" + who + b"/fd"
+        os.makedirs(fds)
+        for n in range(256):
+            os.symlink(b"/", fds + b"/%d" % n)
+    env = env_at(tmp.new(), proc=proc)
+    p = long_path(tmp.new())
+    with listener_at(p):
+        trail = Trail()
+        with raises_errno(errno.ENAMETOOLONG):
+            _calls.connect(p, call=Call(Op.CONNECT), env=env, trail=trail, order=("proc-direct",))
+    assert [(s.name, s.reason) for s in trail.skipped][-1] == ("proc-direct", "/proc unusable")
