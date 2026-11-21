@@ -379,9 +379,14 @@ class Base:
         self.real = real
         """B's real path (the real-path spelling's start)."""
         self.fd = fd
-        self.cross_uid = searchable_by_others(real)
-        """Whether another uid can follow a spelling through B's real path
-        (every directory on the way and B itself let others search them)."""
+        parent = real.rsplit(b"/", 1)[0] or b"/"
+        self._way_x = searchable_by_others(parent)
+        """Whether others can search every directory on the way to B, judged
+        when B was first held and kept (SPEC-routes)."""
+        try:
+            self._self_x = bool(os.fstat(fd).st_mode & stat.S_IXOTH)
+        except OSError:
+            self._self_x = False
         self.private_tmp_ok = not goes_through_shared_tmp(place) and not goes_through_shared_tmp(real)
         """Whether a spelling through B's real path can be followed with a
         private ``/tmp`` on either side: neither the place as given (before
@@ -390,6 +395,18 @@ class Base:
         self.closed = False
         self._d: Dir | None = None
         self._lock = threading.Lock()
+
+    @property
+    def cross_uid(self) -> bool:
+        """Whether another uid can follow a spelling through B's real path:
+        every directory on the way and B itself let others search them. B
+        itself found without ``o+x`` is looked at again (``fstat`` of its fd)
+        each time: two processes making B at once, one may open it between
+        the other's ``mkdirat`` (0700) and ``fchmodat`` (0711)."""
+        if self._way_x and not self._self_x:
+            with contextlib.suppress(OSError):
+                self._self_x = bool(os.fstat(self.fd).st_mode & stat.S_IXOTH)
+        return self._way_x and self._self_x
 
     def proc(self, proc: bytes, pid: int) -> bytes:
         """procB: ``<proc>/<pid>/fd/<B's fd>``."""

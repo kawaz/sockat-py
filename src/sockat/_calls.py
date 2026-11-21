@@ -55,10 +55,13 @@ PLAIN = Opts()
 def _read(path: StrOrBytesPath) -> tuple[str | bytes, bytes, bool]:
     """The path read once (a path-like object may answer differently each
     time), its bytes, and whether it is a Linux abstract address (leading
-    NUL, which goes to the ``socket`` module whatever its length). A NUL
-    anywhere else is an argument error whatever the length."""
+    NUL, which goes to the ``socket`` module whatever its length). An empty
+    path, and a NUL anywhere else, are argument errors whatever the
+    length."""
     spelled = os.fspath(path)
     raw = os.fsencode(spelled)
+    if not raw:
+        raise ValueError("socket path is empty")
     abstract = IS_LINUX and raw.startswith(b"\0")
     if not abstract:
         check_no_nul(raw)
