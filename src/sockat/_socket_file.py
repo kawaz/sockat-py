@@ -19,9 +19,14 @@ class Link:
     """One E of a resolve (in D), removed once by :meth:`cleanup` (asked for
     by the caller) or :meth:`discard` (inside a call)."""
 
-    def __init__(self, d: Dir, name: bytes) -> None:
+    def __init__(self, d: Dir, name: bytes, *, shared: bytes | None = None, made: bool = True) -> None:
         self._d = d
         self._name = name
+        self._shared = shared
+        """For the default bind's E used again: the target it is kept for."""
+        self._made = made
+        """Whether this call made E (a shared E made by an earlier call is
+        not this call's to remove)."""
         self._done = False
         self.lock = threading.RLock()
         """Held while E (and, by every :class:`SocketFile` sharing this E, the
@@ -45,6 +50,12 @@ class Link:
             if self._done:
                 return
             self._done = True
+            if not self._made:
+                # The default bind's E made by an earlier call: other binds'
+                # spellings go through it (SPEC-routes "link-dir").
+                return
+            if self._shared is not None:
+                self._d.forget_shared(self._shared, self._name)
             self._d.unlink(self._name)
 
 

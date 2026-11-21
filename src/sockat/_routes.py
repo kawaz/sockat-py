@@ -6,6 +6,7 @@ tests can force it."""
 
 from __future__ import annotations
 
+import contextlib
 import errno
 import os
 import socket
@@ -231,9 +232,22 @@ class Bases:
     _plain_tried: bool = field(default=False, init=False)
     _cross: Base | None = field(default=None, init=False)
     _cross_tried: bool = field(default=False, init=False)
+    share_e: bool = False
+    """The default bind (no SocketFile): link-dir's E is the one kept per
+    socket directory, used again (SPEC-routes "link-dir")."""
+    occupied: list[bytes] = field(default_factory=list, init=False)
+    """The B at a place found taken over by someone else in this call (the
+    place passed over)."""
     _no_d: list[Base] = field(default_factory=list, init=False)
     """The B whose D could not be made in this call (SPEC-routes: not tried
     again on the same B within the call; a later call tries again)."""
+
+    def no_b(self, why: str = "") -> str:
+        """Why no B could be had: one found taken over by someone else is
+        said so (SPEC: the reason tells an occupied B)."""
+        if self.occupied:
+            return "B occupied by another owner: " + ", ".join(os.fsdecode(p) for p in self.occupied)
+        return why or NO_PLACE_FOR_B
 
     def dir(self, b: Base) -> Dir | None:
         """D of ``b`` for this call, or ``None`` when it cannot be made (then
@@ -253,7 +267,7 @@ class Bases:
             if self.given is not None:
                 self._plain = self.env.given_base(self.given, cross_uid=self.cross_uid)
             else:
-                self._plain = self.env.auto_base()
+                self._plain = self.env.auto_base(self.occupied)
         return self._plain
 
     def made_plain(self) -> Base | None:
@@ -274,7 +288,7 @@ class Bases:
             if self.given is not None:
                 self._cross = self.env.given_base(self.given, cross_uid=True)
             else:
-                self._cross = self.env.cross_base()
+                self._cross = self.env.cross_base(self.occupied)
         return self._cross
 
     def for_real_path(self) -> Base | None:
@@ -351,7 +365,7 @@ def _through_procb(env: Env, t: Target, bases: Bases, route: str, target: bytes,
         raise _Unusable(TOO_LONG)
     b = bases.with_sockdir()
     if b is None:
-        raise _Unusable(NO_PLACE_FOR_B)
+        raise _Unusable(bases.no_b())
     proc = env.config.proc
     assert proc is not None
     pid = os.getpid()
@@ -360,7 +374,7 @@ def _through_procb(env: Env, t: Target, bases: Bases, route: str, target: bytes,
     head = b.proc(proc, pid)
     if len(head) + tail > DIRECT_MAX:
         raise _Unusable(TOO_LONG)
-    spelling, link = _link_in_d(bases, b, head, target, name)
+    spelling, link = _link_in_d(bases, b, head, target, name, share=bases.share_e and route == LINK_DIR)
     return Through(
         spelling,
         route,
@@ -376,15 +390,15 @@ def _through_real(env: Env, t: Target, bases: Bases, route: str, target: bytes, 
     tail = 1 + RANDOM_LEN + 1 + 1 + (1 + len(name) if name is not None else 0)
     guess = env.real_len_guess(cross_uid=bases.cross_uid, given=bases.given)
     if guess is None:
-        raise _Unusable(NO_PLACE_FOR_B)
+        raise _Unusable(bases.no_b())
     if guess + tail > DIRECT_MAX:
         raise _Unusable(TOO_LONG)
     b = bases.for_real_path()
     if b is None:
-        raise _Unusable(NO_CROSS_UID_B if bases.cross_uid else NO_PLACE_FOR_B)
+        raise _Unusable(bases.no_b(NO_CROSS_UID_B if bases.cross_uid else NO_PLACE_FOR_B))
     if len(b.real) + tail > DIRECT_MAX:
         raise _Unusable(TOO_LONG)
-    spelling, link = _link_in_d(bases, b, b.real, target, name)
+    spelling, link = _link_in_d(bases, b, b.real, target, name, share=bases.share_e and route == LINK_DIR)
     return Through(
         spelling,
         route,
@@ -429,22 +443,35 @@ def link_file_proc(env: Env, t: Target, bases: Bases) -> Through:
     return _through_procb(env, t, bases, LINK_FILE, _file_target(t), None)
 
 
-def _link_in_d(bases: Bases, b: Base, head: bytes, target: bytes, name: bytes | None) -> tuple[bytes, Link]:
+def _link_in_d(
+    bases: Bases, b: Base, head: bytes, target: bytes, name: bytes | None, *, share: bool = False
+) -> tuple[bytes, Link]:
     """E in D of ``b`` pointing to ``target``, and the spelling
-    ``<head>/D/E[/<name>]`` (checked again to fit, E's name now known)."""
+    ``<head>/D/E[/<name>]`` (checked again to fit, E's name now known).
+    ``share`` (the default bind's link-dir): the E kept per target in D, made
+    only when there is none that still points there."""
     d = bases.dir(b)
     if d is None:
         raise _Unusable(NO_D)
-    e = d.link(target)
-    if e is None:
-        raise _Unusable(NO_E)
+    if share:
+        got = d.shared_link(target)
+        if got is None:
+            raise _Unusable(NO_E)
+        e, made = got
+        link = Link(d, e, shared=target, made=made)
+    else:
+        made_e = d.link(target)
+        if made_e is None:
+            raise _Unusable(NO_E)
+        e = made_e
+        link = Link(d, e)
     spelling = _join(_join(head, d.name), e)
     if name is not None:
         spelling = _join(spelling, name)
     if len(spelling) > DIRECT_MAX:
-        d.unlink(e)
+        link.discard()
         raise _Unusable(TOO_LONG)
-    return spelling, Link(d, e)
+    return spelling, link
 
 
 # ---------- the throwaway thread ----------
@@ -552,18 +579,23 @@ def bind_long(call: Call, t: Target, env: Env, bases: Bases, trail: Trail) -> Bi
     real path), link-file (where a bind may follow the symlink),
     thread-cwd / at, then ``ENAMETOOLONG``."""
     trail.skip(STANDARD, "path too long")
-    for make in (link_dir_proc, link_dir_real):
-        try:
-            through = make(env, t, bases)
-        except _Unusable as u:
-            trail.skip(LINK_DIR, u.why)
-            continue
-        except OSError:
-            # Options.base's B, checked, could not be made: its error, with
-            # no route and the routes skipped before this one (SPEC-routes).
-            trail.forget(LINK_DIR)
-            raise
-        return _bind_through(call, through, trail)
+    # The default bind's link-dir E is shared: a bind made through one this
+    # call makes is done before another uses it, so that one removed on the
+    # bind's failure is never another bind's spelling.
+    with _SHARED_E_LOCK if bases.share_e else contextlib.nullcontext():
+        for make in (link_dir_proc, link_dir_real):
+            try:
+                through = make(env, t, bases)
+            except _Unusable as u:
+                trail.skip(LINK_DIR, u.why)
+                continue
+            except OSError:
+                # Options.base's B, checked, could not be made: its error,
+                # with no route and the routes skipped before this one
+                # (SPEC-routes).
+                trail.forget(LINK_DIR)
+                raise
+            return _bind_through(call, through, trail)
     if env.config.link_file is not LinkFile.NOT_TRIED:
         done = bind_link_file(call, t, env, bases, trail)
         if done is not None:
@@ -572,6 +604,11 @@ def bind_long(call: Call, t: Target, env: Env, bases: Bases, trail: Trail) -> Bi
     if done is not None:
         return done
     raise enametoolong()
+
+
+_SHARED_E_LOCK = threading.Lock()
+"""Held by a default bind while it makes or takes the shared link-dir E and
+binds through it."""
 
 
 def _bind_through(call: Call, through: Through, trail: Trail) -> BindDone:
@@ -646,7 +683,7 @@ def bind_thread_cwd_or_at(call: Call, t: Target, env: Env, bases: Bases, trail: 
     b = bases.with_sockdir()
     d = bases.dir(b) if b is not None else None
     if d is None:
-        trail.skip(route, NO_D if b is not None else NO_PLACE_FOR_B)
+        trail.skip(route, NO_D if b is not None else bases.no_b())
         return None
     e = d.random_link(t.real_dir)
     if e is None:
@@ -853,7 +890,7 @@ def connect_link_file(cc: ConnectCall) -> socket.socket | str:
         return TOO_LONG
     b = cc.bases.plain()
     if b is None:
-        return NO_PLACE_FOR_B
+        return cc.bases.no_b()
     if len(b.real) + 1 + RANDOM_LEN > DIRECT_MAX:
         return TOO_LONG
     target = absolute(cc.target.path)

@@ -31,7 +31,7 @@ from . import _path
 from ._sys import IS_APPLE, IS_LINUX
 
 RANDOM_LEN = 10
-"""Length of a random name: D, a random B, E of thread-cwd / at and of the
+"""Length of a random name: D, B in a socket's directory, E of thread-cwd / at and of the
 default connect's link-file."""
 
 ATTEMPTS = 16
@@ -283,6 +283,10 @@ class Dir:
         self.closed = False
         self._lock = threading.Lock()
         self._counter = itertools.count(1)
+        self._shared: dict[bytes, bytes] = {}
+        """The default bind's link-dir E, one per socket directory's realpath
+        (SPEC-routes "link-dir"): the target and E's name."""
+        self._shared_lock = threading.Lock()
 
     def link(self, target: bytes) -> bytes | None:
         """A symlink E to ``target`` named by a counter (unique in the
@@ -295,6 +299,35 @@ class Dir:
             if made is not False:
                 return name if made else None
         return None
+
+    def shared_link(self, target: bytes) -> tuple[bytes, bool] | None:
+        """The default bind's E to ``target`` (a socket directory's realpath),
+        one per target and used again: ``(name, made now)``, or ``None`` when
+        it cannot be made. An E used again is checked first (``readlinkat``
+        from D's fd): gone, or pointing elsewhere, it is let go and another
+        made."""
+        with self._shared_lock:
+            name = self._shared.get(target)
+            if name is not None:
+                try:
+                    now: bytes | None = os.readlink(name, dir_fd=self.fd)
+                except OSError:
+                    now = None
+                if now == target:
+                    return name, False
+                del self._shared[target]
+            made = self.link(target)
+            if made is None:
+                return None
+            self._shared[target] = made
+            return made, True
+
+    def forget_shared(self, target: bytes, name: bytes) -> None:
+        """Let go of the default bind's E ``name`` to ``target`` (removed by
+        the call that made it, whose bind failed)."""
+        with self._shared_lock:
+            if self._shared.get(target) == name:
+                del self._shared[target]
 
     def random_link(self, target: bytes) -> bytes | None:
         """A symlink E to ``target`` named at random (thread-cwd / at), or
@@ -569,6 +602,7 @@ def make_base(
     checked: set[bytes],
     strict: bool = False,
     cross_uid: bool = False,
+    occupied: list[bytes] | None = None,
 ) -> Base | None:
     """Make (or take the existing) B ``name`` in ``parent`` (SPEC-routes "B
     の作り方"), or ``None`` when it cannot be made. ``name`` ``None`` draws a
@@ -581,8 +615,9 @@ def make_base(
        with ``mkdirat`` (0700), opened ``O_NOFOLLOW``, checked to be a real
        directory of ours, then made 0711.
     3. On ``EEXIST`` the one there is checked the same way (a real directory
-       of ours that nobody else can write to). Where it fails, a random name
-       ``<name>.XXXXXXXXXX`` is tried instead.
+       of ours that nobody else can write to). Where it fails, the place is
+       taken over by someone else (occupied): ``None``, the B's path added
+       to ``occupied`` (SPEC-routes: no other B there; the next place).
 
     With ``cross_uid``, a parent another uid cannot search its way to is not
     used.
@@ -625,7 +660,7 @@ def make_base(
             raise
         return None
     try:
-        made = _make_in(kind, parent, real_parent, pfd, name, uid, strict=strict)
+        made = _make_in(kind, parent, real_parent, pfd, name, uid, strict=strict, occupied=occupied)
     finally:
         os.close(pfd)
     if made is not None and cross_uid and not made.cross_uid:
@@ -646,11 +681,13 @@ def _make_in(
     uid: int,
     *,
     strict: bool,
+    occupied: list[bytes] | None = None,
 ) -> Base | None:
     """B ``name`` (made, or the one there when it passes the checks) in the
-    parent held by ``pfd``; where the one there fails them, or ``name`` is
-    ``None``, a fresh random name (``sockat-<uid>.XXXXXXXXXX`` in a place,
-    ``.sockat.XXXXXXXXXX`` in the socket's directory)."""
+    parent held by ``pfd``. One there that fails them is taken over by
+    someone else: the place cannot be used (its path is added to
+    ``occupied``; ``Options.base`` raises). ``name`` ``None`` (the socket's
+    directory): a fresh ``.sockat.XXXXXXXXXX``."""
     if name is not None:
         made = _mkdir_new(kind, place, real_parent, pfd, name, uid, strict=strict)
         if made is not _Taken.TAKEN:
@@ -660,11 +697,11 @@ def _make_in(
             return got
         if strict:
             raise _base_error(got, _path_join(real_parent, name))
-        prefix = b"sockat-%d." % uid
-    else:
-        prefix = b".sockat."
+        if occupied is not None:
+            occupied.append(_path_join(real_parent, name))
+        return None
     for _ in range(ATTEMPTS):
-        made = _mkdir_new(kind, place, real_parent, pfd, random_name(prefix), uid, strict=strict)
+        made = _mkdir_new(kind, place, real_parent, pfd, random_name(b".sockat."), uid, strict=strict)
         if made is not _Taken.TAKEN:
             return made
     return None
@@ -782,7 +819,7 @@ class Env:
     def current(cls) -> Env:
         return cls(Config.from_env(), state())
 
-    def _at_place(self, place: Place, *, cross_uid: bool) -> Base | None:
+    def _at_place(self, place: Place, *, cross_uid: bool, occupied: list[bytes] | None = None) -> Base | None:
         """B at ``place``: the one this process holds there already (one B,
         and one D, per place whatever asks for it), or one made now."""
         st = self.state
@@ -791,12 +828,20 @@ class Env:
             held = _alive(st.places.get(key))
             if held is not None:
                 return held if (held.cross_uid or not cross_uid) else None
-        b = make_base(place.kind, place.path, place.name, self.config.uid, checked=st.checked, cross_uid=cross_uid)
+        b = make_base(
+            place.kind,
+            place.path,
+            place.name,
+            self.config.uid,
+            checked=st.checked,
+            cross_uid=cross_uid,
+            occupied=occupied,
+        )
         if b is not None and key is not None:
             st.places[key] = b
         return b
 
-    def auto_base(self) -> Base | None:
+    def auto_base(self, occupied: list[bytes] | None = None) -> Base | None:
         """The process's B: the first place where it can be had, kept for the
         life of the process once had (a place where it could not be made is
         tried again by a later call), or ``None``."""
@@ -805,13 +850,13 @@ class Env:
             st.auto = _alive(st.auto)
             if st.auto is None:
                 for place in self.config.places:
-                    b = self._at_place(place, cross_uid=False)
+                    b = self._at_place(place, cross_uid=False, occupied=occupied)
                     if b is not None:
                         st.auto = b
                         break
             return st.auto
 
-    def cross_base(self) -> Base | None:
+    def cross_base(self, occupied: list[bytes] | None = None) -> Base | None:
         """B another uid can follow a spelling through: the first place that
         lets others search their way to it and to B (judged when B was
         made); the process's B itself when that one does."""
@@ -820,7 +865,7 @@ class Env:
             st.cross = _alive(st.cross)
             if st.cross is None:
                 for place in self.config.places:
-                    b = self._at_place(place, cross_uid=True)
+                    b = self._at_place(place, cross_uid=True, occupied=occupied)
                     if b is not None:
                         st.cross = b
                         break

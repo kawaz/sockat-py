@@ -100,6 +100,9 @@ def bind(
     else:
         env = env if env is not None else Env.current()
         bases = _long(raw, env, opts, cross_uid=opts.usable_cross_uid)
+        # The default bind (no SocketFile to clean up with) uses link-dir's E
+        # again per socket directory.
+        bases.share_e = not remember
         done = bind_long(call, bases.target, env, bases, trail)
         if isinstance(done.sock, PathSocket):
             done.sock.report_path(os.fsdecode(raw), listening=True)
