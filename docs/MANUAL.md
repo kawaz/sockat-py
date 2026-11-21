@@ -147,6 +147,7 @@ The two handles of `Bound.file` (`SocketFile`). Each works only when called (nei
 - Replacement is told apart only by `(st_dev, st_ino)`, and what is promised covers replacement while the listener is open. Something removed and made again after closing cannot be told apart on file systems that reuse numbers at once (ext4, the BSDs' UFS / FFS). **Call `remove()` before closing the listener**
 - Swapping the file, between the check and the removal, by someone who can write to the socket's directory cannot be prevented (POSIX has no way to remove by inode)
 - The default `sockat.bind` does not return `file`, so its E remains until the process ends and goes away together with D when the OS cleans its temporary directories
+- A long-lived process that binds long paths again and again (a daemon making a socket per session and so on) piles up the E of the default bind until it ends, so it cleans them up with `remove()` / `cleanup()` of `sockat.ex.bind`
 
 ### Diagnostics and errors
 
@@ -207,7 +208,7 @@ listener.close()
 
 `sockat.ex.sweep()` removes, from the B with the default names in automatic places 1 to 3 (`/tmp/sockat-<uid>`, `$XDG_RUNTIME_DIR/sockat`, `$TMPDIR/sockat-<uid>`), the D whose owning process has ended (a D whose lock is released). `sockat.ex.sweep_base(path)` does the same for a B passed to `Options.base` (called by the app that manages that B. `path` is checked the same as `Options.base`, and nothing is made).
 
-- It does not remove the D of other live processes. It works only when called (sockat never calls it on its own)
+- It does not remove the D of other live processes. It works only when called. sockat never removes dead D on its own (not at a resolve, not when a process starts, not when it exits). Where tests run over and over (CI, repeated checks), calling `sweep()` keeps dead D from piling up
 - It does not make B. It does not touch an E directly under B (the default connect's), and leaves a D that contains something other than a symlink. It looks only at directories named as D is (10 letters and digits). B (`Options.base`'s B too) is sockat's alone: put nothing else in it
 - A B with a random name fallen back to after a failed check (`sockat-<uid>.XXXXXXXXXX`) and a B in the socket's directory (`.sockat.XXXXXXXXXX`) are not covered. These two may not be removed by the OS's clean up either (a B in the socket's directory remains in the user's directory)
 

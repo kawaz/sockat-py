@@ -147,6 +147,7 @@ match bound.spelling:
 - 置き換えを見分けるのは `(st_dev, st_ino)` だけで、約束するのは listener を開いている間の置き換えまで。閉じた後に消して作り直された物は、番号をすぐ使い回すファイルシステム (ext4、BSD の UFS / FFS) で見分けられない。**`remove()` は listener を閉じる前に呼ぶ**
 - 確かめてから消すまでの間に、ソケットのディレクトリに書ける者がファイルをすり替えるのは防げない (inode を指定して消す手段が POSIX に無い)
 - 既定の `sockat.bind` は `file` を返さないので、その E はプロセスが終わるまで残り、D と一緒に OS の一時ディレクトリの掃除で消える
+- 長いパスに何度も bind する長命のプロセス (セッションごとにソケットを作る daemon 等) は、既定の bind の E がプロセスの終わりまで溜まるので、`sockat.ex.bind` の `remove()`・`cleanup()` で片付ける
 
 ### 診断とエラー
 
@@ -207,7 +208,7 @@ listener.close()
 
 `sockat.ex.sweep()` は、自動の置き場 1〜3 の既定の名前の B (`/tmp/sockat-<uid>`・`$XDG_RUNTIME_DIR/sockat`・`$TMPDIR/sockat-<uid>`) の中から、持ち主のプロセスが終わった D (ロックの外れた D) を消す。`sockat.ex.sweep_base(path)` は `Options.base` に渡す B に同じことをする (その B を管理するアプリが呼ぶ。`path` は `Options.base` と同じく確かめ、何も作らない)。
 
-- 生きている他のプロセスの D は消さない。呼んだ時だけ働く (sockat が自分で呼ぶことは無い)
+- 生きている他のプロセスの D は消さない。呼んだ時だけ働く。死んだ D を sockat が自動で消すことは無い (resolve の時も、プロセスの初めも、終了時も)。試験を繰り返す環境 (CI、繰り返しの検証) では `sweep()` を呼べば死んだ D が溜まらない
 - B は作らない。B の直下の E (既定の connect の物) には触らず、symlink でない物がある D は残す。見るのは名前が D の形 (英数字 10 文字) のディレクトリだけ。B (`Options.base` の B も) は sockat 専用で、他の物を置かない
 - 確かめに外れて落とした乱数の名前の B (`sockat-<uid>.XXXXXXXXXX`) とソケットのディレクトリの B (`.sockat.XXXXXXXXXX`) は対象にしない。この 2 つは OS の掃除でも消えないことがある (ソケットのディレクトリの B は利用者のディレクトリに残る)
 
