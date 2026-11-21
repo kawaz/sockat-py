@@ -694,3 +694,66 @@ def test_a_file_put_in_place_of_the_socket_is_not_remembered(
         b = env.auto_base()
         assert b is not None
         assert all(os.listdir(b.real + b"/" + d) == [] for d in ds(b.real))
+
+
+def _sym_dotdot(root: bytes, long: bool) -> tuple[bytes, bytes, bytes]:
+    """``<root>/a/.../sym -> <root>/b/.../target``, and the path
+    ``<root>/a/.../sym/../s.sock``: the kernel takes its directory as
+    ``<root>/b/...`` (the target's parent); folding ``sym/..`` as text would
+    give ``<root>/a/...``. Returns the path, the socket file the kernel means
+    and the one a textual fold would mean."""
+    mid = b"/" + b"x" * 60 + b"/" + b"x" * 60 if long else b""
+    a, b = root + b"/a" + mid, root + b"/b" + mid
+    os.makedirs(a)
+    os.makedirs(b + b"/target")
+    os.symlink(b + b"/target", a + b"/sym")
+    return a + b"/sym/../s.sock", b + b"/s.sock", a + b"/s.sock"
+
+
+# A path through a symlink and then ".." is not folded as text: the bind
+# (link-dir's E pointing at the directory the kernel means), a connect, and
+# remove() all work on <root>/b/..., as the kernel does; an unrelated file at
+# the folded place <root>/a/s.sock is left alone.
+def test_a_symlink_then_dotdot_is_not_folded(tmp: TmpDirs) -> None:
+    o = options(tmp)
+    p, meant, folded = _sym_dotdot(os.path.realpath(tmp.new()), long=True)
+    with open(folded, "wb") as f:
+        f.write(b"unrelated")
+    bound = sockat.ex.bind(p, options=o)
+    with bound.socket as listener:
+        assert bound.route == "link-dir"
+        assert is_socket(meant)
+        spelling = os.fsencode(kernel_sockname(listener))
+        assert os.path.realpath(os.path.dirname(spelling)) == os.path.dirname(meant)
+        c = sockat.ex.connect(p)
+        with c.socket:
+            accept_ping(listener, c.socket)
+        bound.file.remove()
+    assert not os.path.lexists(meant)
+    with open(folded, "rb") as f:
+        assert f.read() == b"unrelated"
+
+
+# The same with a short relative path (the standard's bind) given from <root>:
+# remove() removes the socket the kernel made, not a file at the folded place.
+def test_a_short_relative_symlink_then_dotdot_is_not_folded(tmp: TmpDirs) -> None:
+    root = os.path.realpath(tmp.new())
+    p, meant, folded = _sym_dotdot(root, long=False)
+    with open(folded, "wb") as f:
+        f.write(b"unrelated")
+    out = run_child(
+        """
+        import sockat.ex
+        b = sockat.ex.bind(ARGS["rel"])
+        c = sockat.ex.connect(ARGS["rel"])
+        b.file.remove()
+        report(route=b.route)
+        """,
+        cwd=root,
+        # Spelled out (os.path.relpath would fold "sym/.." as text).
+        args={"rel": os.fsdecode(p[len(root) + 1 :])},
+    )
+    assert out["route"] == "standard"
+    assert not os.path.lexists(meant)
+    with open(folded, "rb") as f:
+        assert f.read() == b"unrelated"

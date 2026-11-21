@@ -26,6 +26,7 @@ from _support import (
 
 import sockat
 import sockat.ex
+import sockat.ex.datagram
 from sockat import _calls
 from sockat._sockets import PathSocket
 from sockat._sys import DIRECT_MAX, IS_LINUX
@@ -158,3 +159,33 @@ def test_the_directory_is_looked_up_first(tmp: TmpDirs, make_file: bool) -> None
         assert e.value.skipped == ()  # type: ignore[attr-defined]
         assert e.value.route is None  # type: ignore[attr-defined]
     assert listing(place) == []
+
+
+# An empty path is an argument error (SPEC), for every call, rather than
+# what the standard would make of it (an autobound abstract address on
+# Linux, ENOENT elsewhere); so is an empty Options.base and sweep_base("").
+def test_an_empty_path_is_an_argument_error() -> None:
+    for call in (
+        sockat.bind,
+        sockat.connect,
+        sockat.connect_nonblocking,
+        sockat.datagram.bind,
+        sockat.ex.bind,
+        sockat.ex.connect,
+        sockat.ex.connect_nonblocking,
+        sockat.ex.resolve_for_bind,
+        sockat.ex.resolve_for_connect,
+        sockat.ex.datagram.bind,
+    ):
+        for empty in ("", b""):
+            with pytest.raises(ValueError, match="empty"):
+                call(empty)
+    with sockat.datagram.unbound() as s:
+        with pytest.raises(ValueError, match="empty"):
+            sockat.datagram.connect(s, "")
+        with pytest.raises(ValueError, match="empty"):
+            sockat.ex.datagram.connect(s, b"")
+    with pytest.raises(ValueError, match="base"):
+        sockat.ex.bind("/tmp/x/s.sock", options=sockat.ex.Options(base=""))
+    with pytest.raises(ValueError, match="base"):
+        sockat.ex.sweep_base("")

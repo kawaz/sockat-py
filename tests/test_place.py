@@ -1098,3 +1098,25 @@ def test_sweep_passes_over_places_and_b_failing_their_checks(tmp: TmpDirs) -> No
     _place.sweep(env_at(unsafe, loose))
     assert listing(unsafe + b"/" + uid_name()) == [b"dead"]
     assert listing(loose + b"/" + uid_name()) == [b"dead"]
+
+
+# B itself found without o+x (another process's B caught between its mkdirat
+# 0700 and its chmod 0711, here: one left 0700) is looked at again on each
+# usable_cross_uid call: once it is 0711, the same B (and D) carries a
+# spelling other uids can follow.
+def test_b_without_x_for_others_is_looked_at_again(tmp: TmpDirs) -> None:
+    place = tmp.new()
+    os.chmod(place, 0o755)
+    b = place + b"/" + uid_name()
+    os.mkdir(b)
+    os.chmod(b, 0o700)
+    env = env_at(place, proc=NO_PROC, thread_cwd=False, link_file=_place.LinkFile.NOT_TRIED)
+    opts = _calls.Opts(usable_cross_uid=True)
+    with raises_errno(errno.ENAMETOOLONG):
+        bind_in(env, long_path(tmp.new()), opts=opts)
+    os.chmod(b, 0o711)
+    done = bind_in(env, long_path(tmp.new()), opts=opts)
+    done.sock.close()
+    assert isinstance(done.spelling, sockat.ex.Linked)
+    assert done.spelling.usable_cross_uid
+    assert listing(place) == [uid_name()]
