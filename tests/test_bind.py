@@ -567,7 +567,7 @@ def test_link_file_told_at_run_time_keeps_failures_after_the_bind(
     env = env_at(tmp.new(), link_file=LinkFile.TOLD_AT_RUN_TIME)
     p = long_path(tmp.new(), name=b"n" * 100)
 
-    def refuse(self: Recorder) -> None:
+    def refuse(self: Recorder, made: bytes | None = None) -> None:
         raise OSError(errno.ENOTSOCK, "refused for the test")
 
     monkeypatch.setattr(Recorder, "bound", refuse)

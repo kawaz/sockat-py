@@ -668,11 +668,11 @@ def test_a_file_put_in_place_of_the_socket_is_not_remembered(
     real_bound = Recorder.bound
     closed: list[bool] = []
 
-    def swapped(self: Recorder) -> None:
+    def swapped(self: Recorder, made: bytes | None = None) -> None:
         os.unlink(p)
         with open(p, "wb") as f:
             f.write(b"replacement")
-        real_bound(self)
+        real_bound(self, made)
 
     monkeypatch.setattr(Recorder, "bound", swapped)
     real_close = socket.socket.close
@@ -694,6 +694,122 @@ def test_a_file_put_in_place_of_the_socket_is_not_remembered(
         b = env.auto_base()
         assert b is not None
         assert all(os.listdir(b.real + b"/" + d) == [] for d in ds(b.real))
+
+
+def _turn_on(monkeypatch: pytest.MonkeyPatch, when: str, turn: Callable[[], None]) -> None:
+    """Call ``turn`` once, either just before the bind (the route already
+    built: E made, pointing where the path led then) or just after it (before
+    the socket file is remembered)."""
+    from sockat import _routes, _sys
+    from sockat._socket_file import Recorder
+
+    done: list[bool] = []
+
+    def once() -> None:
+        if not done:
+            done.append(True)
+            turn()
+
+    if when == "before the bind":
+        real_bind = socket.socket.bind
+        real_op_at = _sys.op_at
+
+        def bind(s: socket.socket, address: str | bytes) -> None:
+            once()
+            real_bind(s, address)
+
+        def op_at(which: _sys.Op, sock: socket.socket, dirfd: int, addr: bytes) -> None:
+            once()
+            real_op_at(which, sock, dirfd, addr)
+
+        monkeypatch.setattr(socket.socket, "bind", bind)
+        monkeypatch.setattr(_routes, "op_at", op_at)
+    else:
+        real_bound = Recorder.bound
+
+        def bound(self: Recorder, made: bytes | None = None) -> None:
+            once()
+            real_bound(self, made)
+
+        monkeypatch.setattr(Recorder, "bound", bound)
+
+
+# link-dir, thread-cwd and at remember where they made the socket: the real
+# directory E points to and the file name, not the path looked up again (SPEC
+# "remove"). Here a symlink on the way (<holder>/sym -> a) is turned to b after
+# the route was built, before or after the bind: the socket is made in a (E
+# points there), and remove() removes a/s.sock and leaves alone another
+# listener's socket at b/s.sock, which looking the path up again would have
+# remembered (it is a socket) and removed.
+@pytest.mark.parametrize("when", ["before the bind", "after the bind"])
+@pytest.mark.parametrize("route", ["link-dir", *(["thread-cwd"] if HAS_THREAD_ROUTE else [])])
+def test_where_the_route_made_the_socket_is_remembered(
+    tmp: TmpDirs, monkeypatch: pytest.MonkeyPatch, route: str, when: str
+) -> None:
+    from sockat import _calls
+    from sockat._place import LinkFile as LF
+
+    a, b = os.path.realpath(tmp.new()), os.path.realpath(tmp.new())
+    sym = deep_dir(tmp.new(), 120) + b"/sym"
+    os.symlink(a, sym)
+    p = sym + b"/s.sock"
+    assert len(p) > DIRECT_MAX
+    place = tmp.new() if route == "link-dir" else deep_dir(tmp.new(), 90)
+    env = env_at(place, proc=NO_PROC, link_file=LF.NOT_TRIED)
+
+    def turn() -> None:
+        os.unlink(sym)
+        os.symlink(b, sym)
+
+    with listener_at(b + b"/s.sock"):
+        _turn_on(monkeypatch, when, turn)
+        trail = Trail()
+        done, file = _calls.bind(p, env=env, remember=True, trail=trail)
+        monkeypatch.undo()
+        assert file is not None
+        with done.sock:
+            assert done.route == ("at" if route == "thread-cwd" and IS_FREEBSD else route)
+            assert os.readlink(sym) == b
+            assert is_socket(a + b"/s.sock")
+            file.remove()
+            assert not os.path.lexists(a + b"/s.sock")
+            assert is_socket(b + b"/s.sock")
+
+
+# The standard and link-file remember the realpath of the path looked up after
+# the bind (SPEC "remove"): the bind follows the path as it is then. Here the
+# symlink on the way (<holder>/sym -> a) is turned to b just before the bind:
+# the socket is made in b, and remove() removes it and leaves alone another
+# listener's socket at a/s.sock (where the path led when the call began).
+@pytest.mark.parametrize("route", ["standard", *(["link-file"] if default_link_file() is LinkFile.FOLLOWS else [])])
+def test_the_standard_and_link_file_remember_the_path_after_the_bind(
+    tmp: TmpDirs, monkeypatch: pytest.MonkeyPatch, route: str
+) -> None:
+    from sockat import _calls
+
+    a, b = os.path.realpath(tmp.new()), os.path.realpath(tmp.new())
+    name = b"s.sock" if route == "standard" else b"n" * 100
+    sym = tmp.new() + b"/sym"
+    os.symlink(a, sym)
+    p = sym + b"/" + name
+    assert (len(p) <= DIRECT_MAX) is (route == "standard")
+    env = env_at(tmp.new())
+
+    def turn() -> None:
+        os.unlink(sym)
+        os.symlink(b, sym)
+
+    with listener_at(a + b"/" + name):
+        _turn_on(monkeypatch, "before the bind", turn)
+        done, file = _calls.bind(p, env=env, remember=True)
+        monkeypatch.undo()
+        assert file is not None
+        with done.sock:
+            assert done.route == route
+            assert is_socket(b + b"/" + name)
+            file.remove()
+            assert not os.path.lexists(b + b"/" + name)
+            assert is_socket(a + b"/" + name)
 
 
 def _sym_dotdot(root: bytes, long: bool) -> tuple[bytes, bytes, bytes]:
