@@ -1,6 +1,6 @@
 [project]
 name = "sockat"
-version = "0.3.3"
+version = "0.4.0"
 description = "Bind / connect Unix domain sockets at paths longer than sun_path"
 readme = "README.md"
 license = "MIT"
