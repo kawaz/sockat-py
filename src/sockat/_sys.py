@@ -12,7 +12,8 @@ Contents:
 * :func:`op` — ``bind(2)`` / ``connect(2)`` of a ``socket.socket`` with such an
   address.
 * :func:`op_at` — ``bindat(2)`` / ``connectat(2)`` (FreeBSD).
-* :func:`getcwd` — the cwd read with a bounded buffer on illumos.
+* :func:`getcwd` — the cwd, read with ``PATH_MAX`` as the limit (a bounded
+  buffer on illumos).
 * :func:`thread_cwd_possible` / :func:`enter_dir_in_this_thread` — a cwd of
   the calling thread's own (Linux: ``unshare(CLONE_FS)``, Apple:
   ``pthread_fchdir_np``).
@@ -212,35 +213,46 @@ IS_ILLUMOS = sys.platform.startswith("sunos")
 """illumos (and Solaris), whose ``getcwd(3C)`` is asked with a bounded
 buffer (:func:`getcwd`)."""
 
-_GETCWD_BUFFER = 4096
-"""The buffer :func:`getcwd` hands ``getcwd(3C)`` on illumos: past
-``MAXPATHLEN`` (1024 there), so any cwd a path call can take fits."""
+
+def path_max() -> int:
+    """``PATH_MAX`` of this system (``pathconf("/", _PC_PATH_MAX)``; 4096
+    when it does not say): the longest path a call takes, NUL included."""
+    try:
+        n = os.pathconf("/", "PC_PATH_MAX")
+    except (OSError, ValueError):
+        return 4096
+    return n if n > 0 else 4096
 
 
 def getcwd() -> bytes:
-    """The cwd, as ``os.getcwdb()`` gives it, but on illumos read once with a
-    bounded buffer: an ``OSError`` (``ERANGE``) when the cwd does not fit.
+    """The cwd, read with ``PATH_MAX`` as the limit: a cwd that does not fit
+    (``PATH_MAX`` bytes or more) is an ``OSError`` (``ENAMETOOLONG``, or
+    ``ERANGE`` from illumos's ``getcwd(3C)``), the SPEC's "the realpath
+    cannot be had" (step 5), decided here for every system.
 
-    Design rationale: CPython's ``os.getcwd`` calls ``getcwd(3)`` again with a
-    buffer 1024 bytes larger each time it answers ``ERANGE``, until it
-    succeeds or the allocation fails. In a cwd past ``MAXPATHLEN`` on
-    illumos it never succeeds (inferred from CPython's posix_getcwd and the
-    illumos CI run of 0.4.0, where it ran for 13 minutes and ended in
-    ``MemoryError`` inside ``os.path.realpath``; no illumos machine to try
-    it on by hand). A real lack of memory cannot be told from that
-    ``MemoryError``, so rather than catch it, the cwd is read here once, and
-    a cwd that does not fit is the length error the SPEC takes as "the
-    realpath cannot be had" (step 5). Elsewhere ``os.getcwdb()`` either
-    succeeds or fails with an errno (OpenBSD: ``ENAMETOOLONG``)."""
+    Design rationale: CPython's ``os.getcwd`` (``posix_getcwd`` in
+    Modules/posixmodule.c, 3.13) calls ``getcwd(3)`` again with a buffer
+    1024 bytes larger each time it answers ``ERANGE``, until it succeeds or
+    the allocation fails (``MemoryError``). In a cwd past ``MAXPATHLEN`` on
+    illumos it never succeeds (inferred from that source and the illumos CI
+    run of 0.4.0, which ran for 13 minutes and ended in ``MemoryError``; no
+    illumos machine to try it on by hand). So on illumos ``getcwd(3C)`` is
+    called once here with a ``PATH_MAX`` buffer. Elsewhere ``getcwd(3)``
+    returns or fails with an errno (OpenBSD: ``ENAMETOOLONG``), and a result
+    of ``PATH_MAX`` bytes or more is cut off here the same way."""
+    limit = path_max()
     if not IS_ILLUMOS:
-        return os.getcwdb()
+        cwd = os.getcwdb()
+        if len(cwd) >= limit:
+            _raise_errno(errno.ENAMETOOLONG)
+        return cwd
     import ctypes as c
 
     fn = _c().getcwd
     fn.restype = c.c_char_p
     fn.argtypes = [c.c_char_p, c.c_size_t]
-    buf = c.create_string_buffer(_GETCWD_BUFFER)
-    got: bytes | None = fn(buf, c.c_size_t(_GETCWD_BUFFER))
+    buf = c.create_string_buffer(limit)
+    got: bytes | None = fn(buf, c.c_size_t(limit))
     if got is None:
         _raise_errno(c.get_errno() or errno.ERANGE)
     assert got is not None

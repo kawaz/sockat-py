@@ -499,6 +499,7 @@ except OSError as e:
     ex = [errno.errorcode.get(e.errno), e.route, list(e.skipped), os.path.exists("x.sock"), listening]
 report(
     seen=seen,
+    cwd_read=_outcome(_sys.getcwd),
     route=done.route,
     spelling=type(done.spelling).__name__,
     skipped=[s.name for s in trail.skipped],
@@ -510,6 +511,8 @@ report(
     )
     with capsys.disabled():
         print(f"\n[deep cwd] {out['seen']}")
+    # The cwd is past PATH_MAX, so it is not read (decided in one place).
+    assert out["cwd_read"] in ("ENAMETOOLONG", "ERANGE")
     assert out["route"] == "standard"
     assert out["spelling"] == "CwdRelative"
     assert out["skipped"] == []

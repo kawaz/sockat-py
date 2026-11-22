@@ -151,30 +151,35 @@ def test_a_thread_gets_a_cwd_of_its_own(tmp: TmpDirs) -> None:
         assert seen["inside"] == process_cwd
 
 
-# The bounded read of the cwd (illumos's, forced here on this system's libc):
-# one getcwd(3) with a buffer of 4096 bytes, giving what os.getcwdb gives in
-# an ordinary cwd, and an OSError (ERANGE: the buffer is too small) in a cwd
-# that does not fit, rather than growing the buffer as os.getcwd does. In a
-# child (the cwd changes).
-def test_the_bounded_read_of_the_cwd(tmp: TmpDirs) -> None:
+# The cwd is read with PATH_MAX as the limit (_sys.getcwd): in an ordinary cwd
+# it is what os.getcwdb gives; in a cwd of PATH_MAX bytes or more it is an
+# OSError, here ENAMETOOLONG. illumos's form (forced here on this system's
+# libc): one getcwd(3) with a PATH_MAX buffer, ERANGE when the cwd does not
+# fit, rather than growing the buffer as os.getcwd does. In a child (the cwd
+# changes).
+def test_the_cwd_is_read_up_to_path_max(tmp: TmpDirs) -> None:
     out = run_child(
         """
         import errno, tempfile
         from sockat import _sys
-        _sys.IS_ILLUMOS = True
+        def outcome():
+            try:
+                return _sys.getcwd() == os.getcwdb()
+            except OSError as e:
+                return errno.errorcode.get(e.errno)
         os.chdir(tempfile.mkdtemp(prefix="spt-cwd-", dir="/tmp"))
-        same = _sys.getcwd() == os.getcwdb()
-        while len(os.getcwdb()) <= 4200:
+        got = {"same": outcome()}
+        _sys.IS_ILLUMOS = True
+        got["illumos same"] = outcome()
+        _sys.IS_ILLUMOS = False
+        while len(os.getcwdb()) < _sys.path_max():
             os.mkdir("d" * 200)
             os.chdir("d" * 200)
-        try:
-            _sys.getcwd()
-            deep = None
-        except OSError as e:
-            deep = errno.errorcode.get(e.errno)
-        report(same=same, deep=deep)
+        got["deep"] = outcome()
+        _sys.IS_ILLUMOS = True
+        got["illumos deep"] = outcome()
+        report(**got)
         """,
         cwd=tmp.new(),
     )
-    assert out["same"] is True
-    assert out["deep"] == "ERANGE"
+    assert out == {**out, "same": True, "illumos same": True, "deep": "ENAMETOOLONG", "illumos deep": "ERANGE"}
