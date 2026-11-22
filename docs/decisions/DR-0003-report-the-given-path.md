@@ -18,7 +18,7 @@
 | listener | `getsockname()` が元のパス |
 | `accept()` が返すソケット | `PathSocket` で、`getsockname()` が listener の元のパス。`getpeername()` は標準のまま |
 | connect したソケット | `getpeername()` が元のパス。`getsockname()` は標準のまま |
-| 元のパスの型 | `os.fsdecode` した `str` (標準がパスのアドレスを返すのと同じ型)。相対パスで渡したら相対パスのまま |
+| 元のパスの型 | `os.fsdecode` した `str` (標準がパスのアドレスを返すのと同じ型)。相対パスで bind した時は絶対にした形 (ハブ DR-0019。経路に進んだ時は実パスの候補の形)、相対パスで connect した時は相対パスのまま |
 | `dup()` | 元のパスを引き継ぐ |
 | 標準が失敗する時 | 先にカーネルに聞き、標準と同じに失敗する (閉じたソケットの `EBADF`、相手が閉じた後の `getpeername` の `EINVAL`、listener の `getpeername` の `ENOTCONN`)。通った時だけ元のパスに差し替える |
 | 短いパス (標準が受け付ける長さ、Linux の先頭 NUL) | 素の `socket.socket` のまま (統括の判断) |

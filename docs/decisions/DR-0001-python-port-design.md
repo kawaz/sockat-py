@@ -65,12 +65,12 @@
 
 - `sockat.ex` は `import sockat` では読み込まない (標準の `socket.connect_ex` と紛れるため、使う人が `import sockat.ex` で選ぶ)。`sockat.datagram` は読み込む
 - `Options` はキーワード専用の frozen dataclass (`usable_cross_uid: bool = False`、`base: str | bytes | os.PathLike | None = None`)
-- `Bound(socket, file, spelling, route, base, skipped)`・`Connected(socket, route, skipped)`・`Report(route, skipped)` は NamedTuple (分解して受け取れる)。`ForBind(path, spelling, route, base, skipped)` / `ForConnect(path, route, skipped)` は frozen dataclass と `cleanup()`。どちらも `remove()` を持たず、`ForBind` は bind の後に呼ぶ `socket_file()` で `SocketFile` を返す (綴りを辿って realpath と `(st_dev, st_ino)` を覚える。辿った先がソケットでなければ `ENOTSOCK`。相対の綴りは resolve の時と cwd を比べる)
+- `Bound(socket, file, spelling, route, base, skipped)`・`Connected(socket, route, skipped)`・`Report(route, skipped)` は NamedTuple (分解して受け取れる)。`ForBind(path, spelling, route, base, skipped)` / `ForConnect(path, spelling, route, skipped)` は frozen dataclass と `cleanup()`。どちらも `remove()` を持たず、`ForBind` は bind の後に呼ぶ `socket_file()` で `SocketFile` を返す (綴りを辿って realpath と `(st_dev, st_ino)` を覚える。辿った先がソケットでなければ `ENOTSOCK`。`CwdRelative` の綴りは resolve の時と cwd を比べる)
 - `Spelling` は基底のクラスと、値ごとの frozen dataclass。`match bound.spelling: case sockat.ex.Linked(removable=True): ...` で分岐できる。`Until` は `StrEnum` (`"Process"` / `"Cleanup"`)
 - `SocketFile` は `remove()` と `cleanup()` を持つ (SPEC の Python の形「戻り値に引数なしの関数を含める」を、引数なしのメソッドで満たす)
-- `sockat.ex.bind` が bind の直後に覚える場所: link-dir・thread-cwd・at は、経路を組む前に `os.path.realpath` で引いたソケットのディレクトリ (E が指す先) とファイル名をそのまま使い、元のパスを引き直さない。standard と link-file は bind の後に元のパスを `os.path.realpath` する。どちらも最後の要素が symlink なら辿った先を覚え、`lstat` してソケットでなければ `ENOTSOCK`
+- `sockat.ex.bind` が bind の直後に覚える場所: link-dir・thread-cwd・at は、経路を組む前に `os.path.realpath` で引いたソケットのディレクトリ (E が指す先) とファイル名をそのまま使い、元のパスを引き直さない。standard は標準に渡した綴り (元のパスか絶対パスの候補)、link-file は E が指す先 (相対パスなら `os.getcwdb()` を前に付けた物) を、bind の後に `os.path.realpath` する。どちらも最後の要素が symlink なら辿った先を覚え、`lstat` してソケットでなければ `ENOTSOCK`。cwd を前後で比べるのは、相対パスのまま標準に渡した (`CwdRelative`) 時だけ
 - resolve の `path` は、渡したパスが `str` なら `str`、`bytes` なら `bytes`
-- 長いパスでは、戻り値は `socket.socket` の subclass で、アドレスを元のパスで返す ([DR-0003](DR-0003-report-the-given-path.md))。`sockat.datagram.unbound()` も同じ subclass で、長いパスに connect すると `getpeername()` が元のパスを返す
+- 長いパスでは、戻り値は `socket.socket` の subclass で、アドレスを元のパスで返す ([DR-0003](DR-0003-report-the-given-path.md))。長い絶対パスを実パスの候補で標準に渡した時も同じ subclass で元のパスを返す。相対パスの bind が経路に進んだ時は、相対の文字列でなく実パスの候補の形を返す。`sockat.datagram.unbound()` も同じ subclass で、長いパスに connect すると `getpeername()` が元のパスを返す
 - `path` は `str` / `bytes` / `os.PathLike`。入口で 1 度だけ `os.fspath` し、その値を覚える・bind する・返すのすべてに使う
 - 経路は公開しない (`sockat.ex` が経路の名前の文字列を診断用に返すだけ)。試験はパッケージの中から各経路の関数を呼び、connect は試す順を渡して強制する
 
@@ -96,10 +96,20 @@
 |---|---|
 | OS のエラー | errno 付きの `OSError` (`FileNotFoundError` 等のサブクラスになる) |
 | 引数の誤り (名前で終わらない長いパス、先頭以外に NUL を含むパス) | `ValueError` |
-| 一般のエラー (relative の途中で cwd が変わった、相対パスの `sockat.ex.bind` で覚える前に cwd が変わった) | errno の無い `OSError` |
+| 一般のエラー (relative の途中で cwd が変わった、相対パスのまま標準に渡した `sockat.ex.bind` で覚える前に cwd が変わった) | errno の無い `OSError` |
 | `_ex` と resolve の失敗 | 既定の呼び出しと同じ例外に、属性 `skipped` (`Skipped` のタプル) と `route` (失敗した経路の名前か `None`) を足す |
 
-### 7. 対応する版と道具
+### 7. bind と resolve の相対パス
+
+ハブ SPEC の「相対パスを絶対パスにする」(ハブ DR-0019) の Python での形。
+
+- 候補は `src/sockat/_absolute.py` で作る。つなぐ・畳む・比べるは `bytes` で行い、`str` で渡されたパスも `os.fsencode` した物で扱う (返す綴りは渡した型に戻す)
+- 実パスの候補は、ソケットのディレクトリを `os.stat` で引いてディレクトリと確かめてから `os.path.realpath(..., strict=True)` する。`os.path.abspath` で先に絶対にしない (`a/sym/..` を字句で畳み、別のディレクトリを引く)
+- `$PWD` の候補は、呼び出しのたびに `os.environb` から読む。字句で畳むのは `_path.fold` (`os.path.normpath` と同じ畳み方) で、畳んだディレクトリの `(st_dev, st_ino)` を元の相対パスのディレクトリと比べてから使う
+- ソケットのディレクトリの realpath が `ENAMETOOLONG`・`ERANGE` の時 (cwd が深い) は、経路を試さず 5 (相対のまま標準へ) に進む
+- 候補を標準に渡した時の戻り値は素の `socket.socket` (カーネルが返す綴りがその候補で、絶対にした形)。長い絶対パスを実パスの候補で渡した時は、元のパスを返す subclass
+
+### 8. 対応する版と道具
 
 | 項目 | 決定 |
 |---|---|
