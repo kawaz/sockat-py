@@ -165,8 +165,9 @@ def check_no_nul(path: bytes) -> None:
 class RealPathTooLong(Exception):
     """The relative path's directory is there but its realpath cannot be
     looked up for its length (a cwd past PATH_MAX: ``ENAMETOOLONG``, or
-    ``ERANGE`` where the cwd cannot be read): for a bind or a resolve, the
-    routes cannot be used (SPEC "相対パスを絶対パスにする")."""
+    ``ERANGE`` where the cwd cannot be read), or the realpath had is too
+    long to be looked up itself: for a bind or a resolve, the routes cannot
+    be used (SPEC "相対パスを絶対パスにする")."""
 
 
 def look_up(path: bytes, *, absolutizing: bool = False) -> Target:
@@ -183,6 +184,11 @@ def look_up(path: bytes, *, absolutizing: bool = False) -> Target:
         raise NotADirectoryError(errno.ENOTDIR, os.strerror(errno.ENOTDIR), os.fsdecode(directory))
     try:
         real_dir = os.fsencode(os.path.realpath(directory, strict=True))
+        if absolutizing and not path.startswith(b"/"):
+            # os.path.realpath resolves a cwd past PATH_MAX (as glibc's
+            # realpath(3) does) to a path no call takes: looked up, it is
+            # ENAMETOOLONG, and is taken as not had (SPEC).
+            os.stat(real_dir)
     except OSError as e:
         if absolutizing and e.errno in (errno.ENAMETOOLONG, errno.ERANGE) and not path.startswith(b"/"):
             raise RealPathTooLong() from e

@@ -106,7 +106,7 @@
 - 候補は `src/sockat/_absolute.py` で作る。つなぐ・畳む・比べるは `bytes` で行い、`str` で渡されたパスも `os.fsencode` した物で扱う (返す綴りは渡した型に戻す)
 - 実パスの候補は、ソケットのディレクトリを `os.stat` で引いてディレクトリと確かめてから `os.path.realpath(..., strict=True)` する。`os.path.abspath` で先に絶対にしない (`a/sym/..` を字句で畳み、別のディレクトリを引く)
 - `$PWD` の候補は、呼び出しのたびに `os.environb` から読む。字句で畳むのは `_path.fold` (`os.path.normpath` と同じ畳み方) で、畳んだディレクトリの `(st_dev, st_ino)` を元の相対パスのディレクトリと比べてから使う
-- ソケットのディレクトリの realpath が `ENAMETOOLONG`・`ERANGE` の時 (cwd が深い) は、経路を試さず 5 (相対のまま標準へ) に進む
+- ソケットのディレクトリの realpath が `ENAMETOOLONG`・`ERANGE` の時と、realpath が PATH_MAX を超える実パスを返してそれを `os.stat` すると `ENAMETOOLONG` の時 (cwd が深い。`os.path.realpath` と `os.getcwdb` は macOS でも Linux でも失敗せず長いパスを返す。実測 2026-11-22) は、経路を試さず 5 (相対のまま標準へ) に進む。この時 `sockat.ex.bind` は bind したファイルの実パスを `lstat` できず覚えられないので、listener を閉じ、ファイルを残して `ENAMETOOLONG` を返す (届くのは既定の bind だけ)
 - 候補を標準に渡した時の戻り値は素の `socket.socket` (カーネルが返す綴りがその候補で、絶対にした形)。長い絶対パスを実パスの候補で渡した時は、元のパスを返す subclass
 
 ### 8. 対応する版と道具

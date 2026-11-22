@@ -272,20 +272,23 @@ def test_a_failing_candidate_is_not_tried_again(tmp: TmpDirs) -> None:
 
 # A short relative path whose directory is not there: no candidate can be
 # made, and the path is looked up as for the routes: ENOENT, no route, nothing
-# skipped.
+# skipped. The same for both resolves.
 def test_a_short_relative_path_without_its_directory(tmp: TmpDirs) -> None:
     out = run_child(
         """
         import sockat.ex
-        try:
-            sockat.ex.bind("none/s.sock")
-            report(error=None)
-        except OSError as e:
-            report(error=type(e).__name__, route=e.route, skipped=list(e.skipped))
+        got = []
+        for call in (sockat.ex.bind, sockat.ex.resolve_for_bind, sockat.ex.resolve_for_connect):
+            try:
+                call("none/s.sock")
+                got.append(None)
+            except OSError as e:
+                got.append([type(e).__name__, e.route, list(e.skipped)])
+        report(got=got)
         """,
         cwd=tmp.new(),
     )
-    assert out == {**out, "error": "FileNotFoundError", "route": None, "skipped": []}
+    assert out["got"] == [["FileNotFoundError", None, []]] * 3
 
 
 # A short relative path that does not end with a file name is given to the
@@ -459,31 +462,45 @@ time, relative to the one before) and notes in ``seen`` what
 
 
 # In a cwd past PATH_MAX, a short relative path binds as the standard binds it
-# (SPEC "相対パスを絶対パスにする" 5): no absolute candidate is short enough, the
-# routes cannot point E at a directory that long, and the relative path goes
-# to the standard as it is: route standard, CwdRelative, standard not in
-# skipped (where the realpath itself could not be had for its length, nothing
-# is skipped). The resolve gives the relative path back the same way. What
+# (SPEC "相対パスを絶対パスにする" 5): the socket's directory's realpath cannot
+# be had for its length (an errno, or a realpath too long to look up), so no
+# route is tried, and the relative path goes to the standard as it is: route
+# standard, CwdRelative, nothing skipped. The resolve gives the relative path
+# back the same way. Only the default bind reaches it: sockat.ex.bind cannot
+# look up the bound file's realpath to remember it, so it fails as remove's
+# "cannot remember" does (the listener closed, the file left). What
 # os.getcwdb / os.path.realpath give there differs by system (libc, Python);
 # it is printed so that a CI log (the BSDs, illumos) tells.
 def test_a_short_relative_path_in_a_cwd_past_path_max(tmp: TmpDirs, capsys: pytest.CaptureFixture[str]) -> None:
     out = run_child(
         DEEP_CWD_CODE
         + """
-import socket, sockat, sockat.ex
+import errno, socket, sockat, sockat.ex
 from sockat import _calls
 from sockat._spelling import Trail
 trail = Trail()
 done, _ = _calls.bind(b"s.sock", trail=trail)
 c = sockat.connect("s.sock")
 r = sockat.ex.resolve_for_bind("r.sock")
+try:
+    sockat.ex.bind("x.sock")
+    ex = None
+except OSError as e:
+    probe = socket.socket(socket.AF_UNIX)
+    try:
+        probe.connect("x.sock")
+        listening = True
+    except OSError:
+        listening = False
+    ex = [errno.errorcode.get(e.errno), e.route, list(e.skipped), os.path.exists("x.sock"), listening]
 report(
     seen=seen,
     route=done.route,
     spelling=type(done.spelling).__name__,
     skipped=[s.name for s in trail.skipped],
     here=os.path.exists("s.sock"),
-    resolved=[r.path, type(r.spelling).__name__, r.route],
+    resolved=[r.path, type(r.spelling).__name__, r.route, list(r.skipped)],
+    ex=ex,
 )
 """,
     )
@@ -491,11 +508,10 @@ report(
         print(f"\n[deep cwd] {out['seen']}")
     assert out["route"] == "standard"
     assert out["spelling"] == "CwdRelative"
-    skipped = out["skipped"]
-    assert isinstance(skipped, list)
-    assert "standard" not in skipped
+    assert out["skipped"] == []
     assert out["here"] is True
-    assert out["resolved"] == ["r.sock", "CwdRelative", "standard"]
+    assert out["resolved"] == ["r.sock", "CwdRelative", "standard", []]
+    assert out["ex"] == ["ENAMETOOLONG", "standard", [], True, False]
 
 
 # A relative path whose socket's directory cannot be resolved for its length
