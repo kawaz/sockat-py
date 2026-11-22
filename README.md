@@ -2,17 +2,15 @@
 
 > English | [日本語](./README-ja.md)
 
-A Python library that binds and connects Unix domain sockets even at paths past the `sun_path` limit (104 bytes including the NUL on macOS and the BSDs, 108 bytes on Linux).
+A Unix domain socket path is too long to bind / connect. sockat is a Python library that makes that go away.
 
-The language-independent behaviour is defined by [the sockat specification](https://github.com/kawaz/sockat/blob/main/docs/SPEC.md); sockat-py is its Python implementation.
+Give a long path to Python's standard `socket`, and both bind and connect refuse it with this error. asyncio's `start_unix_server(path=...)` and `open_unix_connection(path)` do the same.
 
-## Usage
-
-```sh
-pip install sockat
+```text
+OSError: AF_UNIX path too long
 ```
 
-Just rewrite the standard code with sockat. What is returned is the standard `socket.socket`, and a short path is passed to the standard library as it is, so the behaviour does not change.
+Replace the standard code with sockat, and long paths just work.
 
 ```python
 import sockat
@@ -22,47 +20,27 @@ listener = sockat.bind(path)
 
 # client = socket.socket(socket.AF_UNIX); client.connect(path)
 client = sockat.connect(path)
+
+# With asyncio, pass the socket made to sock=
+server = await asyncio.start_unix_server(handle, sock=sockat.bind(path))
+reader, writer = await asyncio.open_unix_connection(sock=sockat.connect_nonblocking(path))
 ```
 
-| Function | Standard code it replaces | Returns |
-|---|---|---|
-| `sockat.bind(path)` | `socket()` → `bind(path)` → `listen()` | a listening `socket.socket` |
-| `sockat.connect(path)` | `socket()` → `connect(path)` | `socket.socket` |
-| `sockat.connect_nonblocking(path)` | `socket()` → `setblocking(False)` → `connect(path)` | a non-blocking `socket.socket` (for event loops such as asyncio) |
-| `sockat.datagram.bind(path)` / `unbound()` / `connect(sock, path)` | the same code with `SOCK_DGRAM` | `socket.socket` / `None` |
-| `sockat.ex.bind(path, options=...)` and so on | the same + spelling properties, clean up, diagnostics | `Bound` / `Connected` / `Report` ([MANUAL](./docs/MANUAL.md#sockatex)) |
-| `sockat.ex.resolve_for_bind` / `resolve_for_connect` | a short spelling you pass to the standard library yourself | `ForBind` / `ForConnect` ([MANUAL](./docs/MANUAL.md#resolve)) |
-| `sockat.ex.sweep()` / `sweep_base(path)` | — | `None` ([MANUAL](./docs/MANUAL.md#sweep)) |
+You get back the same `socket.socket` as the standard, and short paths go to the standard unchanged, as before. Only for a long path does sockat quietly set up a short way to the same place and connect through it. You don't need to shorten paths yourself or care about each OS's limit.
 
-- `path` is `str` / `bytes` / `os.PathLike`
-- Python 3.11 or later. No dependencies (pure Python)
+## Install
 
-## Things to know
+```sh
+pip install sockat
+```
 
-- Binding to a long path leaves small directories and symlinks in `/tmp/sockat-<uid>/` and the like. What remains and what removes it are in the specification's "[What stays in the base](https://github.com/kawaz/sockat/blob/main/docs/SPEC.md#what-stays-in-the-base)" and "[`sweep`](https://github.com/kawaz/sockat/blob/main/docs/SPEC.md#sweep)". In environments that run tests over and over, calling `sockat.ex.sweep()` once cleans them up
-- What differs from the standard for a long path is in the specification's "[What differs from the standard for a long path](https://github.com/kawaz/sockat/blob/main/docs/SPEC.md#what-differs-from-the-standard-for-a-long-path)", and the patterns to avoid in "[Patterns not to use](https://github.com/kawaz/sockat/blob/main/docs/SPEC.md#patterns-not-to-use)" (their form in Python and the code to write instead are in the [MANUAL](./docs/MANUAL.md#patterns-not-to-use))
-- Notes specific to Python (the subclass that returns the original path as the address, asyncio and so on) are in [the MANUAL's "Notes specific to Python"](./docs/MANUAL.md#notes-specific-to-python)
+It runs on Python 3.11 or later and depends on no other package.
 
-## Routes per OS
+## More
 
-For a long path, the routes are tried in the following order, and the first route that can be used binds / connects. The names and contents of the routes are in the specification's "[Route names](https://github.com/kawaz/sockat/blob/main/docs/SPEC.md#route-names)", and how far they reach is in [the reach table](https://github.com/kawaz/sockat/blob/main/pages/reach/README.md). sockat-py builds every route in the specification (it does not fork).
-
-| OS | `bind` | `connect` / `connect_nonblocking` |
-|---|---|---|
-| Linux / Android (`/proc` usable) | link-dir (procB → B's real path) → thread-cwd | proc-direct → thread-cwd-direct → link-file |
-| Linux / Android (`/proc` not usable) | link-dir (B's real path) → thread-cwd | relative → thread-cwd-direct → link-file |
-| macOS / iOS | link-dir (B's real path) → link-file → thread-cwd | relative → widened → thread-cwd-direct → link-file |
-| FreeBSD | link-dir (B's real path) → at | at-direct → link-file |
-| NetBSD | link-dir (B's real path) → link-file | relative → link-file |
-| OpenBSD / illumos | link-dir (B's real path) | relative → link-file |
-| Other Unix | link-dir (B's real path) → link-file (whether it is followed is told at run time) | relative → link-file |
-| Windows | not supported (`ImportError` on import) | same |
-
-## Documentation
-
-- [docs/MANUAL.md](./docs/MANUAL.md) — names and types in Python, the Python form of the patterns not to use, notes specific to Python, error types
-- [The sockat specification](https://github.com/kawaz/sockat/blob/main/docs/SPEC.md) — the language-independent behaviour ([building the routes](https://github.com/kawaz/sockat/blob/main/docs/SPEC-routes.md), [per-language caveats](https://github.com/kawaz/sockat/blob/main/pages/langs.md))
-- [docs/decisions/](./docs/decisions/INDEX.md) — design decisions of the Python version (DRs)
+- [User manual](./docs/MANUAL.md)
+- [Reference](./docs/MANUAL.md#functions)
+- [How it works](https://github.com/kawaz/sockat/blob/main/pages/technical.md)
 
 ## License
 

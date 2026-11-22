@@ -17,6 +17,10 @@ client.sendall(b"ping")
 assert server.recv(4) == b"ping"
 ```
 
+It runs on Python 3.11 or later and depends on no other package (pure Python).
+
+## Functions
+
 | Function | Standard code it replaces | Returns |
 |---|---|---|
 | `sockat.bind(path)` | `socket()` → `bind(path)` → `listen()` | a listening `socket.socket` |
@@ -345,6 +349,21 @@ reader, writer = await asyncio.open_unix_connection(sock=sockat.connect_nonblock
 - The transport's `get_extra_info('sockname')` (server side) / `get_extra_info('peername')` (client side) are also the original path
 - The `socket` of `sockat.ex` can be passed the same way. Call `file.remove()` before closing the server (while it is running)
 - `connect_nonblocking` does not wait for the peer, so it can be called directly from the event loop. `bind` does not wait for a peer either (with thread-cwd it waits for the thread to end, but that ends right after the bind)
+
+## Routes per OS
+
+For a long path, the routes are tried in the following order, and the first route that can be used binds / connects. The names and contents of the routes are in the specification's "[Route names](https://github.com/kawaz/sockat/blob/main/docs/SPEC.md#route-names)", and how far they reach is in [the reach table](https://github.com/kawaz/sockat/blob/main/pages/reach/README.md). sockat-py builds every route in the specification (it does not fork).
+
+| OS | `bind` | `connect` / `connect_nonblocking` |
+|---|---|---|
+| Linux / Android (`/proc` usable) | link-dir (procB → B's real path) → thread-cwd | proc-direct → thread-cwd-direct → link-file |
+| Linux / Android (`/proc` not usable) | link-dir (B's real path) → thread-cwd | relative → thread-cwd-direct → link-file |
+| macOS / iOS | link-dir (B's real path) → link-file → thread-cwd | relative → widened → thread-cwd-direct → link-file |
+| FreeBSD | link-dir (B's real path) → at | at-direct → link-file |
+| NetBSD | link-dir (B's real path) → link-file | relative → link-file |
+| OpenBSD / illumos | link-dir (B's real path) | relative → link-file |
+| Other Unix | link-dir (B's real path) → link-file (whether it is followed is told at run time) | relative → link-file |
+| Windows | not supported (`ImportError` on import) | same |
 
 ## What is not confirmed
 

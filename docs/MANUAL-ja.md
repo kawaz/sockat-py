@@ -17,6 +17,10 @@ client.sendall(b"ping")
 assert server.recv(4) == b"ping"
 ```
 
+Python 3.11 以上で動き、他のパッケージに依存しない (純 Python)。
+
+## 関数の一覧
+
 | 関数 | 置き換える標準の書き方 | 戻り値 |
 |---|---|---|
 | `sockat.bind(path)` | `socket()` → `bind(path)` → `listen()` | listen 済みの `socket.socket` |
@@ -345,6 +349,21 @@ reader, writer = await asyncio.open_unix_connection(sock=sockat.connect_nonblock
 - transport の `get_extra_info('sockname')` (server 側) / `get_extra_info('peername')` (client 側) も元のパス
 - `sockat.ex` の `socket` も同じに渡せる。`file.remove()` は server を閉じる前 (動作中) に呼ぶ
 - `connect_nonblocking` は相手を待たないので、イベントループから直接呼べる。`bind` も相手を待たない (thread-cwd ではスレッドの終わりを待つが、bind してすぐ終わる)
+
+## OS ごとの経路
+
+長いパスは、次の順に経路を試し、最初に使えた経路で bind / connect する。経路の名前と中身は仕様の「[経路の名前](https://github.com/kawaz/sockat/blob/main/docs/SPEC-ja.md#経路の名前)」、どこまで届くかは[届く範囲の表](https://github.com/kawaz/sockat/blob/main/pages/reach/README-ja.md)。sockat-py は仕様の経路をすべて作っている (fork はしない)。
+
+| OS | `bind` | `connect` / `connect_nonblocking` |
+|---|---|---|
+| Linux / Android (`/proc` を使える) | link-dir (procB → B の実パス) → thread-cwd | proc-direct → thread-cwd-direct → link-file |
+| Linux / Android (`/proc` を使えない) | link-dir (B の実パス) → thread-cwd | relative → thread-cwd-direct → link-file |
+| macOS / iOS | link-dir (B の実パス) → link-file → thread-cwd | relative → widened → thread-cwd-direct → link-file |
+| FreeBSD | link-dir (B の実パス) → at | at-direct → link-file |
+| NetBSD | link-dir (B の実パス) → link-file | relative → link-file |
+| OpenBSD / illumos | link-dir (B の実パス) | relative → link-file |
+| その他の Unix | link-dir (B の実パス) → link-file (辿るかを実行時に見分ける) | relative → link-file |
+| Windows | 対象外 (import で `ImportError`) | 同左 |
 
 ## 確かめていないこと
 
