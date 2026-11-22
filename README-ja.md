@@ -28,7 +28,7 @@ reader, writer = await asyncio.open_unix_connection(sock=sockat.connect_nonblock
 
 返ってくるのは標準と同じ `socket.socket` で、短いパスは今までどおり標準にそのまま渡します。長いパスの時だけ、sockat が同じ場所を指す短い道を裏で用意してつなぎます。パスを短くする工夫も、OS ごとの上限も、気にしなくて構いません。
 
-## 入れ方
+## インストール
 
 ```sh
 pip install sockat
