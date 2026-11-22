@@ -8,7 +8,7 @@ from __future__ import annotations
 import os
 import stat
 
-from . import _path
+from . import _path, _sys
 from ._sys import DIRECT_MAX
 
 
@@ -24,6 +24,18 @@ def _join(a: bytes, b: bytes) -> bytes:
     return a + b if a.endswith(b"/") else a + b"/" + b
 
 
+def realpath(path: bytes) -> bytes:
+    """``os.path.realpath(path, strict=True)``, a relative path first put
+    after the cwd read by :func:`_sys.getcwd` (``os.path.realpath`` would
+    read it with ``os.getcwd``, which does not return on illumos in a cwd
+    past ``MAXPATHLEN``). Joining as text is safe here: the cwd has no
+    symlink, and realpath resolves the rest component by component, ``..``
+    after the symlink before it."""
+    if not path.startswith(b"/"):
+        path = _join(_sys.getcwd(), path)
+    return os.fsencode(os.path.realpath(path, strict=True))
+
+
 def real_candidate(path: bytes) -> bytes | None:
     """The realpath of the socket's directory (symlinks followed, as the
     system looks it up) and the file name; ``None`` when the directory is
@@ -36,7 +48,7 @@ def real_candidate(path: bytes) -> bytes | None:
     try:
         if not stat.S_ISDIR(os.stat(directory).st_mode):
             return None
-        real = os.fsencode(os.path.realpath(directory, strict=True))
+        real = realpath(directory)
     except (OSError, ValueError):
         return None
     return _join(real, name)

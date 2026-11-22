@@ -16,7 +16,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TypeAlias
 
-from . import _path
+from . import _absolute, _path, _sys
 from ._errors import CwdChanged
 from ._place import RANDOM_LEN, Base, Dir, Env, Fits, Kind, LinkFile, open_dir
 from ._socket_file import At, Link, Recorder
@@ -183,7 +183,7 @@ def look_up(path: bytes, *, absolutizing: bool = False) -> Target:
     if not stat.S_ISDIR(st.st_mode):
         raise NotADirectoryError(errno.ENOTDIR, os.strerror(errno.ENOTDIR), os.fsdecode(directory))
     try:
-        real_dir = os.fsencode(os.path.realpath(directory, strict=True))
+        real_dir = _absolute.realpath(directory)
         if absolutizing and not path.startswith(b"/"):
             # os.path.realpath resolves a cwd past PATH_MAX (as glibc's
             # realpath(3) does) to a path no call takes: looked up, it is
@@ -202,7 +202,7 @@ def absolute(path: bytes) -> bytes | None:
     if path.startswith(b"/"):
         return path
     try:
-        return _join(os.getcwdb(), path)
+        return _join(_sys.getcwd(), path)
     except OSError:
         return None
 
@@ -1083,7 +1083,7 @@ class Relative:
         if cwd_before is None:
             return None
         try:
-            cwd = os.getcwdb()
+            cwd = _sys.getcwd()
         except OSError:
             return None
         best: bytes | None = None

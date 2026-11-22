@@ -11,7 +11,17 @@ import sys
 import threading
 
 import pytest
-from _support import TmpDirs, accept_ping, dir_id, is_socket, nest, raises_errno, standard_errno, thread_cwd_usable
+from _support import (
+    TmpDirs,
+    accept_ping,
+    dir_id,
+    is_socket,
+    nest,
+    raises_errno,
+    run_child,
+    standard_errno,
+    thread_cwd_usable,
+)
 
 from sockat import _sys
 from sockat._sys import DIRECT_MAX, SUN_PATH_CAP, WIDE_PATH_MAX, Op, op, sockaddr
@@ -139,3 +149,32 @@ def test_a_thread_gets_a_cwd_of_its_own(tmp: TmpDirs) -> None:
         assert seen["inside"] == dir_id(target)
     else:
         assert seen["inside"] == process_cwd
+
+
+# The bounded read of the cwd (illumos's, forced here on this system's libc):
+# one getcwd(3) with a buffer of 4096 bytes, giving what os.getcwdb gives in
+# an ordinary cwd, and an OSError (ERANGE: the buffer is too small) in a cwd
+# that does not fit, rather than growing the buffer as os.getcwd does. In a
+# child (the cwd changes).
+def test_the_bounded_read_of_the_cwd(tmp: TmpDirs) -> None:
+    out = run_child(
+        """
+        import errno, tempfile
+        from sockat import _sys
+        _sys.IS_ILLUMOS = True
+        os.chdir(tempfile.mkdtemp(prefix="spt-cwd-", dir="/tmp"))
+        same = _sys.getcwd() == os.getcwdb()
+        while len(os.getcwdb()) <= 4200:
+            os.mkdir("d" * 200)
+            os.chdir("d" * 200)
+        try:
+            _sys.getcwd()
+            deep = None
+        except OSError as e:
+            deep = errno.errorcode.get(e.errno)
+        report(same=same, deep=deep)
+        """,
+        cwd=tmp.new(),
+    )
+    assert out["same"] is True
+    assert out["deep"] == "ERANGE"

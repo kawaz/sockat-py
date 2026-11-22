@@ -453,12 +453,16 @@ def _outcome(call):
     except OSError as e:
         return errno.errorcode.get(e.errno, str(e.errno))
     return "ok (%d bytes)" % len(got)
-seen = "PATH_MAX %d, cwd %d bytes: os.getcwdb() %s, os.path.realpath('.') %s" % (
-    _limit, _length, _outcome(os.getcwdb), _outcome(lambda: os.path.realpath(".", strict=True)))
+from sockat import _absolute, _sys
+seen = "%s: PATH_MAX %d, cwd %d bytes: getcwd %s, realpath('.') %s, os.getcwdb() %s" % (
+    os.uname().sysname, _limit, _length, _outcome(_sys.getcwd), _outcome(lambda: _absolute.realpath(b".")),
+    "not called" if _sys.IS_ILLUMOS else _outcome(os.getcwdb))
 """
 """Code that moves a child into a cwd past PATH_MAX (made a component at a
-time, relative to the one before) and notes in ``seen`` what
-``os.getcwdb`` and ``os.path.realpath`` give there (an errno, or success)."""
+time, relative to the one before) and notes in ``seen`` what sockat's reads
+of the cwd and of its realpath give there (an errno, or success), and what
+``os.getcwdb`` gives where it returns (on illumos it reallocates its buffer
+until memory runs out: ``_sys.getcwd``)."""
 
 
 # In a cwd past PATH_MAX, a short relative path binds as the standard binds it
@@ -468,9 +472,9 @@ time, relative to the one before) and notes in ``seen`` what
 # standard, CwdRelative, nothing skipped. The resolve gives the relative path
 # back the same way. Only the default bind reaches it: sockat.ex.bind cannot
 # look up the bound file's realpath to remember it, so it fails as remove's
-# "cannot remember" does (the listener closed, the file left). What
-# os.getcwdb / os.path.realpath give there differs by system (libc, Python);
-# it is printed so that a CI log (the BSDs, illumos) tells.
+# "cannot remember" does (the listener closed, the file left). What reading
+# the cwd and its realpath give there differs by system (libc, Python); it is
+# printed so that a CI log (the BSDs, illumos) tells.
 def test_a_short_relative_path_in_a_cwd_past_path_max(tmp: TmpDirs, capsys: pytest.CaptureFixture[str]) -> None:
     out = run_child(
         DEEP_CWD_CODE
@@ -511,7 +515,12 @@ report(
     assert out["skipped"] == []
     assert out["here"] is True
     assert out["resolved"] == ["r.sock", "CwdRelative", "standard", []]
-    assert out["ex"] == ["ENAMETOOLONG", "standard", [], True, False]
+    # The error of looking the bound file up: the length (ENAMETOOLONG), or
+    # on illumos the cwd that does not fit getcwd's buffer (ERANGE).
+    ex = out["ex"]
+    assert isinstance(ex, list)
+    assert ex[0] in ("ENAMETOOLONG", "ERANGE")
+    assert ex[1:] == ["standard", [], True, False]
 
 
 # A relative path whose socket's directory cannot be resolved for its length
@@ -519,7 +528,7 @@ report(
 # PATH_MAX) is not an error: no route is tried, and the path goes on as in 5
 # with nothing skipped: a short one to the standard as it is (CwdRelative),
 # a long one ENAMETOOLONG with no route. Forced here with a realpath that
-# fails so (Python's own resolves such a cwd).
+# fails so for anything in the cwd.
 @pytest.mark.parametrize("code", [errno.ENAMETOOLONG, errno.ERANGE])
 def test_a_realpath_too_long_goes_on_without_routes(tmp: TmpDirs, code: int) -> None:
     deep = long_real_dir(tmp)
@@ -531,7 +540,7 @@ def test_a_realpath_too_long_goes_on_without_routes(tmp: TmpDirs, code: int) -> 
         import sockat.ex
         real = os.path.realpath
         def refused(p, **kw):
-            if not os.fsencode(p).startswith(b"/"):
+            if os.fsencode(p).startswith(os.fsencode(ARGS["deep"])):
                 raise OSError(ARGS["code"], os.strerror(ARGS["code"]))
             return real(p, **kw)
         os.path.realpath = refused
@@ -544,7 +553,55 @@ def test_a_realpath_too_long_goes_on_without_routes(tmp: TmpDirs, code: int) -> 
         report(short=[type(b.spelling).__name__, b.route, list(b.skipped)], long=long)
         """,
         cwd=deep,
-        args={"code": code, "rel": rel},
+        args={"code": code, "rel": rel, "deep": os.fsdecode(deep)},
     )
     assert out["short"] == ["CwdRelative", "standard", []]
     assert out["long"] == ["ENAMETOOLONG", None, []]
+
+
+# The cwd is read only through sockat's own bounded read (_sys.getcwd), never
+# os.getcwd / os.getcwdb, which on illumos keep reallocating in a cwd past
+# MAXPATHLEN until memory runs out. Here that read answers ERANGE (as
+# illumos's getcwd does there) and os.getcwd* fail the test if called: a
+# relative bind and resolve go on as in step 5 (CwdRelative, nothing
+# skipped), sockat.ex.bind fails to remember with that ERANGE, and a long
+# absolute connect still reaches the listener.
+def test_the_cwd_is_read_only_by_the_bounded_read(tmp: TmpDirs) -> None:
+    p = long_path(tmp.new())
+    with listener_at(p):
+        out = run_child(
+            """
+            import errno
+            import sockat, sockat.ex
+            from sockat import _calls, _sys
+            from sockat._spelling import Trail
+            def refused():
+                raise OSError(errno.ERANGE, os.strerror(errno.ERANGE))
+            def forbidden():
+                raise AssertionError("os.getcwd called")
+            _sys.getcwd = refused
+            os.getcwd = os.getcwdb = forbidden
+            trail = Trail()
+            done, _ = _calls.bind(b"s.sock", trail=trail)
+            r = sockat.ex.resolve_for_bind("r.sock")
+            try:
+                sockat.ex.bind("x.sock")
+                ex = None
+            except OSError as e:
+                ex = errno.errorcode.get(e.errno)
+            c = sockat.ex.connect(ARGS["p"])
+            report(
+                bound=[done.route, type(done.spelling).__name__, [s.name for s in trail.skipped]],
+                resolved=[r.path, type(r.spelling).__name__, list(r.skipped)],
+                ex=ex,
+                connected=c.route,
+            )
+            """,
+            cwd=tmp.new(),
+            env={"PWD": ""},
+            args={"p": os.fsdecode(p)},
+        )
+    assert out["bound"] == ["standard", "CwdRelative", []]
+    assert out["resolved"] == ["r.sock", "CwdRelative", []]
+    assert out["ex"] == "ERANGE"
+    assert isinstance(out["connected"], str)

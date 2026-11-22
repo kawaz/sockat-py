@@ -12,6 +12,7 @@ Contents:
 * :func:`op` — ``bind(2)`` / ``connect(2)`` of a ``socket.socket`` with such an
   address.
 * :func:`op_at` — ``bindat(2)`` / ``connectat(2)`` (FreeBSD).
+* :func:`getcwd` — the cwd read with a bounded buffer on illumos.
 * :func:`thread_cwd_possible` / :func:`enter_dir_in_this_thread` — a cwd of
   the calling thread's own (Linux: ``unshare(CLONE_FS)``, Apple:
   ``pthread_fchdir_np``).
@@ -205,6 +206,45 @@ def op_at(which: Op, sock: socket.socket, dirfd: int, addr: bytes) -> None:
         _wait_connected(sock)
         return
     _raise_errno(err)
+
+
+IS_ILLUMOS = sys.platform.startswith("sunos")
+"""illumos (and Solaris), whose ``getcwd(3C)`` is asked with a bounded
+buffer (:func:`getcwd`)."""
+
+_GETCWD_BUFFER = 4096
+"""The buffer :func:`getcwd` hands ``getcwd(3C)`` on illumos: past
+``MAXPATHLEN`` (1024 there), so any cwd a path call can take fits."""
+
+
+def getcwd() -> bytes:
+    """The cwd, as ``os.getcwdb()`` gives it, but on illumos read once with a
+    bounded buffer: an ``OSError`` (``ERANGE``) when the cwd does not fit.
+
+    Design rationale: CPython's ``os.getcwd`` calls ``getcwd(3)`` again with a
+    buffer 1024 bytes larger each time it answers ``ERANGE``, until it
+    succeeds or the allocation fails. In a cwd past ``MAXPATHLEN`` on
+    illumos it never succeeds (inferred from CPython's posix_getcwd and the
+    illumos CI run of 0.4.0, where it ran for 13 minutes and ended in
+    ``MemoryError`` inside ``os.path.realpath``; no illumos machine to try
+    it on by hand). A real lack of memory cannot be told from that
+    ``MemoryError``, so rather than catch it, the cwd is read here once, and
+    a cwd that does not fit is the length error the SPEC takes as "the
+    realpath cannot be had" (step 5). Elsewhere ``os.getcwdb()`` either
+    succeeds or fails with an errno (OpenBSD: ``ENAMETOOLONG``)."""
+    if not IS_ILLUMOS:
+        return os.getcwdb()
+    import ctypes as c
+
+    fn = _c().getcwd
+    fn.restype = c.c_char_p
+    fn.argtypes = [c.c_char_p, c.c_size_t]
+    buf = c.create_string_buffer(_GETCWD_BUFFER)
+    got: bytes | None = fn(buf, c.c_size_t(_GETCWD_BUFFER))
+    if got is None:
+        _raise_errno(c.get_errno() or errno.ERANGE)
+    assert got is not None
+    return got
 
 
 HAS_THREAD_CWD = IS_LINUX or IS_APPLE

@@ -11,6 +11,7 @@ import stat
 import threading
 from dataclasses import dataclass
 
+from ._absolute import realpath
 from ._errors import CwdChanged
 from ._place import Dir
 from ._sys import IS_LINUX
@@ -129,7 +130,7 @@ def remember_spelling(spelling: bytes, cwd: tuple[int, int] | None, link: Link |
         return SocketFile(None, link)
     if cwd is not None and cwd_id() != cwd:
         raise CwdChanged("the current directory changed since the path relative to it was resolved")
-    real = os.fsencode(os.path.realpath(spelling, strict=True))
+    real = realpath(spelling)
     st = os.lstat(real)
     if not stat.S_ISSOCK(st.st_mode):
         # Not bound yet: an unrelated file at the path, which remove() must
@@ -197,7 +198,7 @@ class Recorder:
             # points, and that is what is remembered (remove() must not
             # remove the caller's symlink). What is there must be a socket.
             if not at.made:
-                real = os.fsencode(os.path.realpath(at.path, strict=True))
+                real = realpath(at.path)
             else:
                 real = at.path
                 if stat.S_ISLNK(os.lstat(real).st_mode):
