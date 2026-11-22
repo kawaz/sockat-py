@@ -9,6 +9,7 @@ import errno
 import os
 import stat
 import threading
+from dataclasses import dataclass
 
 from ._errors import CwdChanged
 from ._place import Dir
@@ -148,32 +149,45 @@ def _remove_if_same(real: bytes, made: tuple[int, int]) -> None:
         os.unlink(real)
 
 
+@dataclass(frozen=True)
+class At:
+    """Where a bind went, for :meth:`Recorder.bound` to remember (SPEC
+    "remove")."""
+
+    path: bytes
+    """The spelling the ``socket`` module was given (the standard: the path
+    or an absolute candidate), what link-file's E points to, or where the
+    route made the socket (``made``)."""
+    made: bool = False
+    """``path`` is the real directory a route made the socket in (link-dir,
+    thread-cwd, at) and the file name: remembered as it is, not looked up
+    again. Otherwise its realpath is looked up after the bind."""
+    cwd_relative: bool = False
+    """``path`` is the relative path itself, given to the ``socket`` module
+    as it is (no route could be used): the cwd is watched."""
+
+
 class Recorder:
-    """What ``sockat.ex``'s binds remember: the path given, for a relative
-    one the cwd it was given against, and, once the bind has gone through,
-    the socket file it made."""
+    """What ``sockat.ex``'s binds remember: for a relative path the cwd it
+    was given against, and, once the bind has gone through, the socket file
+    it made."""
 
     def __init__(self, path: bytes) -> None:
-        self.path = path
         self.abstract = IS_LINUX and path.startswith(b"\0")
-        self.relative = not path.startswith(b"/") and not self.abstract
-        self.cwd = cwd_id() if self.relative else None
+        relative = not path.startswith(b"/") and not self.abstract
+        self.cwd = cwd_id() if relative else None
         """``(st_dev, st_ino)`` of the cwd before anything is looked up, for
         a relative path."""
         self.file: tuple[bytes, tuple[int, int]] | None = None
 
-    def bound(self, made: bytes | None = None) -> None:
+    def bound(self, at: At) -> None:
         """Remember the socket file just bound (before the listen and before
         the socket is returned), so that a file put at the path afterwards
         cannot be remembered in its place. A failure is raised (the caller
         closes the socket: a ``remove`` that could not remove the file must
-        not look like one that can). For a relative path, a cwd changed
-        since the call began is such a failure (:class:`CwdChanged`).
-
-        ``made``: where the route made the socket (link-dir, thread-cwd, at:
-        the real directory E points to and the file name), remembered as it
-        is; the path is not looked up again (SPEC "remove"). ``None`` (the
-        standard, link-file): the realpath of the path, looked up now."""
+        not look like one that can). For a relative path bound as it is
+        (``at.cwd_relative``), a cwd changed since the call began is such a
+        failure (:class:`CwdChanged`)."""
         if self.abstract:
             return
         failure: OSError | None = None
@@ -182,24 +196,25 @@ class Recorder:
             # bind followed one (macOS, NetBSD), the socket is where it
             # points, and that is what is remembered (remove() must not
             # remove the caller's symlink). What is there must be a socket.
-            if made is None:
-                real = os.fsencode(os.path.realpath(self.path, strict=True))
+            if not at.made:
+                real = os.fsencode(os.path.realpath(at.path, strict=True))
             else:
-                real = made
-                if stat.S_ISLNK(os.lstat(made).st_mode):
-                    real = os.fsencode(os.path.realpath(made, strict=True))
+                real = at.path
+                if stat.S_ISLNK(os.lstat(real).st_mode):
+                    real = os.fsencode(os.path.realpath(real, strict=True))
             st = os.lstat(real)
             if not stat.S_ISSOCK(st.st_mode):
                 raise OSError(errno.ENOTSOCK, os.strerror(errno.ENOTSOCK), os.fsdecode(real))
         except OSError as e:
             failure = e
-        # A relative path: the cwd is compared now, after the bind and the
-        # realpath, with the one before anything was looked up (SPEC). Another
-        # thread that changed it in between would have the bind made under one
-        # cwd and the file remembered under another, and remove() could then
-        # remove an unrelated file of the same name. A change undone before
-        # this point is not seen.
-        if self.relative and (self.cwd is None or cwd_id() != self.cwd):
+        # The relative path bound as it is: the cwd is compared now, after the
+        # bind and the realpath, with the one before anything was looked up
+        # (SPEC). Another thread that changed it in between would have the
+        # bind made under one cwd and the file remembered under another, and
+        # remove() could then remove an unrelated file of the same name. A
+        # change undone before this point is not seen. A path made absolute
+        # needs no watching: what is remembered does not depend on the cwd.
+        if at.cwd_relative and (self.cwd is None or cwd_id() != self.cwd):
             raise CwdChanged(
                 "the current directory changed while binding a path relative to it; the socket was closed"
             ) from failure

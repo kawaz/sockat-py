@@ -191,6 +191,12 @@ class ForConnect:
     ``remove()``: the socket file is not the caller's to remove."""
 
     path: str | bytes
+    """The spelling (``str`` or ``bytes`` as the path was given)."""
+    spelling: Spelling
+    """What the spelling is good for, and for how long: kept and used after
+    the cwd has changed, a ``CwdRelative`` one names another place; a
+    ``Linked`` one with ``until`` ``Process`` only while this process
+    lives."""
     route: str
     skipped: tuple[Skipped, ...]
     _cleanup: Callable[[], None] = field(repr=False, compare=False)
@@ -252,9 +258,11 @@ def _connect(call: Call, path: StrOrBytesPath, options: Options | None) -> Conne
 
 def resolve_for_bind(path: StrOrBytesPath, *, options: Options | None = None) -> ForBind:
     """A short spelling that names the same place as ``path`` for as long as
-    it lives, to bind with the standard library (any socket type). A path
-    the :mod:`socket` module takes is returned as is. ``ENAMETOOLONG`` where
-    only :func:`bind`'s thread-cwd / at would reach."""
+    it lives, to bind with the standard library (any socket type). An
+    absolute path the :mod:`socket` module takes is returned as is; a
+    relative path is made absolute first, as :func:`bind` does.
+    ``ENAMETOOLONG`` where only :func:`bind`'s thread-cwd / at would
+    reach."""
     trail = Trail()
     with _telling(trail):
         r = _calls.resolve_for_bind(path, opts=_opts(options), trail=trail)
@@ -264,13 +272,14 @@ def resolve_for_bind(path: StrOrBytesPath, *, options: Options | None = None) ->
 def resolve_for_connect(path: StrOrBytesPath, *, options: Options | None = None) -> ForConnect:
     """A short spelling of ``path`` to connect (or send) to with the
     standard library, as often as needed, then :meth:`ForConnect.cleanup`.
-    A path the :mod:`socket` module takes is returned as is.
-    ``ENAMETOOLONG`` where B cannot be had or the spelling does not fit
-    (:func:`connect` may still reach it)."""
+    An absolute path the :mod:`socket` module takes is returned as is; a
+    relative path is made absolute first (the spelling may be kept and used
+    after the cwd has changed). ``ENAMETOOLONG`` where B cannot be had or
+    the spelling does not fit (:func:`connect` may still reach it)."""
     trail = Trail()
     with _telling(trail):
         r = _calls.resolve_for_connect(path, opts=_opts(options), trail=trail)
-    return ForConnect(r.path, r.route, tuple(trail.skipped), r.link.cleanup if r.link else _nothing)
+    return ForConnect(r.path, r.spelling, r.route, tuple(trail.skipped), r.link.cleanup if r.link else _nothing)
 
 
 def sweep() -> None:

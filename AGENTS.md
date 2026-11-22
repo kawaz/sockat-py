@@ -22,6 +22,7 @@ sockat-py は、`sun_path` の上限を超えるパスでも Unix domain socket 
 | `src/sockat/_spelling.py` | 綴りの性質 `Spelling` と診断 (`Skipped`、`Trail`) |
 | `src/sockat/_socket_file.py` | `remove` / `cleanup` (`SocketFile`) と bind したファイルを覚える所 |
 | `src/sockat/_sockets.py` | アドレスを元のパスで返す `socket.socket` の subclass |
+| `src/sockat/_absolute.py` | bind と resolve で相対パスを絶対パスにする候補 (実パス、`$PWD`) |
 | `src/sockat/_path.py` | パスの分割・相対パスの計算 (ファイルシステムに触らない) |
 | `src/sockat/_sys.py` | ctypes の境界。`socket` モジュールで呼べないシステムコールはここだけ |
 | `conformance/cli.py` | ハブの適合試験の試験用 CLI (配布物に入らない) |
@@ -31,7 +32,7 @@ sockat-py は、`sun_path` の上限を超えるパスでも Unix domain socket 
 
 - **振る舞いを変える時は、先にハブの SPEC を直す。** sockat-py の docs と実装はその後に追従させる
 - **ctypes は `src/sockat/_sys.py` にだけ書く。** 最初に要った時に import する (要るのはスレッドの cwd・広げた sockaddr・`bindat` / `connectat` を使う時だけで、それ以外の経路では読み込まない)
-- **標準が受け付けるパス (OS ごとの `sun_path` − 1 バイト以内) には何も足さない。** `socket` モジュールをそのまま呼ぶ
+- **標準が受け付ける絶対パス (OS ごとの `sun_path` − 1 バイト以内) には何も足さない。** `socket` モジュールをそのまま呼ぶ。相対パスは、bind と resolve では絶対パスにしてから長さで分け (ハブ DR-0019)、connect では相対のまま渡す
 - **どの経路のソケットも `socket.socket(AF_UNIX, SOCK_STREAM)` (DGRAM は `SOCK_DGRAM`) で作る。** 標準と同じ設定にするため。DGRAM の connect は渡されたソケットで試す
 - **経路の本当の失敗は次の経路でやり直さない。** 次へ進むのは経路自体が使えない時だけ
 - **プロセスの cwd を変えない。** cwd を移すのはスレッド cwd の経路の使い捨てのスレッドだけ

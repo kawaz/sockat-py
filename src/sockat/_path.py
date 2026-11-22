@@ -93,3 +93,24 @@ def relative(target: bytes, cwd: bytes) -> bytes | None:
     if common >= len(t):
         return None
     return b"/".join([b".."] * (len(c) - common) + t[common:])
+
+
+def fold(path: bytes) -> bytes:
+    """Fold the absolute path ``path`` as text: empty segments and ``.`` are
+    dropped, and ``..`` drops itself and the segment before it (``..`` of
+    the root is the root).
+
+    This is what ``os.path.normpath`` does, and like it, it may name another
+    directory than the kernel would: ``a/sym/..`` folds to ``a`` while the
+    kernel takes the parent of what ``sym`` points to. The caller confirms
+    that the folded directory is the one meant before using it."""
+    out: list[bytes] = []
+    for c in path.split(b"/"):
+        if c in (b"", b"."):
+            continue
+        if c == b"..":
+            if out:
+                out.pop()
+            continue
+        out.append(c)
+    return b"/" + b"/".join(out)

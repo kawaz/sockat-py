@@ -19,7 +19,7 @@ from typing import TypeAlias
 from . import _path
 from ._errors import CwdChanged
 from ._place import RANDOM_LEN, Base, Dir, Env, Fits, Kind, LinkFile, open_dir
-from ._socket_file import Link, Recorder
+from ._socket_file import At, Link, Recorder
 from ._sockets import PathSocket
 from ._spelling import CwdRelative, Dangling, Linked, Original, Spelling, Trail, Until
 from ._sys import (
@@ -108,18 +108,17 @@ class Call:
         return sock
 
     def finish(
-        self, sock: socket.socket, do: Callable[[socket.socket], None], *, made: bytes | None = None
+        self, sock: socket.socket, do: Callable[[socket.socket], None], *, where: At | None = None
     ) -> socket.socket:
-        """Run ``do`` on ``sock``, then after a bind remember the file and
-        listen (stream); on any failure close ``sock`` when it is not the
-        caller's. ``made``: where the route made the socket (the real
-        directory and the file name), for the routes that know it
-        (:meth:`Recorder.bound`)."""
+        """Run ``do`` on ``sock``, then after a bind remember the file
+        ``where`` says (:meth:`Recorder.bound`) and listen (stream); on any
+        failure close ``sock`` when it is not the caller's."""
         try:
             do(sock)
             if self.op is Op.BIND:
                 if self.recorder is not None:
-                    self.recorder.bound(made)
+                    assert where is not None
+                    self.recorder.bound(where)
                 if self.listens:
                     sock.listen()
         except BaseException:
@@ -128,11 +127,11 @@ class Call:
             raise
         return sock
 
-    def plain(self, spelling: str | bytes, *, standard: bool = False, made: bytes | None = None) -> socket.socket:
+    def plain(self, spelling: str | bytes, *, standard: bool = False, where: At | None = None) -> socket.socket:
         """Bind / connect with ``spelling`` through the ``socket`` module."""
         sock = self.new_socket(standard=standard)
         if self.op is Op.BIND:
-            return self.finish(sock, lambda s: s.bind(spelling), made=made)
+            return self.finish(sock, lambda s: s.bind(spelling), where=where)
         return self.finish(sock, lambda s: s.connect(spelling))
 
     def wide(self, spelling: bytes) -> socket.socket:
@@ -140,11 +139,11 @@ class Call:
         addr = sockaddr(spelling, wide=True)
         return self.finish(self.new_socket(), lambda s: op(self.op, s, addr))
 
-    def at(self, dirfd: int, spelling: bytes, *, made: bytes | None = None) -> socket.socket:
+    def at(self, dirfd: int, spelling: bytes, *, where: At | None = None) -> socket.socket:
         """``bindat(2)`` / ``connectat(2)`` of ``spelling`` on ``dirfd``
         (FreeBSD)."""
         addr = sockaddr(spelling)
-        return self.finish(self.new_socket(), lambda s: op_at(self.op, s, dirfd, addr), made=made)
+        return self.finish(self.new_socket(), lambda s: op_at(self.op, s, dirfd, addr), where=where)
 
 
 @dataclass(frozen=True)
@@ -163,17 +162,31 @@ def check_no_nul(path: bytes) -> None:
         raise ValueError("socket path must not contain a NUL byte")
 
 
-def look_up(path: bytes) -> Target:
+class RealPathTooLong(Exception):
+    """The relative path's directory is there but its realpath cannot be
+    looked up for its length (a cwd past PATH_MAX: ``ENAMETOOLONG``, or
+    ``ERANGE`` where the cwd cannot be read): for a bind or a resolve, the
+    routes cannot be used (SPEC "相対パスを絶対パスにする")."""
+
+
+def look_up(path: bytes, *, absolutizing: bool = False) -> Target:
     """The SPEC's steps before any route: a path that does not end with a
     file name is an argument error; the socket's directory is looked up
     (``ENOENT``, ``ENOTDIR``) and resolved to its realpath (its error), all
-    before any length is judged or anything is made."""
+    before any length is judged or anything is made. ``absolutizing`` (a
+    bind or a resolve): a relative path whose realpath cannot be looked up
+    for its length raises :class:`RealPathTooLong` instead."""
     check_no_nul(path)
     directory, name = _path.split(path)
     st = os.stat(directory)
     if not stat.S_ISDIR(st.st_mode):
         raise NotADirectoryError(errno.ENOTDIR, os.strerror(errno.ENOTDIR), os.fsdecode(directory))
-    real_dir = os.fsencode(os.path.realpath(directory, strict=True))
+    try:
+        real_dir = os.fsencode(os.path.realpath(directory, strict=True))
+    except OSError as e:
+        if absolutizing and e.errno in (errno.ENAMETOOLONG, errno.ERANGE) and not path.startswith(b"/"):
+            raise RealPathTooLong() from e
+        raise
     return Target(path, directory, name, real_dir)
 
 
@@ -350,6 +363,9 @@ class Through:
     base: str
     link: Link
     linked: Linked
+    target: bytes
+    """What E points to: the realpath of the socket's directory (link-dir)
+    or the socket file (link-file)."""
 
 
 class _Unusable(Exception):
@@ -404,6 +420,7 @@ def _through_procb(env: Env, t: Target, bases: Bases, route: str, target: bytes,
         _proc_base_name(b),
         link,
         Linked(removable=name is not None, until=Until.PROCESS, usable_cross_uid=False, usable_with_private_tmp=True),
+        target,
     )
 
 
@@ -436,6 +453,7 @@ def _through_real(env: Env, t: Target, bases: Bases, route: str, target: bytes, 
             usable_cross_uid=b.cross_uid,
             usable_with_private_tmp=b.private_tmp_ok,
         ),
+        target,
     )
 
 
@@ -589,11 +607,11 @@ def in_thread_cwd(dirfd: int, do: Callable[[int], None], owned: tuple[socket.soc
         raise result
 
 
-def thread_cwd_op(call: Call, dirfd: int, spelling: bytes, *, made: bytes | None = None) -> socket.socket:
+def thread_cwd_op(call: Call, dirfd: int, spelling: bytes, *, where: At | None = None) -> socket.socket:
     """Bind / connect ``spelling`` from a throwaway thread whose cwd is
     ``dirfd`` (:func:`in_thread_cwd`), through a dup of the socket the
     thread owns; then, in the caller, what follows a bind (remember
-    ``made``, listen)."""
+    ``where``, listen)."""
     sock = call.new_socket()
     try:
         mine = sock.dup()
@@ -605,7 +623,7 @@ def thread_cwd_op(call: Call, dirfd: int, spelling: bytes, *, made: bytes | None
         if sock is not call.sock:
             sock.close()
         raise
-    return call.finish(sock, lambda s: None, made=made)
+    return call.finish(sock, lambda s: None, where=where)
 
 
 def thread_cwd_means(env: Env) -> str | None:
@@ -632,16 +650,22 @@ class BindDone:
     link: Link | None
 
 
-def bind_standard(call: Call, spelled: str | bytes, raw: bytes) -> BindDone:
-    sock = call.plain(spelled, standard=True)
-    absolute_path = raw.startswith(b"/") or (IS_LINUX and raw.startswith(b"\0"))
-    return BindDone(sock, STANDARD, Original() if absolute_path else CwdRelative(), None, None)
+def bind_standard(call: Call, spelled: str | bytes, raw: bytes, *, plain_type: bool = True) -> BindDone:
+    """Give the ``socket`` module ``spelled`` (``raw`` its bytes): an
+    absolute path (the one given, or an absolute candidate: ``Original``),
+    an abstract name, or a relative path as it is (``CwdRelative``, no route
+    could be used). ``plain_type``: a plain :class:`socket.socket` (else a
+    :class:`PathSocket`, to report the path given)."""
+    relative = not raw.startswith(b"/") and not (IS_LINUX and raw.startswith(b"\0"))
+    sock = call.plain(spelled, standard=plain_type, where=At(raw, cwd_relative=relative))
+    return BindDone(sock, STANDARD, CwdRelative() if relative else Original(), None, None)
 
 
-def bind_long(call: Call, t: Target, env: Env, bases: Bases, trail: Trail) -> BindDone:
+def bind_long(call: Call, t: Target, env: Env, bases: Bases, trail: Trail) -> BindDone | None:
     """The SPEC's bind order past the standard: link-dir (procB, then B's
     real path), link-file (where a bind may follow the symlink),
-    thread-cwd / at, then ``ENAMETOOLONG``."""
+    thread-cwd / at; ``None`` when none of them can be used (the caller
+    raises ``ENAMETOOLONG``, or binds a short relative path as it is)."""
     trail.skip(STANDARD, "path too long")
     for make in (link_dir_proc, link_dir_real):
         try:
@@ -659,10 +683,7 @@ def bind_long(call: Call, t: Target, env: Env, bases: Bases, trail: Trail) -> Bi
         done = bind_link_file(call, t, env, bases, trail)
         if done is not None:
             return done
-    done = bind_thread_cwd_or_at(call, t, env, bases, trail)
-    if done is not None:
-        return done
-    raise enametoolong()
+    return bind_thread_cwd_or_at(call, t, env, bases, trail)
 
 
 def made_in(t: Target) -> bytes:
@@ -678,7 +699,7 @@ def made_in(t: Target) -> bytes:
 def _bind_through(call: Call, through: Through, trail: Trail, made: bytes) -> BindDone:
     trail.attempt(through.route)
     try:
-        sock = call.plain(through.spelling, made=made)
+        sock = call.plain(through.spelling, where=At(made, made=True))
     except BaseException:
         through.link.discard()
         raise
@@ -717,7 +738,9 @@ def bind_link_file(call: Call, t: Target, env: Env, bases: Bases, trail: Trail) 
         through.link.discard()
         raise
     try:
-        call.finish(sock, lambda s: None)
+        # What E points to is looked up after the bind (SPEC "remove"): the
+        # path given, made absolute against the cwd.
+        call.finish(sock, lambda s: None, where=At(through.target))
     except BaseException:
         through.link.discard()
         raise
@@ -767,10 +790,10 @@ def bind_thread_cwd_or_at(call: Call, t: Target, env: Env, bases: Bases, trail: 
     trail.attempt(route)
     try:
         if IS_FREEBSD:
-            sock = call.at(d.fd, spelling, made=made_in(t))
+            sock = call.at(d.fd, spelling, where=At(made_in(t), made=True))
         else:
             try:
-                sock = thread_cwd_op(call, d.fd, spelling, made=made_in(t))
+                sock = thread_cwd_op(call, d.fd, spelling, where=At(made_in(t), made=True))
             except ThreadRefused:
                 trail.skip(route, THREAD_CWD_REFUSED)
                 return None
