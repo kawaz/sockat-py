@@ -36,8 +36,9 @@ from _support import PRIVATE_PLACE_CODE, SRC_DIR, TESTS_DIR, TmpDirs, nest
 
 DOCS = TESTS_DIR.parent / "docs"
 
-PAGES = ("bind", "connect", "seqpacket", "datagram", "resolve")
-"""The user manual's pages (``docs/manual/<page>-ja.md`` and ``<page>.md``)."""
+PAGES = ("bind", "connect", "datagram", "resolve")
+"""The user manual's pages with code (``docs/manual/<page>-ja.md`` and
+``<page>.md``). The SEQPACKET page only points to the resolve page."""
 
 PATTERNS = {
     "REFERENCE-ja.md": "使ってはいけない書き方",

@@ -6,8 +6,8 @@
 
 - [待ち受ける (bind)](./manual/bind-ja.md)
 - [つなぐ (connect)](./manual/connect-ja.md)
-- [SEQPACKET を使う](./manual/seqpacket-ja.md)
 - [DGRAM を使う](./manual/datagram-ja.md)
+- [SEQPACKET を使う](./manual/seqpacket-ja.md)
 - [パスだけを解決する (resolve)](./manual/resolve-ja.md)
 
 関数と型の一覧は [リファレンス](./REFERENCE-ja.md) にあります。

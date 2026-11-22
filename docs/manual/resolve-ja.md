@@ -4,7 +4,25 @@
 
 bind / connect は自分の書き方 (標準の `socket`、他のライブラリ) のまま、パスだけを上限に収まる綴りにする。
 
-## 何度もつなぐ綴りを作る
+## つなぐ
+
+綴りは connect の後は要らないので、結果によらずすぐ `cleanup()` する。
+
+```python
+import socket
+
+import sockat.ex
+
+client = socket.socket(socket.AF_UNIX)
+r = sockat.ex.resolve_for_connect(path)
+try:
+    client.connect(r.path)
+finally:
+    r.cleanup()
+client.sendall(b"hello")
+```
+
+## 同じ相手に何度もつなぐ
 
 ```python
 import socket
@@ -12,26 +30,87 @@ import socket
 import sockat.ex
 
 r = sockat.ex.resolve_for_connect(path)
-for _ in range(3):
-    with socket.socket(socket.AF_UNIX) as s:
-        s.connect(r.path)
-        ...
-r.cleanup()
+try:
+    for _ in range(3):
+        with socket.socket(socket.AF_UNIX) as s:
+            s.connect(r.path)
+            ...
+finally:
+    r.cleanup()
 ```
 
-## 自分で bind する綴りを作り、終わる時にソケットのファイルを消す
+## 待ち受ける
+
+bind や listen に失敗したら、`cleanup()` してからエラーを返す。
 
 ```python
 import socket
 
 import sockat.ex
 
-r = sockat.ex.resolve_for_bind(path)
 listener = socket.socket(socket.AF_UNIX)
-listener.bind(r.path)
-listener.listen()
+r = sockat.ex.resolve_for_bind(path)
+try:
+    listener.bind(r.path)
+    listener.listen()
+except OSError:
+    r.cleanup()
+    raise
+file = r.socket_file()
+```
+
+## 終わる時にソケットのファイルを消す
+
+`file.remove()` は listener を閉じる前に呼ぶ。
+
+```python
+import socket
+
+import sockat.ex
+
+listener = socket.socket(socket.AF_UNIX)
+r = sockat.ex.resolve_for_bind(path)
+try:
+    listener.bind(r.path)
+    listener.listen()
+except OSError:
+    r.cleanup()
+    raise
 file = r.socket_file()
 ...
+file.remove()
+listener.close()
+```
+
+## SEQPACKET で使う
+
+ソケットを `SOCK_SEQPACKET` で作る。他は同じ (macOS では標準が SEQPACKET を作れない)。
+
+```python
+import socket
+
+import sockat.ex
+
+listener = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+r = sockat.ex.resolve_for_bind(path)
+try:
+    listener.bind(r.path)
+    listener.listen()
+except OSError:
+    r.cleanup()
+    raise
+file = r.socket_file()
+
+client = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+c = sockat.ex.resolve_for_connect(path)
+try:
+    client.connect(c.path)
+finally:
+    c.cleanup()
+server, _ = listener.accept()
+client.send(b"one")
+client.send(b"two")
+assert server.recv(10) == b"one"
 file.remove()
 listener.close()
 ```
