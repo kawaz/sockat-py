@@ -7,8 +7,10 @@ block.
 * The user manual's pages (``docs/manual/*.md``): every block, with ``path``
   a long path (past every ``sun_path``), ``base`` a directory for
   ``Options.base`` and ``handle`` an asyncio connection handler. A block
-  that binds nothing finds a listener already at ``path``; a block with
-  ``await`` runs in an event loop. Every block must run through.
+  that binds nothing finds a listener (of the block's socket type) already
+  at ``path``; a block with ``await`` runs in an event loop. Every block
+  must run through. A SEQPACKET block runs only where the ``socket`` module
+  can make a SEQPACKET socket.
 * The reference's code for writing instead of the patterns not to use
   ("使ってはいけない書き方" / "Patterns not to use"): ``path`` is relative to
   the child's cwd for a block that changes the cwd, otherwise absolute and
@@ -20,7 +22,9 @@ Each block runs in a child process of its own (it may change the cwd)."""
 
 from __future__ import annotations
 
+import errno
 import os
+import socket
 import subprocess
 import sys
 import textwrap
@@ -32,7 +36,7 @@ from _support import PRIVATE_PLACE_CODE, SRC_DIR, TESTS_DIR, TmpDirs, nest
 
 DOCS = TESTS_DIR.parent / "docs"
 
-PAGES = ("bind", "connect", "resolve", "datagram")
+PAGES = ("bind", "connect", "seqpacket", "datagram", "resolve")
 """The user manual's pages (``docs/manual/<page>-ja.md`` and ``<page>.md``)."""
 
 PATTERNS = {
@@ -122,10 +126,22 @@ def _run(block: Block, script: str, cwd: bytes) -> None:
     assert out.returncode == 0, f"{block.id}\n--- code\n{block.code}--- stderr\n{out.stderr}"
 
 
+def _seqpacket_refused() -> str | None:
+    """Why this system's ``socket`` module cannot make a SEQPACKET socket
+    (macOS: ``EPROTONOSUPPORT``), or ``None`` when it can."""
+    try:
+        socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET).close()
+    except OSError as e:
+        return f"the socket module cannot make a SEQPACKET socket here ({errno.errorcode.get(e.errno or 0, e.errno)})"
+    return None
+
+
+SEQPACKET_REFUSED = _seqpacket_refused()
+
 LISTENER_CODE = """
 import os as _os, socket as _socket, tempfile as _tempfile
 _short = _os.path.join(_tempfile.mkdtemp(prefix="spt-d-", dir="/tmp"), "l.sock")
-_listener = _socket.socket(_socket.AF_UNIX)
+_listener = _socket.socket(_socket.AF_UNIX, _socket.SOCK_SEQPACKET if SEQPACKET else _socket.SOCK_STREAM)
 _listener.bind(_short)
 _listener.listen(16)
 _os.rename(_short, path)
@@ -136,10 +152,13 @@ renamed), for a block that only connects."""
 
 @pytest.mark.parametrize("block", MANUAL, ids=_ids(MANUAL))
 def test_the_manual_code_runs(tmp: TmpDirs, block: Block) -> None:
+    seqpacket = "SOCK_SEQPACKET" in block.code
+    if seqpacket and SEQPACKET_REFUSED is not None:
+        pytest.skip(SEQPACKET_REFUSED)
     path = nest(tmp.new(), 300, NAME.encode())
     script = PRIVATE_PLACE_CODE + f"path = {os.fsdecode(path)!r}\nbase = {os.fsdecode(tmp.new() + b'/b')!r}\n"
     if "bind(" not in block.code:
-        script += LISTENER_CODE
+        script += f"SEQPACKET = {seqpacket}\n" + LISTENER_CODE
     if "await " in block.code:
         script += (
             "import asyncio\n"

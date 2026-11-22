@@ -38,6 +38,16 @@ sockat-py の Python での名前と型、使ってはいけない書き方の P
 - `unbound()` が返すのは `socket.socket` の subclass ([Python に固有の注意](#python-に固有の注意))
 - `send_to` と SEQPACKET はまだ無い (仕様で未確定)
 
+## SEQPACKET
+
+SEQPACKET の関数はまだ無い ([仕様の「関数」](https://github.com/kawaz/sockat/blob/main/docs/SPEC-ja.md#関数) で未確定)。`resolve_for_bind` / `resolve_for_connect` の綴りを、自分で作った `socket.socket(AF_UNIX, SOCK_SEQPACKET)` に渡す (使い方は [SEQPACKET を使う](./manual/seqpacket-ja.md))。
+
+- macOS の標準は SEQPACKET のソケットを作れない (`socket.socket(AF_UNIX, SOCK_SEQPACKET)` が `EPROTONOSUPPORT`)
+- resolve の綴りは link-dir・link-file だけなので、ファイル名が長いと `resolve_for_bind` が `ENAMETOOLONG` になる (stream の `sockat.bind` なら thread-cwd で届く長さでも。Linux の procB の綴りでは、ファイル名がおよそ 80 バイトを超えると。境目はプロセスの番号の桁で変わる)
+- 自分で作ったソケットは標準の型なので、`getsockname()` と、つないだ側の `getpeername()` は元のパスでなく bind の綴りを返す。元のパスは自分で持っておく
+- `resolve_for_connect` の綴りは connect した後は要らないので、つないだらすぐ `cleanup()` してよい。つなぎ直す間は取っておく
+- 待ち受ける側は、`socket_file()` を bind の後に呼び、`file.remove()` を listener を閉じる前に呼ぶ (`remove()` は綴りの E も片付ける)
+
 ## sockat.ex
 
 `import sockat` では読み込まれない。使う人が `import sockat.ex` で選ぶ。`sockat.ex.connect(...)` のようにモジュールを通して呼ぶ ([Python に固有の注意](#python-に固有の注意))。

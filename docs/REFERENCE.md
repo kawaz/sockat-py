@@ -38,6 +38,16 @@ Of the standard DGRAM calls, it mirrors only the functions that take a path, and
 - What `unbound()` returns is a subclass of `socket.socket` ([Notes specific to Python](#notes-specific-to-python))
 - `send_to` and SEQPACKET are not there yet (open in the specification)
 
+## SEQPACKET
+
+There are no SEQPACKET functions yet (open in [the specification's "Functions"](https://github.com/kawaz/sockat/blob/main/docs/SPEC.md#functions)). Pass the spelling of `resolve_for_bind` / `resolve_for_connect` to a `socket.socket(AF_UNIX, SOCK_SEQPACKET)` you make yourself (how to use it is in [Using SEQPACKET](./manual/seqpacket.md)).
+
+- The standard library on macOS cannot make a SEQPACKET socket (`socket.socket(AF_UNIX, SOCK_SEQPACKET)` is `EPROTONOSUPPORT`)
+- A resolve's spelling is link-dir or link-file only, so with a long file name `resolve_for_bind` is `ENAMETOOLONG` (even at a length the stream `sockat.bind` reaches by thread-cwd; with Linux's procB spelling, past a file name of about 80 bytes; where exactly depends on the digits of the process id)
+- A socket you make yourself is of the standard type, so `getsockname()` and the connected side's `getpeername()` return the bind's spelling, not the original path. Keep the original path yourself
+- The spelling of `resolve_for_connect` is not needed once connected, so `cleanup()` right after the connect is fine. Keep it while you connect again
+- On the listening side, call `socket_file()` after the bind and `file.remove()` before closing the listener (`remove()` also cleans up the spelling's E)
+
 ## sockat.ex
 
 It is not loaded by `import sockat`. The user opts in with `import sockat.ex`. Call it through the module, as in `sockat.ex.connect(...)` ([Notes specific to Python](#notes-specific-to-python)).
