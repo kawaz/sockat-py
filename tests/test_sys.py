@@ -153,33 +153,47 @@ def test_a_thread_gets_a_cwd_of_its_own(tmp: TmpDirs) -> None:
 
 # The cwd is read with PATH_MAX as the limit (_sys.getcwd): in an ordinary cwd
 # it is what os.getcwdb gives; in a cwd of PATH_MAX bytes or more it is an
-# OSError, here ENAMETOOLONG. illumos's form (forced here on this system's
-# libc): one getcwd(3) with a PATH_MAX buffer, ERANGE when the cwd does not
-# fit, rather than growing the buffer as os.getcwd does. In a child (the cwd
-# changes).
+# OSError (ENAMETOOLONG: cut off from os.getcwdb's answer, or os.getcwdb's own
+# on OpenBSD). illumos's form (forced here on this system's libc, made ready
+# while the cwd is shallow): one getcwd(3) with a PATH_MAX buffer, an errno
+# when the cwd does not fit (ERANGE where measured; ENAMETOOLONG also taken),
+# rather than growing the buffer as os.getcwd does. In a child (the cwd
+# changes); everything it uses is imported before it goes deep (importing
+# reads the cwd), and in the deep cwd only _sys.getcwd reads it: os.getcwdb
+# does not return there on illumos, and the depth is counted, not read.
 def test_the_cwd_is_read_up_to_path_max(tmp: TmpDirs) -> None:
     out = run_child(
         """
         import errno, tempfile
         from sockat import _sys
+        native = _sys.IS_ILLUMOS
         def outcome():
             try:
-                return _sys.getcwd() == os.getcwdb()
+                _sys.getcwd()
             except OSError as e:
                 return errno.errorcode.get(e.errno)
-        os.chdir(tempfile.mkdtemp(prefix="spt-cwd-", dir="/tmp"))
-        got = {"same": outcome()}
-        _sys.IS_ILLUMOS = True
-        got["illumos same"] = outcome()
+            return "ok"
+        root = os.path.realpath(tempfile.mkdtemp(prefix="spt-cwd-", dir="/tmp"))
+        os.chdir(root)
         _sys.IS_ILLUMOS = False
-        while len(os.getcwdb()) < _sys.path_max():
+        got = {"same": None if native else _sys.getcwd() == os.getcwdb()}
+        _sys.IS_ILLUMOS = True
+        got["illumos same"] = _sys.getcwd() == os.fsencode(root)
+        length = len(root)
+        while length < _sys.path_max():
             os.mkdir("d" * 200)
             os.chdir("d" * 200)
-        got["deep"] = outcome()
+            length += 201
+        _sys.IS_ILLUMOS = False
+        got["deep"] = None if native else outcome()
         _sys.IS_ILLUMOS = True
         got["illumos deep"] = outcome()
         report(**got)
         """,
         cwd=tmp.new(),
     )
-    assert out == {**out, "same": True, "illumos same": True, "deep": "ENAMETOOLONG", "illumos deep": "ERANGE"}
+    native = _sys.IS_ILLUMOS
+    assert out["same"] is (None if native else True)
+    assert out["deep"] == (None if native else "ENAMETOOLONG")
+    assert out["illumos same"] is True
+    assert out["illumos deep"] in ("ERANGE", "ENAMETOOLONG")

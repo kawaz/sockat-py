@@ -31,6 +31,7 @@ import socket
 import struct
 import sys
 from enum import Enum
+from types import ModuleType
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -246,17 +247,43 @@ def getcwd() -> bytes:
         if len(cwd) >= limit:
             _raise_errno(errno.ENAMETOOLONG)
         return cwd
-    import ctypes as c
-
-    fn = _c().getcwd
-    fn.restype = c.c_char_p
-    fn.argtypes = [c.c_char_p, c.c_size_t]
+    fn, c = _getcwd_c()
     buf = c.create_string_buffer(limit)
     got: bytes | None = fn(buf, c.c_size_t(limit))
     if got is None:
         _raise_errno(c.get_errno() or errno.ERANGE)
     assert got is not None
     return got
+
+
+_getcwd_fn: tuple[ctypes._NamedFuncPointer, ModuleType] | None = None
+
+
+def _getcwd_c() -> tuple[ctypes._NamedFuncPointer, ModuleType]:
+    """``getcwd(3)`` of the C library through :mod:`ctypes`, and the
+    :mod:`ctypes` module, made ready once."""
+    global _getcwd_fn
+    if _getcwd_fn is None:
+        import ctypes as c
+
+        fn = _c().getcwd
+        fn.restype = c.c_char_p
+        fn.argtypes = [c.c_char_p, c.c_size_t]
+        _getcwd_fn = (fn, c)
+    return _getcwd_fn
+
+
+if IS_ILLUMOS:
+    # Design rationale: on illumos, ctypes is imported when this module is,
+    # not on first use as elsewhere (AGENTS.md). Importing a module not yet
+    # imported looks up the '' entry of sys.path (``python -c``, the
+    # interactive interpreter) with os.getcwd() (importlib's
+    # PathFinder._path_importer_cache), which in a cwd past MAXPATHLEN on
+    # illumos ends in MemoryError (see getcwd). Made ready here, the first
+    # getcwd() of a call made in such a cwd imports nothing. A program that
+    # imports sockat itself for the first time in such a cwd still fails in
+    # that import: that is the import system's, which sockat cannot help.
+    _getcwd_c()
 
 
 HAS_THREAD_CWD = IS_LINUX or IS_APPLE

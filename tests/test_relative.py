@@ -438,7 +438,10 @@ def test_options_base_is_checked_only_for_the_routes(tmp: TmpDirs) -> None:
 
 
 DEEP_CWD_CODE = """
-import errno, os, tempfile
+import errno, os, socket, tempfile
+import sockat, sockat.ex
+from sockat import _absolute, _calls, _sys
+from sockat._spelling import Trail
 _limit = os.pathconf("/", "PC_PATH_MAX")
 _root = tempfile.mkdtemp(prefix="spt-deep-", dir="/tmp")
 os.chdir(_root)
@@ -453,13 +456,13 @@ def _outcome(call):
     except OSError as e:
         return errno.errorcode.get(e.errno, str(e.errno))
     return "ok (%d bytes)" % len(got)
-from sockat import _absolute, _sys
 seen = "%s: PATH_MAX %d, cwd %d bytes: getcwd %s, realpath('.') %s, os.getcwdb() %s" % (
     os.uname().sysname, _limit, _length, _outcome(_sys.getcwd), _outcome(lambda: _absolute.realpath(b".")),
     "not called" if _sys.IS_ILLUMOS else _outcome(os.getcwdb))
 """
 """Code that moves a child into a cwd past PATH_MAX (made a component at a
-time, relative to the one before) and notes in ``seen`` what sockat's reads
+time, relative to the one before; what the test uses is imported first, as
+importing reads the cwd) and notes in ``seen`` what sockat's reads
 of the cwd and of its realpath give there (an errno, or success), and what
 ``os.getcwdb`` gives where it returns (on illumos it reallocates its buffer
 until memory runs out: ``_sys.getcwd``)."""
