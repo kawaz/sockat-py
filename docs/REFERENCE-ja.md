@@ -40,13 +40,10 @@ sockat-py の Python での名前と型、使ってはいけない書き方の P
 
 ## SEQPACKET
 
-SEQPACKET の関数は無い。`resolve_for_bind` / `resolve_for_connect` の綴りを、自分で作った `socket.socket(AF_UNIX, SOCK_SEQPACKET)` に渡す (使い方は [SEQPACKET で使う](./manual/resolve-ja.md#seqpacket-で使う))。
+SEQPACKET の関数は無い。resolve の綴りを、自分で作った `socket.socket(AF_UNIX, SOCK_SEQPACKET)` に渡す (使い方は [SEQPACKET を使う](./manual/seqpacket-ja.md))。
 
-- macOS の標準は SEQPACKET のソケットを作れない (`socket.socket(AF_UNIX, SOCK_SEQPACKET)` が `EPROTONOSUPPORT`)
-- resolve の綴りは link-dir・link-file だけなので、ファイル名が長いと `resolve_for_bind` が `ENAMETOOLONG` になる (stream の `sockat.bind` なら thread-cwd で届く長さでも。Linux の procB の綴りでは、ファイル名がおよそ 80 バイトを超えると。境目はプロセスの番号の桁で変わる)
-- 自分で作ったソケットは標準の型なので、`getsockname()` は元のパスでなく bind の綴りを返す。つないだ側の `getpeername()` も、自分が connect した綴りでなく、相手が bind した綴りを返す。元のパスは自分で持っておく
-- `resolve_for_connect` の綴りは connect の後は要らないので、結果によらずすぐ `cleanup()` してよい (その後も双方向に通る)。同じ相手につなぎ直す間は取っておく
-- 待ち受ける側は、bind や listen に失敗したら `cleanup()` してからエラーを返し、通ったら `socket_file()` を受け取る。`file.remove()` は listener を閉じる前に呼ぶ (`remove()` は綴りの E も片付ける)
+- macOS の標準は SEQPACKET のソケットを作れない (`EPROTONOSUPPORT`)
+- ファイル名が長いと、stream の `sockat.bind` なら届く長さでも、`resolve_for_bind` は `ENAMETOOLONG` になることがある (resolve は綴りを残す経路だけを使う)
 
 ## sockat.ex
 

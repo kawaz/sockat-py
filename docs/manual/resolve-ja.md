@@ -82,39 +82,6 @@ file.remove()
 listener.close()
 ```
 
-## SEQPACKET で使う
-
-ソケットを `SOCK_SEQPACKET` で作る。他は同じ (macOS では標準が SEQPACKET を作れない)。
-
-```python
-import socket
-
-import sockat.ex
-
-listener = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
-r = sockat.ex.resolve_for_bind(path)
-try:
-    listener.bind(r.path)
-    listener.listen()
-except OSError:
-    r.cleanup()
-    raise
-file = r.socket_file()
-
-client = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
-c = sockat.ex.resolve_for_connect(path)
-try:
-    client.connect(c.path)
-finally:
-    c.cleanup()
-server, _ = listener.accept()
-client.send(b"one")
-client.send(b"two")
-assert server.recv(10) == b"one"
-file.remove()
-listener.close()
-```
-
 ## 綴りを取っておいて後で使う
 
 綴りをいつまで使えるかは `spelling` で分かる。

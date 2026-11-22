@@ -82,39 +82,6 @@ file.remove()
 listener.close()
 ```
 
-## Use it with SEQPACKET
-
-Make the sockets with `SOCK_SEQPACKET`. The rest is the same (on macOS the standard library cannot make a SEQPACKET socket).
-
-```python
-import socket
-
-import sockat.ex
-
-listener = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
-r = sockat.ex.resolve_for_bind(path)
-try:
-    listener.bind(r.path)
-    listener.listen()
-except OSError:
-    r.cleanup()
-    raise
-file = r.socket_file()
-
-client = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
-c = sockat.ex.resolve_for_connect(path)
-try:
-    client.connect(c.path)
-finally:
-    c.cleanup()
-server, _ = listener.accept()
-client.send(b"one")
-client.send(b"two")
-assert server.recv(10) == b"one"
-file.remove()
-listener.close()
-```
-
 ## Keep a spelling to use later
 
 How long the spelling can be used is told by `spelling`.

@@ -40,13 +40,10 @@ Of the standard DGRAM calls, it mirrors only the functions that take a path, and
 
 ## SEQPACKET
 
-There are no SEQPACKET functions. Pass the spelling of `resolve_for_bind` / `resolve_for_connect` to a `socket.socket(AF_UNIX, SOCK_SEQPACKET)` you make yourself (how to use it is in [Use it with SEQPACKET](./manual/resolve.md#use-it-with-seqpacket)).
+There are no SEQPACKET functions. Pass a resolve's spelling to a `socket.socket(AF_UNIX, SOCK_SEQPACKET)` you make yourself (how to use it is in [Using SEQPACKET](./manual/seqpacket.md)).
 
-- The standard library on macOS cannot make a SEQPACKET socket (`socket.socket(AF_UNIX, SOCK_SEQPACKET)` is `EPROTONOSUPPORT`)
-- A resolve's spelling is link-dir or link-file only, so with a long file name `resolve_for_bind` is `ENAMETOOLONG` (even at a length the stream `sockat.bind` reaches by thread-cwd; with Linux's procB spelling, past a file name of about 80 bytes; where exactly depends on the digits of the process id)
-- A socket you make yourself is of the standard type, so `getsockname()` returns the bind's spelling, not the original path. The connected side's `getpeername()` too returns the spelling the peer bound, not the one connected to. Keep the original path yourself
-- The spelling of `resolve_for_connect` is not needed after the connect, so `cleanup()` right away, whatever the outcome (both directions still work afterwards). Keep it while you connect to the same peer again
-- On the listening side, when the bind or the listen fails, `cleanup()` before raising the error, and once they went through, take `socket_file()`. Call `file.remove()` before closing the listener (`remove()` also cleans up the spelling's E)
+- The standard library on macOS cannot make a SEQPACKET socket (`EPROTONOSUPPORT`)
+- With a long file name, `resolve_for_bind` may be `ENAMETOOLONG` even at a length the stream `sockat.bind` reaches (a resolve uses only the routes whose spelling stays)
 
 ## sockat.ex
 
