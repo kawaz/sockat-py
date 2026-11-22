@@ -486,6 +486,19 @@ if _os.environ.get({PRIVATE_PLACE_ENV!r}):
 """Code that a child process runs first so that its public calls use the
 session's own place too."""
 
+NO_ROUTE_CODE = """
+from sockat import _absolute as _abs, _calls as _c
+from sockat._routes import RealPathTooLong as _TooLong
+def _no_route(*args, **kwargs):
+    raise _TooLong()
+_abs.fitting = lambda path: None
+_c.look_up = _no_route
+"""
+"""Code that makes a child's binds and resolves find no absolute candidate
+and no route usable for a relative path (as when its directory's realpath
+is too long to look up, a cwd past PATH_MAX): the relative path goes to the
+``socket`` module as it is (hub SPEC "相対パスを絶対パスにする" 5)."""
+
 PRELUDE = (
     f"""
 import json, os, socket, sys

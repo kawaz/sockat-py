@@ -15,6 +15,7 @@ import pytest
 from _support import (
     HAS_THREAD_ROUTE,
     NO_PROC,
+    NO_ROUTE_CODE,
     ROOT,
     TmpDirs,
     accept_ping,
@@ -141,27 +142,29 @@ def test_remove_of_a_short_path(tmp: TmpDirs) -> None:
     assert not os.path.lexists(p)
 
 
-# A relative path whose cwd changes between the start of the call and the
-# moment the file is remembered: the listener is closed and the error raised
-# (no errno), the file left; remove() could otherwise remove an unrelated
-# file of the same name under another cwd.
+# A relative path bound as it is (no absolute candidate and no route usable:
+# SPEC "相対パスを絶対パスにする" 5) whose cwd changes between the start of the
+# call and the moment the file is remembered: the listener is closed and the
+# error raised (no errno), the file left; remove() could otherwise remove an
+# unrelated file of the same name under another cwd.
 def test_a_relative_bind_with_the_cwd_changed(tmp: TmpDirs) -> None:
     a, other = tmp.new(), tmp.new()
     out = run_child(
-        """
-        import sockat.ex
-        from sockat import _socket_file
-        real = os.path.realpath
-        def moved(p, **kw):
-            os.chdir(ARGS["other"])
-            return real(p, **kw)
-        _socket_file.os.path.realpath = moved
-        try:
-            sockat.ex.bind("s.sock")
-            report(error="none")
-        except OSError as e:
-            report(error=type(e).__name__, errno=e.errno, route=e.route)
-        """,
+        NO_ROUTE_CODE
+        + """
+import sockat.ex
+from sockat import _socket_file
+real = os.path.realpath
+def moved(p, **kw):
+    os.chdir(ARGS["other"])
+    return real(p, **kw)
+_socket_file.os.path.realpath = moved
+try:
+    sockat.ex.bind("s.sock")
+    report(error="none")
+except OSError as e:
+    report(error=type(e).__name__, errno=e.errno, route=e.route)
+""",
         cwd=a,
         args={"other": os.fsdecode(other)},
     )
@@ -225,7 +228,6 @@ def test_resolve_for_bind(tmp: TmpDirs) -> None:
     assert rs.path == short
     assert rs.spelling == sockat.ex.Original()
     assert rs.route == "standard"
-    assert sockat.ex.resolve_for_bind("s.sock").spelling == sockat.ex.CwdRelative()
 
 
 # resolve_for_bind does not go to thread-cwd / at: a name only they reach is
@@ -331,24 +333,27 @@ def test_for_bind_socket_file(tmp: TmpDirs) -> None:
             assert fh.read() == b"replacement"
 
 
-# A relative spelling (a short relative path) whose cwd changed between the
+# A relative spelling (a short relative path given back as it is: no
+# absolute candidate and no route usable) whose cwd changed between the
 # resolve and socket_file() is refused (no errno): it would remember a file
 # under another cwd.
 def test_for_bind_socket_file_relative_cwd_changed(tmp: TmpDirs) -> None:
     a, other = tmp.new(), tmp.new()
     out = run_child(
-        """
-        import sockat.ex
-        r = sockat.ex.resolve_for_bind("s.sock")
-        s = socket.socket(socket.AF_UNIX)
-        s.bind(r.path)
-        os.chdir(ARGS["other"])
-        try:
-            r.socket_file()
-            report(error="none")
-        except OSError as e:
-            report(error=type(e).__name__, errno=e.errno)
-        """,
+        NO_ROUTE_CODE
+        + """
+import sockat.ex
+r = sockat.ex.resolve_for_bind("s.sock")
+assert r.spelling == sockat.ex.CwdRelative() and r.path == "s.sock"
+s = socket.socket(socket.AF_UNIX)
+s.bind(r.path)
+os.chdir(ARGS["other"])
+try:
+    r.socket_file()
+    report(error="none")
+except OSError as e:
+    report(error=type(e).__name__, errno=e.errno)
+""",
         cwd=a,
         args={"other": os.fsdecode(other)},
     )
@@ -472,7 +477,7 @@ def test_remove_follows_a_symlink_in_the_last_component(tmp: TmpDirs, long: bool
 # symlink in the last component to something else (made between the bind and
 # the remembering) is refused, so remove() could never remove it.
 def test_a_symlink_to_no_socket_is_not_remembered(tmp: TmpDirs) -> None:
-    from sockat._socket_file import Recorder
+    from sockat._socket_file import At, Recorder
 
     target = tmp.new() + b"/file"
     with open(target, "wb"):
@@ -480,7 +485,7 @@ def test_a_symlink_to_no_socket_is_not_remembered(tmp: TmpDirs) -> None:
     link = tmp.new() + b"/s.sock"
     os.symlink(target, link)
     with raises_errno(errno.ENOTSOCK):
-        Recorder(link).bound()
+        Recorder(link).bound(At(link))
 
 
 # Cleaning up E that fails (here: unlink refused) changes neither the call's
@@ -656,7 +661,7 @@ def test_a_file_put_in_place_of_the_socket_is_not_remembered(
 ) -> None:
     from sockat import _calls
     from sockat._place import LinkFile as LF
-    from sockat._socket_file import Recorder
+    from sockat._socket_file import At, Recorder
 
     if route == "standard":
         p = tmp.new() + b"/s.sock"
@@ -668,11 +673,11 @@ def test_a_file_put_in_place_of_the_socket_is_not_remembered(
     real_bound = Recorder.bound
     closed: list[bool] = []
 
-    def swapped(self: Recorder, made: bytes | None = None) -> None:
+    def swapped(self: Recorder, at: At) -> None:
         os.unlink(p)
         with open(p, "wb") as f:
             f.write(b"replacement")
-        real_bound(self, made)
+        real_bound(self, at)
 
     monkeypatch.setattr(Recorder, "bound", swapped)
     real_close = socket.socket.close
@@ -701,7 +706,7 @@ def _turn_on(monkeypatch: pytest.MonkeyPatch, when: str, turn: Callable[[], None
     built: E made, pointing where the path led then) or just after it (before
     the socket file is remembered)."""
     from sockat import _routes, _sys
-    from sockat._socket_file import Recorder
+    from sockat._socket_file import At, Recorder
 
     done: list[bool] = []
 
@@ -727,9 +732,9 @@ def _turn_on(monkeypatch: pytest.MonkeyPatch, when: str, turn: Callable[[], None
     else:
         real_bound = Recorder.bound
 
-        def bound(self: Recorder, made: bytes | None = None) -> None:
+        def bound(self: Recorder, at: At) -> None:
             once()
-            real_bound(self, made)
+            real_bound(self, at)
 
         monkeypatch.setattr(Recorder, "bound", bound)
 
@@ -740,7 +745,8 @@ def _turn_on(monkeypatch: pytest.MonkeyPatch, when: str, turn: Callable[[], None
 # the route was built, before or after the bind: the socket is made in a (E
 # points there), and remove() removes a/s.sock and leaves alone another
 # listener's socket at b/s.sock, which looking the path up again would have
-# remembered (it is a socket) and removed.
+# remembered (it is a socket) and removed. a's real path is long, so that the
+# path goes to the routes rather than to the standard by its real candidate.
 @pytest.mark.parametrize("when", ["before the bind", "after the bind"])
 @pytest.mark.parametrize("route", ["link-dir", *(["thread-cwd"] if HAS_THREAD_ROUTE else [])])
 def test_where_the_route_made_the_socket_is_remembered(
@@ -749,11 +755,12 @@ def test_where_the_route_made_the_socket_is_remembered(
     from sockat import _calls
     from sockat._place import LinkFile as LF
 
-    a, b = os.path.realpath(tmp.new()), os.path.realpath(tmp.new())
+    a, b = os.path.realpath(deep_dir(tmp.new(), 110)), os.path.realpath(tmp.new())
     sym = deep_dir(tmp.new(), 120) + b"/sym"
     os.symlink(a, sym)
     p = sym + b"/s.sock"
     assert len(p) > DIRECT_MAX
+    assert len(a + b"/s.sock") > DIRECT_MAX
     place = tmp.new() if route == "link-dir" else deep_dir(tmp.new(), 90)
     env = env_at(place, proc=NO_PROC, link_file=LF.NOT_TRIED)
 

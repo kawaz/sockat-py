@@ -82,7 +82,8 @@ def test_a_long_bind(tmp: TmpDirs) -> None:
     assert os.path.exists(p)
 
 
-# A short bind reports Original / CwdRelative and no base.
+# A short bind reports Original and no base: a short relative path is made
+# absolute (its real candidate) and goes to the standard as that.
 def test_a_short_bind(tmp: TmpDirs) -> None:
     d = tmp.new()
     code, stdout = run_cli({"op": "bind", "path": "s.sock"}, cwd=d)
@@ -92,7 +93,7 @@ def test_a_short_bind(tmp: TmpDirs) -> None:
         "error": None,
         "route": "standard",
         "base": None,
-        "spelling": {"kind": "CwdRelative"},
+        "spelling": {"kind": "Original"},
         "skipped": [],
     }
 

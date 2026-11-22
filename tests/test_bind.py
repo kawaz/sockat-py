@@ -562,12 +562,12 @@ def test_the_reason_keeps_an_occupied_b_when_the_next_is_too_long(tmp: TmpDirs) 
 def test_link_file_told_at_run_time_keeps_failures_after_the_bind(
     tmp: TmpDirs, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from sockat._socket_file import Recorder
+    from sockat._socket_file import At, Recorder
 
     env = env_at(tmp.new(), link_file=LinkFile.TOLD_AT_RUN_TIME)
     p = long_path(tmp.new(), name=b"n" * 100)
 
-    def refuse(self: Recorder, made: bytes | None = None) -> None:
+    def refuse(self: Recorder, at: At) -> None:
         raise OSError(errno.ENOTSOCK, "refused for the test")
 
     monkeypatch.setattr(Recorder, "bound", refuse)
