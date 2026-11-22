@@ -459,9 +459,9 @@ def _outcome(call):
     except OSError as e:
         return errno.errorcode.get(e.errno, str(e.errno))
     return "ok (%d bytes)" % len(got)
-seen = "%s: PATH_MAX %d, cwd %d bytes: getcwd %s, realpath('.') %s, os.getcwdb() %s" % (
+seen = "%s: PATH_MAX %d, cwd %d bytes: getcwd %s, realpath('.') %s, os.getcwdb() %s; memory cap: %s" % (
     os.uname().sysname, _limit, _length, _outcome(_sys.getcwd), _outcome(lambda: _absolute.realpath(b".")),
-    "not called" if _sys.IS_ILLUMOS else _outcome(os.getcwdb))
+    "not called" if _sys.IS_ILLUMOS else _outcome(os.getcwdb), _g_cap_note)
 """
 )
 """Code that moves a child into a cwd past PATH_MAX (made a component at a

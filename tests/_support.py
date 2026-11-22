@@ -496,11 +496,13 @@ def _g_hook(kind, value, tb):
     text = "Traceback (frames only):\\n" + "\\n".join(frames) + "\\n%s: %s\\n" % (kind.__name__, value)
     _g_os.write(2, text.encode("utf-8", "replace"))
 _g_sys.excepthook = _g_hook
+_g_cap_note = "no resource module"
 try:
     import resource as _g_resource
 except ImportError:
     _g_resource = None
 if _g_resource is not None:
+    _g_refused = []
     for _g_name in ("RLIMIT_AS", "RLIMIT_VMEM", "RLIMIT_DATA"):
         _g_which = getattr(_g_resource, _g_name, None)
         if _g_which is None:
@@ -509,12 +511,18 @@ if _g_resource is not None:
             _g_soft, _g_hard = _g_resource.getrlimit(_g_which)
             _g_cap = 1 << 30
             if _g_hard != _g_resource.RLIM_INFINITY and _g_hard <= _g_cap:
+                _g_cap_note = "%s already %d" % (_g_name, _g_resource.getrlimit(_g_which)[0])
                 break
             _g_resource.setrlimit(_g_which, (_g_cap, _g_hard))
-            if _g_resource.getrlimit(_g_which)[0] <= _g_cap:
+            _g_now = _g_resource.getrlimit(_g_which)[0]
+            if _g_now <= _g_cap:
+                _g_cap_note = "%s %d" % (_g_name, _g_now)
                 break
-        except (ValueError, OSError):
-            continue
+            _g_refused.append("%s: still %d" % (_g_name, _g_now))
+        except (ValueError, OSError) as _g_e:
+            _g_refused.append("%s: %s %s" % (_g_name, type(_g_e).__name__, _g_e))
+    else:
+        _g_cap_note = "none lowered (%s)" % "; ".join(_g_refused)
 """
 """Code a child runs before it goes into a cwd past PATH_MAX, so that nothing
 there reads the cwd with CPython's ``os.getcwd`` (on illumos, past the first
@@ -526,7 +534,8 @@ with ``os.getcwd``): the frames' files and lines and the exception. The
 memory is capped at 1 GiB with the first of ``RLIMIT_AS``, ``RLIMIT_VMEM``,
 ``RLIMIT_DATA`` the system has and lowers when asked (one already at 1 GiB or
 less is left as it is; macOS refuses both of its own with ``ValueError``, and the
-child runs uncapped there), so that a read that does slip through ends in
+child runs uncapped there; what happened is in ``_g_cap_note``), so that a
+read that does slip through ends in
 ``MemoryError`` soon rather than using up the machine's memory. On illumos
 the cap is known to work: OmniOS r151060 with Python 3.13.16, a child capped
 at 512 MiB in this order ended in ``MemoryError`` after 54 seconds (the
