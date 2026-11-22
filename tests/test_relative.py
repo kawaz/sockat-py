@@ -432,3 +432,103 @@ def test_options_base_is_checked_only_for_the_routes(tmp: TmpDirs) -> None:
         args={"bad": os.fsdecode(bad)},
     )
     assert out == {**out, "error": errno.EPERM, "route": None}
+
+
+DEEP_CWD_CODE = """
+import errno, os, tempfile
+_limit = os.pathconf("/", "PC_PATH_MAX")
+_root = tempfile.mkdtemp(prefix="spt-deep-", dir="/tmp")
+os.chdir(_root)
+_length = len(_root)
+while _length <= _limit:
+    os.mkdir("d" * 200)
+    os.chdir("d" * 200)
+    _length += 201
+def _outcome(call):
+    try:
+        got = call()
+    except OSError as e:
+        return errno.errorcode.get(e.errno, str(e.errno))
+    return "ok (%d bytes)" % len(got)
+seen = "PATH_MAX %d, cwd %d bytes: os.getcwdb() %s, os.path.realpath('.') %s" % (
+    _limit, _length, _outcome(os.getcwdb), _outcome(lambda: os.path.realpath(".", strict=True)))
+"""
+"""Code that moves a child into a cwd past PATH_MAX (made a component at a
+time, relative to the one before) and notes in ``seen`` what
+``os.getcwdb`` and ``os.path.realpath`` give there (an errno, or success)."""
+
+
+# In a cwd past PATH_MAX, a short relative path binds as the standard binds it
+# (SPEC "相対パスを絶対パスにする" 5): no absolute candidate is short enough, the
+# routes cannot point E at a directory that long, and the relative path goes
+# to the standard as it is: route standard, CwdRelative, standard not in
+# skipped (where the realpath itself could not be had for its length, nothing
+# is skipped). The resolve gives the relative path back the same way. What
+# os.getcwdb / os.path.realpath give there differs by system (libc, Python);
+# it is printed so that a CI log (the BSDs, illumos) tells.
+def test_a_short_relative_path_in_a_cwd_past_path_max(tmp: TmpDirs, capsys: pytest.CaptureFixture[str]) -> None:
+    out = run_child(
+        DEEP_CWD_CODE
+        + """
+import socket, sockat, sockat.ex
+from sockat import _calls
+from sockat._spelling import Trail
+trail = Trail()
+done, _ = _calls.bind(b"s.sock", trail=trail)
+c = sockat.connect("s.sock")
+r = sockat.ex.resolve_for_bind("r.sock")
+report(
+    seen=seen,
+    route=done.route,
+    spelling=type(done.spelling).__name__,
+    skipped=[s.name for s in trail.skipped],
+    here=os.path.exists("s.sock"),
+    resolved=[r.path, type(r.spelling).__name__, r.route],
+)
+""",
+    )
+    with capsys.disabled():
+        print(f"\n[deep cwd] {out['seen']}")
+    assert out["route"] == "standard"
+    assert out["spelling"] == "CwdRelative"
+    skipped = out["skipped"]
+    assert isinstance(skipped, list)
+    assert "standard" not in skipped
+    assert out["here"] is True
+    assert out["resolved"] == ["r.sock", "CwdRelative", "standard"]
+
+
+# A relative path whose socket's directory cannot be resolved for its length
+# (ENAMETOOLONG, or ERANGE as macOS's realpath(3) answers in a cwd past
+# PATH_MAX) is not an error: no route is tried, and the path goes on as in 5
+# with nothing skipped: a short one to the standard as it is (CwdRelative),
+# a long one ENAMETOOLONG with no route. Forced here with a realpath that
+# fails so (Python's own resolves such a cwd).
+@pytest.mark.parametrize("code", [errno.ENAMETOOLONG, errno.ERANGE])
+def test_a_realpath_too_long_goes_on_without_routes(tmp: TmpDirs, code: int) -> None:
+    deep = long_real_dir(tmp)
+    rel = os.fsdecode(os.path.relpath(long_path(deep, total=len(deep) + 150), deep))
+    assert len(rel) > DIRECT_MAX
+    out = run_child(
+        """
+        import errno
+        import sockat.ex
+        real = os.path.realpath
+        def refused(p, **kw):
+            if not os.fsencode(p).startswith(b"/"):
+                raise OSError(ARGS["code"], os.strerror(ARGS["code"]))
+            return real(p, **kw)
+        os.path.realpath = refused
+        b = sockat.ex.resolve_for_bind("s.sock")
+        try:
+            sockat.ex.bind(ARGS["rel"])
+            long = None
+        except OSError as e:
+            long = [errno.errorcode[e.errno], e.route, list(e.skipped)]
+        report(short=[type(b.spelling).__name__, b.route, list(b.skipped)], long=long)
+        """,
+        cwd=deep,
+        args={"code": code, "rel": rel},
+    )
+    assert out["short"] == ["CwdRelative", "standard", []]
+    assert out["long"] == ["ENAMETOOLONG", None, []]
