@@ -527,7 +527,8 @@ if _g_resource is not None:
 """Code a child runs before it goes into a cwd past PATH_MAX, so that nothing
 there reads the cwd with CPython's ``os.getcwd`` (on illumos, past the first
 read after the chdir, it reallocates its buffer until memory runs out: hub
-docs/research/2026-11-22-cpython-getcwd-over-path-max.md). An uncaught
+docs/research/2026-11-22-cpython-getcwd-over-path-max.md, reported as
+https://github.com/python/cpython/issues/162441). An uncaught
 exception is written with no import (the default display imports
 ``traceback`` from 3.13 on, and importing looks up ``sys.path``'s ``''``
 with ``os.getcwd``): the frames' files and lines and the exception. The
