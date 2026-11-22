@@ -486,6 +486,36 @@ if _os.environ.get({PRIVATE_PLACE_ENV!r}):
 """Code that a child process runs first so that its public calls use the
 session's own place too."""
 
+DEEP_CWD_GUARD_CODE = """
+import os as _g_os, sys as _g_sys
+def _g_hook(kind, value, tb):
+    frames = []
+    while tb is not None:
+        frames.append("  %s:%d" % (tb.tb_frame.f_code.co_filename, tb.tb_lineno))
+        tb = tb.tb_next
+    text = "Traceback (frames only):\\n" + "\\n".join(frames) + "\\n%s: %s\\n" % (kind.__name__, value)
+    _g_os.write(2, text.encode("utf-8", "replace"))
+_g_sys.excepthook = _g_hook
+try:
+    import resource as _g_resource
+    _g_soft, _g_hard = _g_resource.getrlimit(_g_resource.RLIMIT_AS)
+    _g_cap = 1 << 30
+    if _g_hard == _g_resource.RLIM_INFINITY or _g_hard > _g_cap:
+        _g_resource.setrlimit(_g_resource.RLIMIT_AS, (_g_cap, _g_hard))
+except (ImportError, AttributeError, ValueError, OSError):
+    pass
+"""
+"""Code a child runs before it goes into a cwd past PATH_MAX, so that nothing
+there reads the cwd with CPython's ``os.getcwd`` (on illumos, past the first
+read after the chdir, it reallocates its buffer until memory runs out: hub
+docs/research/2026-11-22-cpython-getcwd-over-path-max.md). An uncaught
+exception is written with no import (the default display imports
+``traceback`` from 3.13 on, and importing looks up ``sys.path``'s ``''``
+with ``os.getcwd``): the frames' files and lines and the exception. The
+address space is capped at 1 GiB where the system lets it be, so that a read
+that does slip through ends in ``MemoryError`` soon rather than using up the
+machine's memory."""
+
 NO_ROUTE_CODE = """
 from sockat import _absolute as _abs, _calls as _c
 from sockat._routes import RealPathTooLong as _TooLong

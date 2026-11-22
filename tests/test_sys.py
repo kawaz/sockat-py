@@ -8,10 +8,12 @@ import os
 import socket
 import struct
 import sys
+import textwrap
 import threading
 
 import pytest
 from _support import (
+    DEEP_CWD_GUARD_CODE,
     TmpDirs,
     accept_ping,
     dir_id,
@@ -160,10 +162,14 @@ def test_a_thread_gets_a_cwd_of_its_own(tmp: TmpDirs) -> None:
 # rather than growing the buffer as os.getcwd does. In a child (the cwd
 # changes); everything it uses is imported before it goes deep (importing
 # reads the cwd), and in the deep cwd only _sys.getcwd reads it: os.getcwdb
-# does not return there on illumos, and the depth is counted, not read.
+# does not return there on illumos, and the depth is counted, not read. The
+# child is guarded (DEEP_CWD_GUARD_CODE) so that a failure there is written
+# without reading the cwd.
 def test_the_cwd_is_read_up_to_path_max(tmp: TmpDirs) -> None:
     out = run_child(
-        """
+        DEEP_CWD_GUARD_CODE
+        + textwrap.dedent(
+            """
         import errno, tempfile
         from sockat import _sys
         native = _sys.IS_ILLUMOS
@@ -189,7 +195,8 @@ def test_the_cwd_is_read_up_to_path_max(tmp: TmpDirs) -> None:
         _sys.IS_ILLUMOS = True
         got["illumos deep"] = outcome()
         report(**got)
-        """,
+        """
+        ),
         cwd=tmp.new(),
     )
     native = _sys.IS_ILLUMOS
