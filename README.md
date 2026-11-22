@@ -39,7 +39,7 @@ It runs on Python 3.11 or later and depends on no other package.
 ## More
 
 - [User manual](./docs/MANUAL.md)
-- [Reference](./docs/MANUAL.md#functions)
+- [Reference](./docs/REFERENCE.md)
 - [How it works](https://github.com/kawaz/sockat/blob/main/pages/technical.md)
 
 ## License

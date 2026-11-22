@@ -39,7 +39,7 @@ Python 3.11 以上で動き、他のパッケージに依存しません。
 ## もっと詳しく
 
 - [利用マニュアル](./docs/MANUAL-ja.md)
-- [リファレンス](./docs/MANUAL-ja.md#関数の一覧)
+- [リファレンス](./docs/REFERENCE-ja.md)
 - [技術説明](https://github.com/kawaz/sockat/blob/main/pages/technical-ja.md)
 
 ## ライセンス

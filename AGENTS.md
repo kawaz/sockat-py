@@ -7,7 +7,7 @@ sockat-py は、`sun_path` の上限を超えるパスでも Unix domain socket 
 ## 必読
 
 - [docs/decisions/DR-0001](docs/decisions/DR-0001-python-port-design.md) — Python 版で作る経路、置き場 B・D・E の作り方、公開 API、標準に揃える点、エラーの型 (今の設計の正本はハブの [DR-0017](https://github.com/kawaz/sockat/blob/main/docs/decisions/DR-0017-resolve-through-persistent-base.md))
-- [docs/MANUAL-ja.md](docs/MANUAL-ja.md) — 利用者に約束している振る舞い (標準と違う点、エラー)
+- [docs/REFERENCE-ja.md](docs/REFERENCE-ja.md) — 利用者に約束している振る舞い (標準と違う点、エラー)。使い方は [docs/MANUAL-ja.md](docs/MANUAL-ja.md) から場面ごとのページ (`docs/manual/`) へ
 
 ## 構成
 
@@ -26,7 +26,7 @@ sockat-py は、`sun_path` の上限を超えるパスでも Unix domain socket 
 | `src/sockat/_path.py` | パスの分割・相対パスの計算 (ファイルシステムに触らない) |
 | `src/sockat/_sys.py` | ctypes の境界。`socket` モジュールで呼べないシステムコールはここだけ |
 | `conformance/cli.py` | ハブの適合試験の試験用 CLI (配布物に入らない) |
-| `tests/` | 経路を強制する試験 (置き場は試験のディレクトリ) と公開 API・asyncio・適合試験の CLI・MANUAL のコードの試験 |
+| `tests/` | 経路を強制する試験 (置き場は試験のディレクトリ) と公開 API・asyncio・適合試験の CLI・利用マニュアルとリファレンスのコードの試験 |
 
 ## 守ること
 
@@ -52,5 +52,5 @@ sockat-py は、`sun_path` の上限を超えるパスでも Unix domain socket 
 
 - jj colocate。commit は `jj commit -m "..." <files...>` でパスを指定する
 - push は `just push` だけ (lint・試験・翻訳ペアの鮮度・version の上げ忘れを検査してから push する)
-- README と docs/MANUAL は日本語版 (`*-ja.md`) が正本。英語版は日本語版を直した同じ変更で直す
+- README と docs の利用者向けの文書 (MANUAL・`manual/`・REFERENCE) は日本語版 (`*-ja.md`) が正本。英語版は日本語版を直した同じ変更で直す
 - `src/` を変えたら `just bump-version` で version を上げる。pyproject.toml の version が上がった push で release.yml が CI を通してから PyPI に publish し、その後に tag を打つ

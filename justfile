@@ -2,7 +2,7 @@
 #
 # version の正本は pyproject.toml の project.version で、push 時に
 # check-version-bumped が「src/ を変えたのに version が据え置き」を止める。
-# README / docs/MANUAL は ja が正本、en が翻訳先。push 時に
+# README / docs の利用者向けの文書は ja が正本、en が翻訳先。push 時に
 # check-outdated-translations が「en が ja より古い」を止める。
 # VCS 操作は bump-semver vcs に委譲して jj / git を透過にする。
 

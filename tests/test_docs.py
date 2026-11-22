@@ -1,22 +1,29 @@
-"""The code the manual shows for writing instead of the patterns not to use
-("使ってはいけない書き方" / "Patterns not to use"), read out of
-``docs/MANUAL-ja.md`` (the original) and ``docs/MANUAL.md`` and run as it is
-written (hub SPEC: the recommended code is run as a test). The code lives in
-the documents only, so what is run is what a reader copies.
+"""The code the documents show, read out of them and run as it is written
+(hub SPEC: the recommended code is run as a test). The code lives in the
+documents only, so what is run is what a reader copies. The Japanese
+documents are the originals; the English ones carry the same code, block for
+block.
 
-Each block runs in a child process of its own (it may change the cwd), with
-``path`` set to the socket's path: a path the block makes absolute itself
-(``os.path.join(os.getcwd(), path)``) is given relative to the child's cwd; any other
-is absolute and long (past every ``sun_path``). A
-file of the socket's name unrelated to it sits in the child's cwd. Every
-block must run through, leave no socket file at the path, and leave that
-unrelated file alone."""
+* The user manual's pages (``docs/manual/*.md``): every block, with ``path``
+  a long path (past every ``sun_path``), ``base`` a directory for
+  ``Options.base`` and ``handle`` an asyncio connection handler. A block
+  that binds nothing finds a listener already at ``path``; a block with
+  ``await`` runs in an event loop. Every block must run through.
+* The reference's code for writing instead of the patterns not to use
+  ("使ってはいけない書き方" / "Patterns not to use"): ``path`` is relative to
+  the child's cwd for a block that changes the cwd, otherwise absolute and
+  long, with a file of the socket's name unrelated to it in the child's cwd.
+  Every block must run through, leave no socket file at the path, and leave
+  that unrelated file alone.
+
+Each block runs in a child process of its own (it may change the cwd)."""
 
 from __future__ import annotations
 
 import os
 import subprocess
 import sys
+import textwrap
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -25,12 +32,14 @@ from _support import PRIVATE_PLACE_CODE, SRC_DIR, TESTS_DIR, TmpDirs, nest
 
 DOCS = TESTS_DIR.parent / "docs"
 
-SECTIONS = {
-    "MANUAL-ja.md": ("使ってはいけない書き方",),
-    "MANUAL.md": ("Patterns not to use",),
+PAGES = ("bind", "connect", "resolve", "datagram")
+"""The user manual's pages (``docs/manual/<page>-ja.md`` and ``<page>.md``)."""
+
+PATTERNS = {
+    "REFERENCE-ja.md": "使ってはいけない書き方",
+    "REFERENCE.md": "Patterns not to use",
 }
-"""The sections whose code is run, per document (the same sections, the
-Japanese one the original)."""
+"""The reference's section whose code is run, per document."""
 
 NAME = "server.sock"
 
@@ -49,55 +58,103 @@ class Block:
         return f"{self.doc}:{self.section}:{self.heading}"
 
 
-def blocks(doc: str) -> list[Block]:
-    """The ```python blocks of the sections :data:`SECTIONS` names in
-    ``doc``, each with the ``###`` heading it sits under. Blocks of other
-    languages are passed over."""
+def blocks(doc: str, section: str | None = None) -> list[Block]:
+    """The ```python blocks of ``doc`` (a path below ``docs/``), each with
+    the ``##`` and ``###`` headings it sits under; only those under the
+    ``##`` heading ``section`` when it is given. Blocks of other languages
+    are passed over."""
     found: list[Block] = []
-    section = heading = ""
+    current = heading = ""
     fence: str | None = None
     code: list[str] = []
     for line in (DOCS / doc).read_text(encoding="utf-8").splitlines():
         if fence is not None:
             if line.startswith("```"):
-                if fence == "python" and section in SECTIONS[doc]:
-                    found.append(Block(doc, section, heading, "\n".join(code) + "\n"))
+                if fence == "python" and section in (None, current):
+                    found.append(Block(doc, current, heading, "\n".join(code) + "\n"))
                 fence = None
             else:
                 code.append(line)
         elif line.startswith("```"):
             fence, code = line[3:].strip(), []
         elif line.startswith("## "):
-            section, heading = line[3:].strip(), ""
+            current, heading = line[3:].strip(), ""
         elif line.startswith("### "):
             heading = line[4:].strip()
     return found
 
 
-ALL = [b for doc in SECTIONS for b in blocks(doc)]
+MANUAL = [b for page in PAGES for doc in (f"manual/{page}-ja.md", f"manual/{page}.md") for b in blocks(doc)]
+REFERENCE = [b for doc, section in PATTERNS.items() for b in blocks(doc, section)]
 
 
-# Every section named carries code in both documents, and the English one
-# carries the same code as the Japanese original, block for block, so the
-# two cannot drift apart: what a reader of either copies is what is run.
+def _ids(found: list[Block]) -> list[str]:
+    """Test ids in ASCII (pytest escapes others): the document and the
+    block's number in it; the block's headings are in a failure's
+    message."""
+    out: list[str] = []
+    seen: dict[str, int] = {}
+    for b in found:
+        seen[b.doc] = seen.get(b.doc, 0) + 1
+        out.append(f"{b.doc}#{seen[b.doc]}")
+    return out
+
+
+# The English pages carry the same code as the Japanese originals, block for
+# block, so the two cannot drift apart: what a reader of either copies is
+# what is run. Every page has code, and so has the reference's section.
 def test_the_documents_carry_the_same_code() -> None:
-    ja, en = blocks("MANUAL-ja.md"), blocks("MANUAL.md")
-    for doc in SECTIONS:
-        assert {b.section for b in blocks(doc)} == set(SECTIONS[doc]), doc
-    assert len(ja) == len(en) == 8, (len(ja), len(en))
-    assert [b.code for b in ja] == [b.code for b in en]
+    for page in PAGES:
+        ja, en = blocks(f"manual/{page}-ja.md"), blocks(f"manual/{page}.md")
+        assert ja, page
+        assert [b.code for b in ja] == [b.code for b in en], page
+    ja_ref, en_ref = (blocks(doc, section) for doc, section in PATTERNS.items())
+    assert len(ja_ref) == len(en_ref) == 8, (len(ja_ref), len(en_ref))
+    assert [b.code for b in ja_ref] == [b.code for b in en_ref]
 
 
-IDS = [f"{doc}#{n}" for doc in SECTIONS for n in range(1, len(blocks(doc)) + 1)]
-"""Test ids in ASCII (pytest escapes others): the document and the block's
-number in it; the block's sections and heading are in a failure's
-message."""
+def _run(block: Block, script: str, cwd: bytes) -> None:
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join(filter(None, [str(SRC_DIR), env.get("PYTHONPATH")]))
+    out = subprocess.run(
+        [sys.executable, "-c", script], cwd=cwd, env=env, capture_output=True, text=True, check=False, timeout=60
+    )
+    assert out.returncode == 0, f"{block.id}\n--- code\n{block.code}--- stderr\n{out.stderr}"
 
 
-@pytest.mark.parametrize("block", ALL, ids=IDS)
-def test_the_code_runs(tmp: TmpDirs, block: Block) -> None:
+LISTENER_CODE = """
+import os as _os, socket as _socket, tempfile as _tempfile
+_short = _os.path.join(_tempfile.mkdtemp(prefix="spt-d-", dir="/tmp"), "l.sock")
+_listener = _socket.socket(_socket.AF_UNIX)
+_listener.bind(_short)
+_listener.listen(16)
+_os.rename(_short, path)
+"""
+"""A listener at ``path`` (bound under a short name by the standard and
+renamed), for a block that only connects."""
+
+
+@pytest.mark.parametrize("block", MANUAL, ids=_ids(MANUAL))
+def test_the_manual_code_runs(tmp: TmpDirs, block: Block) -> None:
+    path = nest(tmp.new(), 300, NAME.encode())
+    script = PRIVATE_PLACE_CODE + f"path = {os.fsdecode(path)!r}\nbase = {os.fsdecode(tmp.new() + b'/b')!r}\n"
+    if "bind(" not in block.code:
+        script += LISTENER_CODE
+    if "await " in block.code:
+        script += (
+            "import asyncio\n"
+            "async def handle(reader, writer):\n    writer.close()\n"
+            "async def _main():\n" + textwrap.indent(block.code, "    ") + "asyncio.run(_main())\n"
+        )
+    else:
+        script += block.code
+    _run(block, script, tmp.new())
+
+
+@pytest.mark.parametrize("block", REFERENCE, ids=_ids(REFERENCE))
+def test_the_reference_code_runs(tmp: TmpDirs, block: Block) -> None:
     cwd = tmp.new()
-    if "os.getcwd()" in block.code:
+    if "os.chdir" in block.code:
         given: bytes = NAME.encode()
         target = cwd + b"/" + given
     else:
@@ -105,13 +162,7 @@ def test_the_code_runs(tmp: TmpDirs, block: Block) -> None:
         given = target
         with open(cwd + b"/" + NAME.encode(), "wb") as f:
             f.write(UNRELATED)
-    script = PRIVATE_PLACE_CODE + f"path = {os.fsdecode(given)!r}\n" + block.code
-    env = dict(os.environ)
-    env["PYTHONPATH"] = os.pathsep.join(filter(None, [str(SRC_DIR), env.get("PYTHONPATH")]))
-    out = subprocess.run(
-        [sys.executable, "-c", script], cwd=cwd, env=env, capture_output=True, text=True, check=False, timeout=60
-    )
-    assert out.returncode == 0, f"{block.id}\n--- code\n{block.code}--- stderr\n{out.stderr}"
+    _run(block, PRIVATE_PLACE_CODE + f"path = {os.fsdecode(given)!r}\n" + block.code, cwd)
     assert not os.path.lexists(target), f"{block.id}: the socket file is left at the path"
     if given == target:
         assert (Path(os.fsdecode(cwd)) / NAME).read_bytes() == UNRELATED, f"{block.id}: the unrelated file was touched"
