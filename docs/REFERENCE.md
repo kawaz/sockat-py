@@ -2,11 +2,11 @@
 
 > English | [日本語](./REFERENCE-ja.md)
 
-sockat-py's names and types in Python, the Python form of the patterns not to use, and notes specific to Python. How to use it is in the [user manual](./MANUAL.md). The language-independent behaviour (routes, how relative paths are handled, what stays in the base, clean up, what differs from the standard for a long path, the error situations) is defined by [the sockat specification](https://github.com/kawaz/sockat/blob/main/docs/SPEC.md), which this reference links to instead of copying. How the routes are built is in [SPEC-routes](https://github.com/kawaz/sockat/blob/main/docs/SPEC-routes.md), how far they reach in [the reach table](https://github.com/kawaz/sockat/blob/main/pages/reach/README.md), and the design decisions of the Python version in [DR-0001](./decisions/DR-0001-python-port-design.md).
+sockat-py's names and types in Python, the Python form of the patterns not to use, and notes specific to Python. How to use it is in the [user manual](./MANUAL.md). The language-independent behaviour (routes, how relative paths are handled, what stays in the base, clean up, what differs from the standard library for a long path, the error situations) is defined by [the sockat specification](https://github.com/kawaz/sockat/blob/main/docs/SPEC.md), which this reference links to instead of copying. How the routes are built is in [SPEC-routes](https://github.com/kawaz/sockat/blob/main/docs/SPEC-routes.md), how far they reach in [the reach table](https://github.com/kawaz/sockat/blob/main/pages/reach/README.md), and the design decisions of the Python version in [DR-0001](./decisions/DR-0001-python-port-design.md).
 
 ## Functions
 
-| Function | Standard code it replaces | Returns |
+| Function | Standard library code it replaces | Returns |
 |---|---|---|
 | `sockat.bind(path)` | `socket()` → `bind(path)` → `listen()` | a listening `socket.socket` |
 | `sockat.connect(path)` | `socket()` → `connect(path)` | `socket.socket` |
@@ -27,12 +27,12 @@ sockat-py's names and types in Python, the Python form of the patterns not to us
 
 The behaviour is in the specification's "[Non-blocking connect](https://github.com/kawaz/sockat/blob/main/docs/SPEC.md#non-blocking-connect)". In Python:
 
-- `connect` follows the value of `settimeout`, the same as the standard `connect`
+- `connect` follows the value of `settimeout`, the same as the standard library's `connect`
 - `connect_nonblocking` fails without waiting when the backlog is full, with `BlockingIOError` on Linux and `ConnectionRefusedError` on macOS
 
 ## sockat.datagram
 
-Of the standard DGRAM calls, it mirrors only the functions that take a path, and `unbound`, which is used together with them ([the specification's "Functions"](https://github.com/kawaz/sockat/blob/main/docs/SPEC.md#functions)). How to use it is in [Using DGRAM](./manual/datagram.md).
+Of the standard library's DGRAM calls, it mirrors only the functions that take a path, and `unbound`, which is used together with them ([the specification's "Functions"](https://github.com/kawaz/sockat/blob/main/docs/SPEC.md#functions)). How to use it is in [Using DGRAM](./manual/datagram.md).
 
 - `connect` tries the routes with the socket you pass. It does not close the socket on failure (closing it is up to the user)
 - What `unbound()` returns is a subclass of `socket.socket` ([Notes specific to Python](#notes-specific-to-python))
@@ -99,7 +99,7 @@ match bound.spelling:
 `Bound.file` is a `SocketFile`, which has `remove()` and `cleanup()`. What they do and the extent of what is promised are in the specification's "[Cleanup](https://github.com/kawaz/sockat/blob/main/docs/SPEC.md#cleanup)" (**call `remove()` before closing the listener**). In Python:
 
 - A failure is returned as an `OSError` (the subclass for its errno). When both fail in `remove()`, the error on the file side is returned, and the error of `cleanup()` is added to that exception as a note (`add_note`)
-- For `sockat.ex.bind` of a relative path given to the standard as it is (`CwdRelative`), if the cwd differs between the start of the call and after recording, an `OSError` without errno
+- For `sockat.ex.bind` of a relative path given to the standard library as it is (`CwdRelative`), if the cwd differs between the start of the call and after recording, an `OSError` without errno
 - The default `sockat.bind` returns no `file`. What stays, and how a long-lived process cleans up, is in the specification's "[What stays in the base](https://github.com/kawaz/sockat/blob/main/docs/SPEC.md#what-stays-in-the-base)"
 
 ### Diagnostics and errors
@@ -122,23 +122,23 @@ The behaviour is in the specification's "[resolve](https://github.com/kawaz/sock
 
 ## Relative paths
 
-bind and resolve make a relative path absolute before handling it, and connect passes it on as it is. The steps and what differs from the standard are in the specification's "[Making a relative path absolute](https://github.com/kawaz/sockat/blob/main/docs/SPEC.md#making-a-relative-path-absolute)". In Python:
+bind and resolve make a relative path absolute before handling it, and connect passes it on as it is. The steps and what differs from the standard library are in the specification's "[Making a relative path absolute](https://github.com/kawaz/sockat/blob/main/docs/SPEC.md#making-a-relative-path-absolute)". In Python:
 
-- When an absolute candidate goes to the standard, a plain `socket.socket` is returned. `getsockname()` is the candidate's spelling the kernel returns (an absolute path)
+- When an absolute candidate goes to the standard library, a plain `socket.socket` is returned. `getsockname()` is the candidate's spelling the kernel returns (an absolute path)
 - When the routes are gone to, the subclass that replaces the address is returned, and `getsockname()` returns the form of the real candidate (the realpath of the socket's directory and the file name)
-- Only when no route can be used and the relative path goes to the standard as it is (`CwdRelative`) does `getsockname()` return the relative path given
+- Only when no route can be used and the relative path goes to the standard library as it is (`CwdRelative`) does `getsockname()` return the relative path given
 - `$PWD` is read from the environment on each call
 
 ## Notes specific to Python
 
-- **Addresses return the original path**: for a long path, the address the kernel returns is the spelling of the bind (the specification's "[What differs from the standard for a long path](https://github.com/kawaz/sockat/blob/main/docs/SPEC.md#what-differs-from-the-standard-for-a-long-path)"). The sockets sockat returns are a subclass of `socket.socket` that replaces `getsockname()` of a listener (and of an accepted socket) and `getpeername()` of a connected socket with the original path (also when a long absolute path goes to the standard as its real candidate; for a bind of a relative path, see [Relative paths](#relative-paths)). Where a standard socket fails (`EBADF` after closing, `ENOTCONN` for `getpeername` of a listener), it fails the same way. For a short path it is a plain `socket.socket` ([DR-0003](./decisions/DR-0003-report-the-given-path.md))
+- **Addresses return the original path**: for a long path, the address the kernel returns is the spelling of the bind (the specification's "[What differs from the standard library for a long path](https://github.com/kawaz/sockat/blob/main/docs/SPEC.md#what-differs-from-the-standard-library-for-a-long-path)"). The sockets sockat returns are a subclass of `socket.socket` that replaces `getsockname()` of a listener (and of an accepted socket) and `getpeername()` of a connected socket with the original path (also when a long absolute path goes to the standard as its real candidate; for a bind of a relative path, see [Relative paths](#relative-paths)). Where a standard socket fails (`EBADF` after closing, `ENOTCONN` for `getpeername` of a listener), it fails the same way. For a short path it is a plain `socket.socket` ([DR-0003](./decisions/DR-0003-report-the-given-path.md))
   - `isinstance(x, socket.socket)` is true, but for a long path `type(x) is socket.socket` is false
-  - A socket made again from the fd with `socket.fromfd` and the like is of the standard type, so it returns the kernel's spelling
+  - A socket made again from the fd with `socket.fromfd` and the like is of the standard library's type, so it returns the kernel's spelling
 - **`sockat.datagram.unbound()` returns the subclass**: so that `getpeername()` gives the original path when it is later connected to a long path with `sockat.datagram.connect` (it is not bound, so `getsockname()` stays the kernel's value). When it is reconnected to a short path, `getpeername()` goes back to the kernel's value
 - **asyncio clean up**: from Python 3.13 on, `asyncio.start_unix_server(sock=)` removes the file of the listener's `getsockname()` when the server is closed (`cleanup_socket`). sockat's listener returns the original path, so the socket file at the original path is removed, the same as for a short path ([asyncio](#asyncio))
-- **`sockat.ex` is a separate module**: the `_ex` functions are placed in `sockat.ex`, which `import sockat` does not load. Importing as `from sockat.ex import connect` mixes them up with the default `sockat.connect` and the standard `socket.socket.connect_ex`
+- **`sockat.ex` is a separate module**: the `_ex` functions are placed in `sockat.ex`, which `import sockat` does not load. Importing as `from sockat.ex import connect` mixes them up with the default `sockat.connect` and the standard library's `socket.socket.connect_ex`
 - **Closing the listener does not remove the file**: Python's standard library does not remove the socket file when the listener is closed. sockat does not remove it either (for a listener of `sockat.ex.bind`, even for a short path, only `file.remove()` removes it)
-- **The standard `socket` silently cuts a path at a NUL**: `socket.bind("/tmp/a\0b")` binds at `/tmp/a` (a `str` or `bytes` alike; seen with CPython 3.11 on macOS and Linux). sockat makes a NUL anywhere but at the start an argument error (`ValueError`) at any length (a leading NUL on Linux, the abstract namespace, goes to the standard as is)
+- **The standard library's `socket` silently cuts a path at a NUL**: `socket.bind("/tmp/a\0b")` binds at `/tmp/a` (a `str` or `bytes` alike; seen with CPython 3.11 on macOS and Linux). sockat makes a NUL anywhere but at the start an argument error (`ValueError`) at any length (a leading NUL on Linux, the abstract namespace, goes to the standard as is)
 - **`os.path.abspath`, `normpath` and `relpath` fold `..` lexically**: for `a/sym/../s.sock` (sym is a symlink), the kernel takes the parent of the symlink's target, but these functions make it `a/s.sock`. To make a relative path absolute yourself, use `os.path.join(os.getcwd(), path)`. sockat itself looks up the directory with `os.stat` and `os.path.realpath` (which resolves symlinks before handling `..`), and when it folds a spelling from `$PWD` lexically, it uses it only after checking that the folded directory is the one meant, so it points to the same place as the kernel
 
 ## Patterns not to use
@@ -284,11 +284,11 @@ The errno for each situation is in the specification's "[Errors](https://github.
 |---|---|
 | An OS error | an `OSError` with errno (the subclass for that errno, such as `FileNotFoundError`, `NotADirectoryError`, `ConnectionRefusedError`, `BlockingIOError`, `PermissionError`) |
 | A wrong argument (an empty path, a NUL other than at the start, a long path not ending in a name, a malformed `Options.base`) | `ValueError` |
-| A general error (the cwd changed during relative, or during `sockat.ex.bind` of a relative path given to the standard as it is) | an `OSError` without errno |
+| A general error (the cwd changed during relative, or during `sockat.ex.bind` of a relative path given to the standard library as it is) | an `OSError` without errno |
 
 ## asyncio
 
-What is returned is the standard `socket.socket`, so it can be passed as it is to APIs that take `sock=` (how to use it is in [Listening](./manual/bind.md) and [Connecting](./manual/connect.md)).
+What is returned is the standard library's `socket.socket`, so it can be passed as it is to APIs that take `sock=` (how to use it is in [Listening](./manual/bind.md) and [Connecting](./manual/connect.md)).
 
 - Works the same as for a short path without extra arguments. From Python 3.13 on, asyncio removes the socket file at the original path when the server is closed. asyncio of 3.11 / 3.12 does not remove it (the same as the standard library)
 - The transport's `get_extra_info('sockname')` (server side) / `get_extra_info('peername')` (client side) are also the original path

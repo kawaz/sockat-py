@@ -2,7 +2,7 @@
 
 > English | [日本語](./resolve-ja.md)
 
-Keep your own way of binding / connecting (the standard `socket`, another library), and make only the path a spelling that fits the limit.
+Keep your own way of binding / connecting (the standard library's `socket`, another library), and make only the path a spelling that fits the limit.
 
 ## Connect
 

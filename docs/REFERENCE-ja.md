@@ -2,11 +2,11 @@
 
 > [English](./REFERENCE.md) | 日本語
 
-sockat-py の Python での名前と型、使ってはいけない書き方の Python での形、Python に固有の注意。使い方は [利用マニュアル](./MANUAL-ja.md)。言語によらない振る舞い (経路、相対パスの扱い、置き場に残る物、片付け、長いパスで標準と違う点、エラーの状況) は [sockat の仕様](https://github.com/kawaz/sockat/blob/main/docs/SPEC-ja.md) が正本で、ここには写さずリンクする。経路の作り方は [SPEC-routes](https://github.com/kawaz/sockat/blob/main/docs/SPEC-routes-ja.md)、どこまで届くかは[届く範囲の表](https://github.com/kawaz/sockat/blob/main/pages/reach/README-ja.md)、Python 版の設計の判断は [DR-0001](./decisions/DR-0001-python-port-design.md)。
+sockat-py の Python での名前と型、使ってはいけない書き方の Python での形、Python に固有の注意。使い方は [利用マニュアル](./MANUAL-ja.md)。言語によらない振る舞い (経路、相対パスの扱い、置き場に残る物、片付け、長いパスで標準ライブラリと違う点、エラーの状況) は [sockat の仕様](https://github.com/kawaz/sockat/blob/main/docs/SPEC-ja.md) が正本で、ここには写さずリンクする。経路の作り方は [SPEC-routes](https://github.com/kawaz/sockat/blob/main/docs/SPEC-routes-ja.md)、どこまで届くかは[届く範囲の表](https://github.com/kawaz/sockat/blob/main/pages/reach/README-ja.md)、Python 版の設計の判断は [DR-0001](./decisions/DR-0001-python-port-design.md)。
 
 ## 関数の一覧
 
-| 関数 | 置き換える標準の書き方 | 戻り値 |
+| 関数 | 置き換える標準ライブラリの書き方 | 戻り値 |
 |---|---|---|
 | `sockat.bind(path)` | `socket()` → `bind(path)` → `listen()` | listen 済みの `socket.socket` |
 | `sockat.connect(path)` | `socket()` → `connect(path)` | `socket.socket` |
@@ -15,24 +15,24 @@ sockat-py の Python での名前と型、使ってはいけない書き方の P
 | `sockat.datagram.unbound()` | `socket(AF_UNIX, SOCK_DGRAM)` | `socket.socket` |
 | `sockat.datagram.connect(sock, path)` | `sock.connect(path)` | `None` |
 | `sockat.ex.bind(path, options=...)` など | 同じ + 綴りの性質・片付け・診断 | `Bound` / `Connected` / `Report` ([sockat.ex](#sockatex)) |
-| `sockat.ex.resolve_for_bind(path, options=...)` / `resolve_for_connect` | 標準に自分で渡す短い綴り | `ForBind` / `ForConnect` ([resolve](#resolve)) |
+| `sockat.ex.resolve_for_bind(path, options=...)` / `resolve_for_connect` | 標準ライブラリに自分で渡す短い綴り | `ForBind` / `ForConnect` ([resolve](#resolve)) |
 | `sockat.ex.sweep()` / `sweep_base(path)` | — | `None` ([sweep](#sweep)) |
 
 - `path` は `str` / `bytes` / `os.PathLike`
 - Python 3.11 以上で動き、他のパッケージに依存しない (純 Python)
-- どのソケットも `socket.socket(AF_UNIX, SOCK_STREAM)` (DGRAM は `SOCK_DGRAM`) で作るので、標準と同じ設定になる (close-on-exec、`socket.setdefaulttimeout` の値、listen の既定の backlog)。backlog を変えたい時は、返った listener で `listen(n)` し直す
-- ソケットを閉じてもファイルは消えない (Python の標準と同じ)。消す時は `sockat.ex.bind` の `file.remove()` か、元のパスで `os.unlink(path)` (unlink には `sun_path` の上限が無い)
+- どのソケットも `socket.socket(AF_UNIX, SOCK_STREAM)` (DGRAM は `SOCK_DGRAM`) で作るので、標準ライブラリと同じ設定になる (close-on-exec、`socket.setdefaulttimeout` の値、listen の既定の backlog)。backlog を変えたい時は、返った listener で `listen(n)` し直す
+- ソケットを閉じてもファイルは消えない (Python の標準ライブラリと同じ)。消す時は `sockat.ex.bind` の `file.remove()` か、元のパスで `os.unlink(path)` (unlink には `sun_path` の上限が無い)
 
 ## connect と connect_nonblocking
 
 振る舞いは仕様の「[ブロックしない connect](https://github.com/kawaz/sockat/blob/main/docs/SPEC-ja.md#ブロックしない-connect)」。Python では:
 
-- `connect` は標準の `connect` と同じく `settimeout` の値に従う
+- `connect` は標準ライブラリの `connect` と同じく `settimeout` の値に従う
 - `connect_nonblocking` は、backlog が満杯なら Linux は `BlockingIOError`、macOS は `ConnectionRefusedError` で待たずに失敗する
 
 ## sockat.datagram
 
-標準の DGRAM のうち、パスを取る関数と、それと組で使う `unbound` だけを写す ([仕様の「関数」](https://github.com/kawaz/sockat/blob/main/docs/SPEC-ja.md#関数))。使い方は [DGRAM を使う](./manual/datagram-ja.md)。
+標準ライブラリの DGRAM の関数のうち、パスを取る物と、それと組で使う `unbound` だけを写す ([仕様の「関数」](https://github.com/kawaz/sockat/blob/main/docs/SPEC-ja.md#関数))。使い方は [DGRAM を使う](./manual/datagram-ja.md)。
 
 - `connect` は渡したソケットで経路を試す。失敗してもソケットは閉じない (閉じるのは利用者)
 - `unbound()` が返すのは `socket.socket` の subclass ([Python に固有の注意](#python-に固有の注意))
@@ -42,7 +42,7 @@ sockat-py の Python での名前と型、使ってはいけない書き方の P
 
 SEQPACKET の関数は無い。resolve の綴りを、自分で作った `socket.socket(AF_UNIX, SOCK_SEQPACKET)` に渡す (使い方は [SEQPACKET を使う](./manual/seqpacket-ja.md))。
 
-- macOS の標準は SEQPACKET のソケットを作れない (`EPROTONOSUPPORT`)
+- macOS の標準ライブラリは SEQPACKET のソケットを作れない (`EPROTONOSUPPORT`)
 - ファイル名が長いと、stream の `sockat.bind` なら届く長さでも、`resolve_for_bind` は `ENAMETOOLONG` になることがある (resolve は綴りを残す経路だけを使う)
 
 ## sockat.ex
@@ -99,7 +99,7 @@ match bound.spelling:
 `Bound.file` は `SocketFile` で、`remove()` と `cleanup()` を持つ。何をするかと約束の範囲は仕様の「[片付け](https://github.com/kawaz/sockat/blob/main/docs/SPEC-ja.md#片付け)」(**`remove()` は listener を閉じる前に呼ぶ**)。Python では:
 
 - 失敗は `OSError` (その errno のサブクラス) で返す。`remove()` で両方が失敗した時は、ファイル側のエラーを返し、`cleanup()` のエラーはその例外の note (`add_note`) に足す
-- 相対パスのまま標準に渡した (`CwdRelative`) `sockat.ex.bind` で、呼び出しの初めと覚えた後で cwd が違えば、errno の無い `OSError`
+- 相対パスのまま標準ライブラリに渡した (`CwdRelative`) `sockat.ex.bind` で、呼び出しの初めと覚えた後で cwd が違えば、errno の無い `OSError`
 - 既定の `sockat.bind` は `file` を返さない。何が残り、長命のプロセスがどう片付けるかは仕様の「[置き場に残る物](https://github.com/kawaz/sockat/blob/main/docs/SPEC-ja.md#置き場に残る物)」
 
 ### 診断とエラー
@@ -122,23 +122,23 @@ match bound.spelling:
 
 ## 相対パス
 
-bind と resolve は相対パスを絶対パスにしてから扱い、connect は相対のまま渡す。手順と標準と違う点は仕様の「[相対パスを絶対パスにする](https://github.com/kawaz/sockat/blob/main/docs/SPEC-ja.md#相対パスを絶対パスにする)」。Python では:
+bind と resolve は相対パスを絶対パスにしてから扱い、connect は相対のまま渡す。手順と標準ライブラリと違う点は仕様の「[相対パスを絶対パスにする](https://github.com/kawaz/sockat/blob/main/docs/SPEC-ja.md#相対パスを絶対パスにする)」。Python では:
 
-- 絶対パスの候補を標準に渡した時は、素の `socket.socket` を返す。`getsockname()` はカーネルが返す候補の綴り (絶対パス)
+- 絶対パスの候補を標準ライブラリに渡した時は、素の `socket.socket` を返す。`getsockname()` はカーネルが返す候補の綴り (絶対パス)
 - 経路に進んだ時は、アドレスを差し替える subclass を返し、`getsockname()` は実パスの候補の形 (ソケットのディレクトリの realpath とファイル名) を返す
-- どの経路も使えずに相対のまま標準に渡した時 (`CwdRelative`) だけ、`getsockname()` が渡した相対パスのまま
+- どの経路も使えずに相対のまま標準ライブラリに渡した時 (`CwdRelative`) だけ、`getsockname()` が渡した相対パスのまま
 - `$PWD` は呼び出しのたびに環境変数から読む
 
 ## Python に固有の注意
 
-- **アドレスは元のパスを返す**: 長いパスでは、カーネルが返すアドレスは bind の綴り (仕様の「[長いパスで標準と違う点](https://github.com/kawaz/sockat/blob/main/docs/SPEC-ja.md#長いパスで標準と違う点)」)。sockat が返すソケットは `socket.socket` の subclass で、listener (と accept したソケット) の `getsockname()` と、connect したソケットの `getpeername()` を元のパスに差し替える (長い絶対パスを実パスの候補で標準に渡した時も。相対パスの bind は [相対パス](#相対パス))。標準のソケットが失敗する所 (閉じた後の `EBADF`、listener の `getpeername` の `ENOTCONN`) は同じく失敗する。短いパスでは素の `socket.socket` ([DR-0003](./decisions/DR-0003-report-the-given-path.md))
+- **アドレスは元のパスを返す**: 長いパスでは、カーネルが返すアドレスは bind の綴り (仕様の「[長いパスで標準ライブラリと違う点](https://github.com/kawaz/sockat/blob/main/docs/SPEC-ja.md#長いパスで標準ライブラリと違う点)」)。sockat が返すソケットは `socket.socket` の subclass で、listener (と accept したソケット) の `getsockname()` と、connect したソケットの `getpeername()` を元のパスに差し替える (長い絶対パスを実パスの候補で標準に渡した時も。相対パスの bind は [相対パス](#相対パス))。標準のソケットが失敗する所 (閉じた後の `EBADF`、listener の `getpeername` の `ENOTCONN`) は同じく失敗する。短いパスでは素の `socket.socket` ([DR-0003](./decisions/DR-0003-report-the-given-path.md))
   - `isinstance(x, socket.socket)` は真だが、長いパスでは `type(x) is socket.socket` は偽
-  - `socket.fromfd` 等で fd から作り直したソケットは標準の型なので、カーネルの綴りを返す
+  - `socket.fromfd` 等で fd から作り直したソケットは標準ライブラリの型なので、カーネルの綴りを返す
 - **`sockat.datagram.unbound()` は subclass を返す**: 後で `sockat.datagram.connect` で長いパスに connect した時に、`getpeername()` を元のパスにするため (bind していないので `getsockname()` はカーネルの値のまま)。短いパスにつなぎ直すと、`getpeername()` はカーネルの値に戻る
 - **asyncio の後始末**: Python 3.13 以降の `asyncio.start_unix_server(sock=)` は、server を閉じる時に listener の `getsockname()` のファイルを消す (`cleanup_socket`)。sockat の listener は元のパスを返すので、短いパスと同じに元のパスのソケットファイルが消える ([asyncio](#asyncio))
-- **`sockat.ex` は別のモジュール**: `_ex` の関数は `sockat.ex` に置き、`import sockat` では読み込まない。`from sockat.ex import connect` と取り込むと、既定の `sockat.connect` や標準の `socket.socket.connect_ex` と紛れる
-- **listener を閉じてもファイルは消えない**: Python の標準は listener を閉じてもソケットのファイルを消さない。sockat も消さない (`sockat.ex.bind` の listener は短いパスでも、消すのは `file.remove()` だけ)
-- **標準の `socket` はパスを NUL で黙って切り詰める**: `socket.bind("/tmp/a\0b")` は `/tmp/a` に bind する (`str` でも `bytes` でも。macOS と Linux の CPython 3.11 で確かめた)。sockat は先頭以外の NUL をどの長さでも `ValueError` にする (Linux の先頭の NUL、abstract namespace は標準にそのまま渡す)
+- **`sockat.ex` は別のモジュール**: `_ex` の関数は `sockat.ex` に置き、`import sockat` では読み込まない。`from sockat.ex import connect` と取り込むと、既定の `sockat.connect` や標準ライブラリの `socket.socket.connect_ex` と紛れる
+- **listener を閉じてもファイルは消えない**: Python の標準ライブラリは listener を閉じてもソケットのファイルを消さない。sockat も消さない (`sockat.ex.bind` の listener は短いパスでも、消すのは `file.remove()` だけ)
+- **標準ライブラリの `socket` はパスを NUL で黙って切り詰める**: `socket.bind("/tmp/a\0b")` は `/tmp/a` に bind する (`str` でも `bytes` でも。macOS と Linux の CPython 3.11 で確かめた)。sockat は先頭以外の NUL をどの長さでも `ValueError` にする (Linux の先頭の NUL、abstract namespace は標準にそのまま渡す)
 - **`os.path.abspath`・`normpath`・`relpath` は `..` を字句で畳む**: `a/sym/../s.sock` (sym は symlink) を、カーネルは symlink の先の親と見るが、これらの関数は `a/s.sock` にする。相対パスを自分で絶対パスにする時は `os.path.join(os.getcwd(), path)` にする。sockat 自身はディレクトリを `os.stat` と `os.path.realpath` (symlink を解いてから `..` を処理する) で引き、`$PWD` からの綴りを字句で畳んだ時は、畳んだディレクトリが元と同じ物と確かめてから使うので、カーネルと同じ所を指す
 
 ## 使ってはいけない書き方
@@ -278,19 +278,19 @@ bound.socket.close()
 
 ## エラー
 
-状況ごとの errno は仕様の「[エラー](https://github.com/kawaz/sockat/blob/main/docs/SPEC-ja.md#エラー)」。sockat は OS のエラーを書き換えないので、OS の errno の値はその OS の標準と同じ。Python での型:
+状況ごとの errno は仕様の「[エラー](https://github.com/kawaz/sockat/blob/main/docs/SPEC-ja.md#エラー)」。sockat は OS のエラーを書き換えないので、OS の errno の値は、その OS で標準ライブラリが返す値と同じ。Python での型:
 
 | 仕様の状況 | Python の型 |
 |---|---|
 | OS のエラー | errno 付きの `OSError` (`FileNotFoundError`・`NotADirectoryError`・`ConnectionRefusedError`・`BlockingIOError`・`PermissionError` 等、その errno のサブクラス) |
 | 引数の誤り (空のパス、先頭以外に NUL、名前で終わらない長いパス、`Options.base` の形の誤り) | `ValueError` |
-| 一般のエラー (relative の途中、または相対パスのまま標準に渡した `sockat.ex.bind` の途中で cwd が変わった) | errno の無い `OSError` |
+| 一般のエラー (relative の途中、または相対パスのまま標準ライブラリに渡した `sockat.ex.bind` の途中で cwd が変わった) | errno の無い `OSError` |
 
 ## asyncio
 
-戻り値は標準の `socket.socket` なので、`sock=` を受け取る API にそのまま渡せる (使い方は [待ち受ける](./manual/bind-ja.md) と [つなぐ](./manual/connect-ja.md))。
+戻り値は標準ライブラリの `socket.socket` なので、`sock=` を受け取る API にそのまま渡せる (使い方は [待ち受ける](./manual/bind-ja.md) と [つなぐ](./manual/connect-ja.md))。
 
-- 引数を足さずに、短いパスと同じに動く。Python 3.13 以降の asyncio は、server を閉じる時に元のパスのソケットファイルを消す。3.11 / 3.12 の asyncio は消さない (標準と同じ)
+- 引数を足さずに、短いパスと同じに動く。Python 3.13 以降の asyncio は、server を閉じる時に元のパスのソケットファイルを消す。3.11 / 3.12 の asyncio は消さない (標準ライブラリと同じ)
 - transport の `get_extra_info('sockname')` (server 側) / `get_extra_info('peername')` (client 側) も元のパス
 - `sockat.ex` の `socket` も同じに渡せる。`file.remove()` は server を閉じる前 (動作中) に呼ぶ
 - `connect_nonblocking` は相手を待たないので、イベントループから直接呼べる。`bind` も相手を待たない (thread-cwd ではスレッドの終わりを待つが、bind してすぐ終わる)

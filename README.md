@@ -4,13 +4,13 @@
 
 A Unix domain socket path is too long to bind / connect. sockat is a Python library that makes that go away.
 
-Give a long path to Python's standard `socket`, and both bind and connect refuse it with this error. asyncio's `start_unix_server(path=...)` and `open_unix_connection(path)` do the same.
+Give a long path to `socket` in Python's standard library, and both bind and connect refuse it with this error. asyncio's `start_unix_server(path=...)` and `open_unix_connection(path)` do the same.
 
 ```text
 OSError: AF_UNIX path too long
 ```
 
-Replace the standard code with sockat, and long paths just work.
+Replace the standard library's calls with sockat's, and long paths just work.
 
 ```python
 import sockat
@@ -26,7 +26,7 @@ server = await asyncio.start_unix_server(handle, sock=sockat.bind(path))
 reader, writer = await asyncio.open_unix_connection(sock=sockat.connect_nonblocking(path))
 ```
 
-You get back the same `socket.socket` as the standard, and short paths go to the standard unchanged, as before. Only for a long path does sockat quietly set up a short way to the same place and connect through it. You don't need to shorten paths yourself or care about each OS's limit.
+You get back the same `socket.socket` as the standard library, and short paths go to the standard library unchanged, as before. Only for a long path does sockat quietly set up a short way to the same place and connect through it. You don't need to shorten paths yourself or care about each OS's limit.
 
 ## Installation
 
