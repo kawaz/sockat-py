@@ -498,12 +498,23 @@ def _g_hook(kind, value, tb):
 _g_sys.excepthook = _g_hook
 try:
     import resource as _g_resource
-    _g_soft, _g_hard = _g_resource.getrlimit(_g_resource.RLIMIT_AS)
-    _g_cap = 1 << 30
-    if _g_hard == _g_resource.RLIM_INFINITY or _g_hard > _g_cap:
-        _g_resource.setrlimit(_g_resource.RLIMIT_AS, (_g_cap, _g_hard))
-except (ImportError, AttributeError, ValueError, OSError):
-    pass
+except ImportError:
+    _g_resource = None
+if _g_resource is not None:
+    for _g_name in ("RLIMIT_AS", "RLIMIT_VMEM", "RLIMIT_DATA"):
+        _g_which = getattr(_g_resource, _g_name, None)
+        if _g_which is None:
+            continue
+        try:
+            _g_soft, _g_hard = _g_resource.getrlimit(_g_which)
+            _g_cap = 1 << 30
+            if _g_hard != _g_resource.RLIM_INFINITY and _g_hard <= _g_cap:
+                break
+            _g_resource.setrlimit(_g_which, (_g_cap, _g_hard))
+            if _g_resource.getrlimit(_g_which)[0] <= _g_cap:
+                break
+        except (ValueError, OSError):
+            continue
 """
 """Code a child runs before it goes into a cwd past PATH_MAX, so that nothing
 there reads the cwd with CPython's ``os.getcwd`` (on illumos, past the first
@@ -512,9 +523,14 @@ docs/research/2026-11-22-cpython-getcwd-over-path-max.md). An uncaught
 exception is written with no import (the default display imports
 ``traceback`` from 3.13 on, and importing looks up ``sys.path``'s ``''``
 with ``os.getcwd``): the frames' files and lines and the exception. The
-address space is capped at 1 GiB where the system lets it be, so that a read
-that does slip through ends in ``MemoryError`` soon rather than using up the
-machine's memory."""
+memory is capped at 1 GiB with the first of ``RLIMIT_AS``, ``RLIMIT_VMEM``,
+``RLIMIT_DATA`` the system has and lowers when asked (one already at 1 GiB or
+less is left as it is; macOS refuses both of its own with ``ValueError``, and the
+child runs uncapped there), so that a read that does slip through ends in
+``MemoryError`` soon rather than using up the machine's memory. On illumos
+the cap is known to work: OmniOS r151060 with Python 3.13.16, a child capped
+at 512 MiB in this order ended in ``MemoryError`` after 54 seconds (the
+research above, 3-2)."""
 
 NO_ROUTE_CODE = """
 from sockat import _absolute as _abs, _calls as _c
