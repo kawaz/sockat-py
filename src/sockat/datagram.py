@@ -1,5 +1,5 @@
 """``SOCK_DGRAM`` Unix domain sockets at paths longer than ``sun_path``: the
-calls of the standard ``UnixDatagram`` that take a path, and
+calls of the standard library's ``SOCK_DGRAM`` sockets that take a path, and
 :func:`unbound` that goes with them (the hub SPEC's ``datagram::``)::
 
     import sockat

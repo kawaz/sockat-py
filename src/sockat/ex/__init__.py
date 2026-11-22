@@ -4,7 +4,7 @@ standard library themselves, and :func:`sweep`.
 
 ``import sockat`` does not import this module: using it is a choice, made by
 importing it. Call it through the module, so that it is not mistaken for
-the plain calls (nor for the standard ``socket.connect_ex``)::
+the plain calls (nor for the standard library's ``socket.connect_ex``)::
 
     import sockat.ex
 
