@@ -36,7 +36,7 @@ sockat-py の Python での名前と型、使ってはいけない書き方の P
 
 - `connect` は渡したソケットで経路を試す。失敗してもソケットは閉じない (閉じるのは利用者)
 - `unbound()` が返すのは `socket.socket` の subclass ([Python に固有の注意](#python-に固有の注意))
-- `send_to` と SEQPACKET はまだ無い (仕様で未確定)
+- `send_to` はまだ無い (仕様で未確定)
 
 ## SEQPACKET
 

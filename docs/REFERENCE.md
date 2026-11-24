@@ -36,7 +36,7 @@ Of the standard library's DGRAM calls, it mirrors only the functions that take a
 
 - `connect` tries the routes with the socket you pass. It does not close the socket on failure (closing it is up to the user)
 - What `unbound()` returns is a subclass of `socket.socket` ([Notes specific to Python](#notes-specific-to-python))
-- `send_to` and SEQPACKET are not there yet (open in the specification)
+- `send_to` is not there yet (open in the specification)
 
 ## SEQPACKET
 
